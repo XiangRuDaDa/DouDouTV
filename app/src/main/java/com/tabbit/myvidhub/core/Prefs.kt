@@ -15,6 +15,8 @@ object Prefs {
     private const val KEY_TMDB_ENABLED = "tmdb_enabled"
     private const val KEY_POSTER_SIZE = "poster_size"
     private const val KEY_TONE_PREFIX = "detail_tone_"
+    private const val KEY_HOME_SOURCE_ID = "home_source_id"
+    private const val KEY_HOME_SITE_KEY = "home_site_key"
 
     /** 缩略图尺寸三档 */
     enum class PosterSize(val mobileDp: Int, val tvDp: Int) {
@@ -91,4 +93,18 @@ object Prefs {
     /** 是否已配置任一 TMDB 凭据 */
     val tmdbConfigured: Boolean
         get() = tmdbApiKey.isNotBlank() || tmdbReadToken.isNotBlank()
+
+    /** 首页选中的加载来源 id；-1 表示「全部来源」 */
+    var homeSourceId: Long
+        get() = sp.getLong(KEY_HOME_SOURCE_ID, -1L)
+        set(value) {
+            sp.edit().putLong(KEY_HOME_SOURCE_ID, value).apply()
+        }
+
+    /** 首页选中的 TVBox 站点 key；空字符串表示「全部站点」 */
+    var homeSiteKey: String
+        get() = sp.getString(KEY_HOME_SITE_KEY, "").orEmpty()
+        set(value) {
+            sp.edit().putString(KEY_HOME_SITE_KEY, value).apply()
+        }
 }

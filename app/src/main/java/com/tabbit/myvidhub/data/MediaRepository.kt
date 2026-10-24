@@ -9,6 +9,7 @@ import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
+import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.data.tmdb.TmdbCache
 import com.tabbit.myvidhub.data.tmdb.TmdbClient
 import com.tabbit.myvidhub.core.Prefs
@@ -309,31 +310,87 @@ class MediaRepository(private val context: Context) {
             if (list.isEmpty()) {
                 throw IllegalStateException("接口未返回任何影片，请确认地址能返回 ac=videolist 的 JSON")
             }
-
-            var count = 0
-            for (vod in list) {
-                val key = tvboxKey(source.id, vod.siteKey, vod.vodId)
-                saveMedia(
-                    MediaEntity(
-                        sourceId = source.id,
-                        uri = "",
-                        remoteId = key,
-                        seriesKey = key,
-                        title = vod.name,
-                        kind = MediaKind.SERIES,
-                        year = vod.year,
-                        overview = vod.content,
-                        posterUrl = vod.pic,
-                        backdropUrl = vod.pic,
-                        rating = vod.score,
-                        genres = vod.typeName
-                    )
-                )
-                count++
-                if (count % 10 == 0) onProgress(count)
-            }
-            count
+            saveTvBoxVods(source, list, onProgress).size
         }
+
+    /** 拉取 TVBox 配置里的站点（线路）列表，供首页线路切换 */
+    suspend fun tvBoxSites(source: SourceEntity): List<TvBoxSite> = withContext(Dispatchers.IO) {
+        if (source.kind != SourceKind.TVBOX) return@withContext emptyList()
+        runCatching { TvBoxClient(source.location, context).availableSites() }.getOrDefault(emptyList())
+    }
+
+    /** 统计某来源下 remoteId 前缀匹配的条目数（判断某 TVBox 站点是否已同步过） */
+    suspend fun countByRemotePrefix(sourceId: Long, prefix: String): Int =
+        mediaDao.countByRemotePrefix(sourceId, prefix)
+
+    /**
+     * 按单个站点（线路）同步首页：切换线路时按需拉取该站点内容入库。
+     * 返回影片列表 + 该线路 homeContent 的分类（class），分类供首页按动态分区展示。
+     */
+    suspend fun syncTvBoxSite(
+        source: SourceEntity,
+        site: TvBoxSite,
+        onProgress: (Int) -> Unit = {}
+    ): TvBoxClient.SiteHomeResult = withContext(Dispatchers.IO) {
+        val client = TvBoxClient(source.location, context)
+        // 不吞异常：把站点加载失败的真实原因（壳初始化超时等）透出到 UI
+        val result = client.siteHome(site)
+        saveTvBoxVods(source, result.vods, onProgress)
+        result
+    }
+
+    /**
+     * 拉取某站点某分类的内容（categoryContent）并入库，返回带 DB id 的实体列表，
+     * 供首页点分类后按分区展示、并能进详情。
+     */
+    suspend fun tvBoxCategory(
+        source: SourceEntity,
+        site: TvBoxSite,
+        typeId: String,
+        page: Int = 1
+    ): List<MediaEntity> = withContext(Dispatchers.IO) {
+        if (source.kind != SourceKind.TVBOX) return@withContext emptyList()
+        val vods = TvBoxClient(source.location, context).categoryContent(site, typeId, page)
+        if (vods.isEmpty()) return@withContext emptyList()
+        saveTvBoxVods(source, vods) {}
+    }
+
+    /** TVBox 列表入库（全站点聚合 / 单站点切换 / 分类内容共用）；返回入库后的实体列表（含 DB id） */
+    private suspend fun saveTvBoxVods(
+        source: SourceEntity,
+        list: List<TvBoxClient.Vod>,
+        onProgress: (Int) -> Unit
+    ): List<MediaEntity> {
+        val saved = ArrayList<MediaEntity>(list.size)
+        var count = 0
+        for (vod in list) {
+            val entity = vodToEntity(source.id, vod)
+            saveMedia(entity)
+            saved += mediaDao.byRemoteId(entity.remoteId) ?: entity
+            count++
+            if (count % 10 == 0) onProgress(count)
+        }
+        return saved
+    }
+
+    /** TVBox 条目 → 剧集壳 MediaEntity（remoteId 带 siteKey，多站点不冲突） */
+    private fun vodToEntity(sourceId: Long, vod: TvBoxClient.Vod): MediaEntity {
+        val key = tvboxKey(sourceId, vod.siteKey, vod.vodId)
+        return MediaEntity(
+            sourceId = sourceId,
+            uri = "",
+            remoteId = key,
+            seriesKey = key,
+            title = vod.name,
+            kind = MediaKind.SERIES,
+            year = vod.year,
+            overview = vod.content,
+            posterUrl = vod.pic,
+            backdropUrl = vod.pic,
+            rating = vod.score,
+            genres = vod.typeName
+        )
+    }
 
     /**
      * 拉取 TVBox 详情并入库分集。

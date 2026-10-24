@@ -2,10 +2,12 @@ package com.tabbit.myvidhub.ui
 
 import android.app.Application
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.data.MediaRepository
@@ -14,9 +16,12 @@ import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
+import com.tabbit.myvidhub.data.tvbox.CatVodResultParser
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
+import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -25,6 +30,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = MediaRepository(app)
 
     val sources: StateFlow<List<SourceEntity>> = repo.observeSources()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 启用中的来源列表（首页来源/线路选择与回退只基于启用来源） */
+    val enabledSources: StateFlow<List<SourceEntity>> = repo.observeSources()
+        .map { list -> list.filter { it.enabled } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val library: StateFlow<List<MediaEntity>> = repo.observeLibrary()
@@ -57,6 +67,49 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     var message by mutableStateOf<String?>(null)
 
+    // ---------- 首页来源 / 站点（线路）选择 ----------
+
+    /** 选中的首页加载来源；null = 未选择（加载时回退到第一个配置的来源） */
+    var homeSourceId by mutableStateOf<Long?>(Prefs.homeSourceId.takeIf { it >= 0 })
+        private set
+
+    /** 选中的 TVBox 站点 key；null = 全部站点 */
+    var homeSiteKey by mutableStateOf<String?>(Prefs.homeSiteKey.takeIf { it.isNotBlank() })
+        private set
+
+    private val _homeSitesBySource = mutableStateMapOf<Long, List<TvBoxSite>>()
+
+    /** 各 TVBox 来源的站点（线路）列表缓存 */
+    val homeSitesBySource: Map<Long, List<TvBoxSite>> get() = _homeSitesBySource
+
+    var homeSitesLoading by mutableStateOf(false)
+        private set
+
+    /** 首页来源/线路加载失败的真实原因，供空状态提示（壳初始化超时等） */
+    var homeSitesError by mutableStateOf<String?>(null)
+        private set
+
+    /** 当前选中 TVBox 站点（线路）homeContent 返回的分类（class 数组）；空表示该线路没有分类 */
+    var homeCategories by mutableStateOf<List<CatVodResultParser.ClassItem>>(emptyList())
+        private set
+
+    /** 当前展开的站点分类 typeId；null = 未选择分类（首页按原来的动态分区展示） */
+    var activeCategoryId by mutableStateOf<String?>(null)
+        private set
+
+    /** 已加载的站点分类内容（typeId → 实体），内存缓存，切分类不重复请求 */
+    private val _categoryVods = mutableStateMapOf<String, List<MediaEntity>>()
+    val categoryVods: Map<String, List<MediaEntity>> get() = _categoryVods
+
+    var categoryLoading by mutableStateOf(false)
+        private set
+
+    var categoryError by mutableStateOf<String?>(null)
+        private set
+
+    /** 当前选中的站点对象（selectHomeSite 时缓存，供 selectHomeCategory 直接用） */
+    private var activeSite: TvBoxSite? = null
+
     /** 当前刮削引擎：启动时判定，设置页改凭据后会刷新 */
     var scrapeEngine by mutableStateOf(ScrapeStrategy.engine)
         private set
@@ -78,6 +131,128 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+        // 恢复上次选中的来源时，预取该 TVBox 来源的站点（线路）列表
+        viewModelScope.launch {
+            homeSourceId?.let { loadHomeSites(it) }
+        }
+        // 从未手动选择过首页来源时，默认按第一个配置的来源加载（选择后才写入 Prefs）
+        viewModelScope.launch {
+            if (Prefs.homeSourceId < 0) {
+                repo.enabledSources().firstOrNull()?.let { selectHomeSource(it.id) }
+            }
+        }
+    }
+
+    // ---------- 首页来源 / 站点（线路）选择 ----------
+
+    fun selectHomeSource(sourceId: Long?) {
+        if (homeSourceId == sourceId) return
+        homeSourceId = sourceId
+        homeSiteKey = null
+        homeSitesError = null
+        homeCategories = emptyList()
+        activeCategoryId = null
+        _categoryVods.clear()
+        categoryError = null
+        activeSite = null
+        Prefs.homeSourceId = sourceId ?: -1L
+        Prefs.homeSiteKey = ""
+        if (sourceId != null) loadHomeSites(sourceId)
+    }
+
+    fun selectHomeSite(siteKey: String?, site: TvBoxSite? = null) {
+        homeSiteKey = siteKey
+        Prefs.homeSiteKey = siteKey.orEmpty()
+        homeSitesError = null
+        // 切线路后重置分类状态
+        homeCategories = emptyList()
+        activeCategoryId = null
+        _categoryVods.clear()
+        categoryError = null
+        activeSite = site
+        val sourceId = homeSourceId ?: return
+        val s = site ?: return
+        // 匿名 CMS 只有一条默认线路（key 为空），无需按需同步
+        if (siteKey.isNullOrBlank()) return
+        viewModelScope.launch {
+            val src = repo.getSource(sourceId) ?: return@launch
+            // 每次切线路都拉一次首页：除了合并影片，更重要的是取 homeContent 的 class 分类
+            try {
+                val result = repo.syncTvBoxSite(src, s)
+                homeCategories = result.categories
+                // 有分类但首页 list 为空（4K/网盘线路常见）不算失败：首页会展示分类入口
+            } catch (e: Exception) {
+                homeSitesError = "线路「${s.name}」加载失败：${e.message ?: "网络或接口异常"}"
+            }
+        }
+    }
+
+    /** 点选站点分类：加载该分类的内容并展开为分区（对应 TVBox 的 categoryContent） */
+    fun selectHomeCategory(typeId: String) {
+        if (activeCategoryId == typeId) return
+        activeCategoryId = typeId
+        categoryError = null
+        if (_categoryVods.containsKey(typeId)) return
+        val sourceId = homeSourceId ?: return
+        val site = activeSite ?: return
+        viewModelScope.launch {
+            categoryLoading = true
+            try {
+                val src = repo.getSource(sourceId) ?: return@launch
+                val items = repo.tvBoxCategory(src, site, typeId)
+                _categoryVods[typeId] = items
+                if (items.isEmpty()) categoryError = "该分类暂无内容"
+            } catch (e: Exception) {
+                categoryError = "分类加载失败：${e.message ?: "网络或接口异常"}"
+            } finally {
+                categoryLoading = false
+            }
+        }
+    }
+
+    private fun loadHomeSites(sourceId: Long) {
+        if (_homeSitesBySource.containsKey(sourceId)) return
+        viewModelScope.launch {
+            homeSitesLoading = true
+            homeSitesError = null
+            val src = repo.getSource(sourceId)
+            _homeSitesBySource[sourceId] = if (src?.kind == SourceKind.TVBOX) {
+                runCatching { repo.tvBoxSites(src) }.getOrElse {
+                    homeSitesError = "获取「${src.name}」线路列表失败：${it.message ?: "网络或接口异常"}"
+                    emptyList()
+                }
+            } else emptyList()
+            homeSitesLoading = false
+            // 冷启动恢复上次选中的线路时，重新拉一次首页分类（分类只在 homeContent 里，重启后需重新获取）
+            if (homeSiteKey != null && activeSite == null) {
+                _homeSitesBySource[sourceId].orEmpty().firstOrNull { it.key == homeSiteKey }?.let {
+                    selectHomeSite(it.key, it)
+                }
+            }
+        }
+    }
+
+    /** 首页内容按「选中的来源 + 站点」过滤；无来源时返回原列表 */
+    fun filterForHome(list: List<MediaEntity>): List<MediaEntity> {
+        val sourceId = effectiveHomeSourceId() ?: return list
+        val siteKey = homeSiteKey
+        return list.filter { item ->
+            item.sourceId == sourceId &&
+                (siteKey == null || homeSiteMatches(item, sourceId, siteKey))
+        }
+    }
+
+    /**
+     * 当前生效的首页来源：手动选择的来源（已删除或已停用则回退），
+     * 从未选择过时默认取第一个启用中的来源。
+     */
+    fun effectiveHomeSourceId(): Long? =
+        homeSourceId?.takeIf { id -> enabledSources.value.any { it.id == id } }
+            ?: enabledSources.value.firstOrNull()?.id
+
+    private fun homeSiteMatches(item: MediaEntity, sourceId: Long, siteKey: String): Boolean {
+        if (siteKey.isBlank()) return true // 匿名 CMS 只有一条默认线路，全部条目归属该线路
+        return item.remoteId.startsWith("tvbox:$sourceId:$siteKey:")
     }
 
     // ---------- 来源管理 ----------

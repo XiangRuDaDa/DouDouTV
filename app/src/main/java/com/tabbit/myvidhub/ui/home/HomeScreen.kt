@@ -11,8 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -20,14 +20,21 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AltRoute
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Source
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -49,6 +56,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +64,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
+import com.tabbit.myvidhub.data.model.SourceEntity
+import com.tabbit.myvidhub.data.model.SourceKind
+import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.ContinueCard
 import com.tabbit.myvidhub.ui.components.HeroBanner
@@ -89,15 +100,29 @@ fun HomeScreen(
     val featured by vm.featured.collectAsStateWithLifecycle()
     val favorites by vm.favorites.collectAsStateWithLifecycle()
     val library by vm.library.collectAsStateWithLifecycle()
+    val sources by vm.enabledSources.collectAsStateWithLifecycle()
 
     val cardWidth = if (isTv) Prefs.posterSize.tvDp.dp else Prefs.posterSize.mobileDp.dp
 
+    // 当前生效的来源：手动选择的来源，未选择（或已删除/停用）时回退到第一个启用中的来源
+    val selectedSource = sources.firstOrNull { it.id == vm.homeSourceId } ?: sources.firstOrNull()
+
+    // 首页内容按选中的来源/站点（线路）过滤；无来源时原样返回
+    val filteredLibrary = remember(library, selectedSource?.id, vm.homeSiteKey) { vm.filterForHome(library) }
+    val filteredFeatured = remember(featured, selectedSource?.id, vm.homeSiteKey) { vm.filterForHome(featured) }
+
     // 优先用有背景图的条目做精选，不足时用有海报的补
-    val heroItems = remember(featured, library) {
-        val primary = featured.filter { it.backdropUrl.isNotBlank() }
+    val heroItems = remember(filteredFeatured, filteredLibrary) {
+        val primary = filteredFeatured.filter { it.backdropUrl.isNotBlank() }
         if (primary.size >= 3) primary.take(6)
-        else (primary + library.filter { it.posterUrl.isNotBlank() }).distinctBy { it.id }.take(6)
+        else (primary + filteredLibrary.filter { it.posterUrl.isNotBlank() }).distinctBy { it.id }.take(6)
     }
+
+    // 来源/站点（线路）选择器数据：选了 TVBox 源且站点列表已拉取 → 顶栏动态显示「线路」按钮
+    val siteList = selectedSource?.id?.let { vm.homeSitesBySource[it] }.orEmpty()
+    val namedSites = siteList.filter { it.key.isNotBlank() }
+    val showLineButton = selectedSource?.kind == SourceKind.TVBOX && namedSites.isNotEmpty()
+    val currentSite = namedSites.firstOrNull { it.key == vm.homeSiteKey }
 
     val listState = rememberLazyListState()
     // 软件名淡出距离：轮播图高度的 ~55%
@@ -130,8 +155,81 @@ fun HomeScreen(
                         onPlay = { onPlay(it) }
                     )
                 }
-            } else if (library.isEmpty()) {
-                item { EmptyState(vm) }
+            } else if (filteredLibrary.isEmpty()) {
+                // 整库为空 → 引导添加来源；库里有内容但当前来源/站点没内容 → 提示同步；
+                // 选了「只有分类没首页影片」的线路时不提示空（分类入口本身就是内容入口）
+                item {
+                    when {
+                        library.isEmpty() -> EmptyState(vm)
+                        vm.homeCategories.isEmpty() -> LineEmptyHint(vm.homeSitesError)
+                    }
+                }
+            }
+
+            // ---------- 站点分类（动态分区入口）：TVBox 线路 homeContent 返回的 class ----------
+            val homeCategories = vm.homeCategories
+            if (homeCategories.isNotEmpty()) {
+                item {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        items(homeCategories, key = { it.typeId }) { cat ->
+                            val selected = vm.activeCategoryId == cat.typeId
+                            FilterChip(
+                                selected = selected,
+                                onClick = { vm.selectHomeCategory(cat.typeId) },
+                                label = { Text(cat.typeName, fontWeight = FontWeight.Medium) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = AppColors.Brand,
+                                    selectedLabelColor = Color.White,
+                                    containerColor = AppColors.SurfaceHi,
+                                    labelColor = AppColors.TextSecondary
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ---------- 展开的站点分类分区：点分类后展示该分类内容（categoryContent） ----------
+            val activeCategory = homeCategories.firstOrNull { it.typeId == vm.activeCategoryId }
+            if (activeCategory != null) {
+                val catItems = vm.categoryVods[activeCategory.typeId].orEmpty()
+                if (vm.categoryLoading && catItems.isEmpty()) {
+                    item {
+                        Box(
+                            Modifier.fillMaxWidth().padding(vertical = 20.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
+                        }
+                    }
+                } else if (catItems.isNotEmpty()) {
+                    item { SectionTitle(activeCategory.typeName, trailing = { CountBadge(catItems.size) }) }
+                    item {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 18.dp),
+                            horizontalArrangement = Arrangement.spacedBy(9.dp)
+                        ) {
+                            items(catItems, key = { "cat_${it.id}" }) { item ->
+                                Box(Modifier.width(cardWidth)) {
+                                    PosterCard(item = item, onClick = { onOpenDetail(item.id) })
+                                }
+                            }
+                        }
+                    }
+                } else if (vm.categoryError != null) {
+                    item {
+                        Text(
+                            vm.categoryError.orEmpty(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AppColors.TextTertiary,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
+                        )
+                    }
+                }
             }
 
             // ---------- 继续观看 ----------
@@ -168,14 +266,14 @@ fun HomeScreen(
 
             // ---------- 动态分区：根据库内实际存在的 kind / genre 渲染 ----------
             DynamicGallerySections(
-                library = library,
+                library = filteredLibrary,
                 cardWidth = cardWidth,
                 onMore = onOpenGenre,
                 onOpenDetail = onOpenDetail
             )
         }
 
-        // ---------- 透明悬浮顶栏（拆成两段：左=软件名单独淡出；右=工具栏常驻无动画） ----------
+        // ---------- 透明悬浮顶栏（左软件名滚动淡出；右工具栏 + 来源/线路按钮常驻） ----------
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -208,11 +306,30 @@ fun HomeScreen(
                 )
                 Text(
                     if (vm.scanning) vm.scanMessage.ifBlank { "同步中…" }
-                    else "${library.size} 个条目 · ${vm.sources.value.size} 个来源",
+                    else "${filteredLibrary.size} 个条目 · ${sources.size} 个来源",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White.copy(alpha = 0.72f)
                 )
             }
+
+            // 来源/线路图标按钮（搜索按钮左侧）＋ 选了 TVBox 源后动态追加的线路按钮
+            if (sources.isNotEmpty()) {
+                HomeSourceSelector(
+                    sources = sources,
+                    selectedId = selectedSource?.id,
+                    onSelect = { vm.selectHomeSource(it) }
+                )
+                Spacer(Modifier.width(10.dp))
+                if (showLineButton) {
+                    HomeLineSelector(
+                        sites = namedSites,
+                        selectedKey = vm.homeSiteKey,
+                        onSelect = { key, site -> vm.selectHomeSite(key, site) }
+                    )
+                    Spacer(Modifier.width(10.dp))
+                }
+            }
+
             // 右侧：搜索/刷新工具栏，常驻不淡出
             IconButton(onClick = onOpenSearch) {
                 Icon(Icons.Filled.Search, contentDescription = "搜索", tint = Color.White)
@@ -383,6 +500,152 @@ private fun EmptyState(vm: LibraryViewModel) {
         Text(
             "当前 ${vm.sources.value.size} 个来源",
             style = MaterialTheme.typography.labelSmall,
+            color = AppColors.TextTertiary
+        )
+    }
+}
+
+/** 顶栏来源按钮：图标样式（与搜索/刷新一致），点击弹出来源选择菜单 */
+@Composable
+private fun HomeSourceSelector(
+    sources: List<SourceEntity>,
+    selectedId: Long?,
+    onSelect: (Long) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Filled.Source, contentDescription = "选择来源", tint = Color.White)
+        }
+        HomePickerMenu(
+            expanded = expanded,
+            onDismiss = { expanded = false }
+        ) {
+            sources.forEach { src ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            src.name,
+                            color = AppColors.TextPrimary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    leadingIcon = if (src.id == selectedId) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, tint = AppColors.Brand) }
+                    } else null,
+                    onClick = {
+                        expanded = false
+                        onSelect(src.id)
+                    }
+                )
+            }
+        }
+    }
+}
+
+/** 顶栏线路（TVBox 站点）按钮：图标样式，点击弹出线路选择菜单 */
+@Composable
+private fun HomeLineSelector(
+    sites: List<TvBoxSite>,
+    selectedKey: String?,
+    onSelect: (String?, TvBoxSite?) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Filled.AltRoute, contentDescription = "选择线路", tint = Color.White)
+        }
+        HomePickerMenu(
+            expanded = expanded,
+            onDismiss = { expanded = false }
+        ) {
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        "全部站点",
+                        color = AppColors.TextPrimary,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                },
+                leadingIcon = if (selectedKey == null) {
+                    { Icon(Icons.Filled.Check, contentDescription = null, tint = AppColors.Brand) }
+                } else null,
+                onClick = {
+                    expanded = false
+                    onSelect(null, null)
+                }
+            )
+            sites.forEach { site ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            site.name,
+                            color = AppColors.TextPrimary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    leadingIcon = if (selectedKey == site.key) {
+                        { Icon(Icons.Filled.Check, contentDescription = null, tint = AppColors.Brand) }
+                    } else null,
+                    onClick = {
+                        expanded = false
+                        onSelect(site.key, site)
+                    }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 选择弹窗容器：固定最大高度 + 纵向滚动，来源/站点再多也不会重叠或超出屏幕。
+ * 内容由调用方以纵向排列的 DropdownMenuItem 提供。
+ */
+@Composable
+private fun HomePickerMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss
+    ) {
+        Column(
+            Modifier
+                .background(AppColors.SurfaceHi, RoundedCornerShape(14.dp))
+                .padding(vertical = 6.dp)
+                .heightIn(max = 240.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            content()
+        }
+    }
+}
+
+/** 库里有内容但当前来源/站点还没同步到内容时的提示；error 非空时把真实失败原因透出 */
+@Composable
+private fun LineEmptyHint(error: String? = null) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(36.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            error ?: "当前来源/站点暂无内容",
+            style = MaterialTheme.typography.titleLarge,
+            color = AppColors.TextPrimary
+        )
+        Text(
+            if (error != null) "点击右上角同步按钮重试，或切换其他来源/线路"
+            else "点击右上角同步按钮拉取该来源的首页内容",
+            style = MaterialTheme.typography.bodyMedium,
             color = AppColors.TextTertiary
         )
     }

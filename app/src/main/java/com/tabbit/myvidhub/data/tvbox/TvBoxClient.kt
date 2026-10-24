@@ -2,6 +2,7 @@ package com.tabbit.myvidhub.data.tvbox
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
@@ -33,6 +34,7 @@ class TvBoxClient(
     /** 用户可能只填了 192.168.1.2:8080 或 example.com/api.php/provide/vod/，这里自动补协议 */
     private val base: String = endpoint.trim()
         .let { if (it.startsWith("http://", true) || it.startsWith("https://", true)) it else "http://$it" }
+        .let { toPunycode(it) }
 
     private val origin: String = base.toHttpUrlOrNull()?.let { url ->
         val defaultPort = if (url.scheme == "https") 443 else 80
@@ -48,14 +50,20 @@ class TvBoxClient(
         .callTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    /** Spider 加载器（type 3 需要 Android Context） */
-    private val spiderLoader: SpiderLoader? = context?.applicationContext?.let { SpiderLoader(it) }
+    /** Spider 加载器（type 3 需要 Android Context；进程级单例，整个 App 只初始化一次） */
+    private val spiderLoader: SpiderLoader? = context?.applicationContext?.let {
+        SpiderLoader.init(it)
+        SpiderLoader
+    }
 
     /** 配置根级别的 spider URL（type 3 共用同一个 JAR） */
     private var configSpiderUrl: String = ""
 
     /** type 3 spider 站点列表 */
     private var spiderSites: List<SpiderSite> = emptyList()
+
+    /** 解析并缓存好的站点（线路）列表，供 UI 展示线路切换 */
+    private var cachedSites: List<TvBoxSite>? = null
 
     data class Vod(
         val vodId: String,
@@ -77,10 +85,109 @@ class TvBoxClient(
     data class PlaySource(val name: String, val episodes: List<Episode>)
     data class Episode(val name: String, val url: String)
 
+    /**
+     * 站点信息（线路）。type 1 = CMS 接口，type 3 = Spider 爬虫。
+     * 由 [availableSites] 从 TVBox 配置解析后暴露给 UI 做线路切换。
+     */
+    data class TvBoxSite(
+        val key: String,
+        val name: String,
+        val type: Int,
+        val api: String = "",
+        val ext: Any? = null
+    )
+
+    /**
+     * 站点首页结果。对应 TVBox spider homeContent 的标准结构：
+     *   {"class":[{type_id,type_name}...], "filters":{...}, "list":[{vod_id,...}...]}
+     * 注意：很多 4K / 网盘类线路首页 list 为空、只有 class —— 这时分类就是全部内容入口，
+     * 不能把「list 空」当成站点失败。
+     */
+    data class SiteHomeResult(
+        val vods: List<Vod>,
+        val categories: List<CatVodResultParser.ClassItem> = emptyList()
+    )
+
     private data class CmsSite(val key: String, val name: String, val api: String)
     private data class SpiderSite(val key: String, val name: String, val api: String, val ext: Any?)
 
     companion object {
+        /**
+         * 中文域名（IDN）→ punycode。
+         * 饭太硬等源常是中文域名（如 www.饭太硬.cc），OkHttp 无法解析中文 host，
+         * 直接请求还会被服务器以 400 拒绝。这里把 host 段转成 xn-- 编码。
+         */
+        fun toPunycode(raw: String): String {
+            val url = raw.trim()
+            if (url.isBlank()) return url
+            return try {
+                val uri = java.net.URI(url)
+                val host = uri.host ?: return url
+                val ascii = java.net.IDN.toASCII(host)
+                if (ascii == host) url
+                else {
+                    // 只替换 host 段：重新拼 scheme://asciiHost[:port]/path[?query]
+                    val scheme = uri.scheme + "://"
+                    val port = uri.port.takeIf { it > 0 }?.let { ":$it" }.orEmpty()
+                    val rest = url.substringAfter(host).let { r ->
+                        val slash = r.indexOf('/')
+                        if (slash >= 0) r.substring(slash) else ""
+                    }
+                    scheme + ascii + port + rest
+                }
+            } catch (e: Exception) {
+                url
+            }
+        }
+
+        /**
+         * 反爬伪装响应解析。
+         * 饭太硬等源对 okhttp UA 返回 JPEG 图片，图片末尾（FFD9 之后）嵌入
+         * Base64 编码的 TVBox 配置 JSON。此函数从图片字节里提取并解码。
+         * 若 body 本身是合法 JSON 则直接解析。
+         */
+        fun parseConfigJson(body: String): JSONObject? {
+            // 直接就是 JSON
+            runCatching { return JSONObject(body) }.getOrNull()
+
+            // 伪装：JPEG/BMP 图片末尾嵌入 Base64。Base64 解码后可能是明文 JSON
+            // 或 gzip/zlib 压缩的 JSON（饭太硬当前是明文 base64）。
+            val b64Candidate = extractBase64FromBinary(body)
+            if (b64Candidate != null) {
+                runCatching {
+                    val bytes = android.util.Base64.decode(b64Candidate, android.util.Base64.DEFAULT)
+                    // 先试明文
+                    runCatching { JSONObject(String(bytes, Charsets.UTF_8)) }.getOrNull()?.let { return it }
+                    // 再试 gzip
+                    runCatching {
+                        val gz = java.util.zip.GZIPInputStream(bytes.inputStream()).readBytes()
+                        JSONObject(String(gz, Charsets.UTF_8))
+                    }.getOrNull()?.let { return it }
+                    // 最后试 zlib
+                    runCatching {
+                        val inflater = java.util.zip.Inflater()
+                        val out = java.io.ByteArrayOutputStream()
+                        val inflaterStream = java.util.zip.InflaterInputStream(bytes.inputStream(), inflater)
+                        inflaterStream.copyTo(out)
+                        JSONObject(String(out.toByteArray(), Charsets.UTF_8))
+                    }.getOrNull()?.let { return it }
+                }
+            }
+            return null
+        }
+
+        /** 从二进制文本里提取最长的 Base64 片段（图片元数据里的杂字符会被过滤掉） */
+        private fun extractBase64FromBinary(text: String): String? {
+            // 用正则找连续 base64 字符段（长度 >= 64 才可能是真 payload）
+            val matcher = Regex("[A-Za-z0-9+/]{32,}={0,2}").findAll(text)
+            var best: String? = null
+            for (m in matcher) {
+                val candidate = m.value
+                if (best == null || candidate.length > best.length) best = candidate
+            }
+            return best
+        }
+
         /** CatVodResultParser 可调用的 URL 归一化（顶级函数，无 origin 上下文做相对 → 绝对转换） */
         internal fun AbsoluteUrl(raw: String): String {
             val url = raw.trim()
@@ -102,7 +209,8 @@ class TvBoxClient(
     // ---------- HTTP ----------
 
     private fun requestJson(baseUrl: String, params: Map<String, String>): JSONObject {
-        val url = baseUrl.toHttpUrlOrNull()?.newBuilder()?.apply {
+        val punyBase = toPunycode(baseUrl)
+        val url = punyBase.toHttpUrlOrNull()?.newBuilder()?.apply {
             params.forEach { (k, v) -> addQueryParameter(k, v) }
         }?.build() ?: throw IllegalStateException("接口地址无效：$baseUrl（需以 http:// 或 https:// 开头）")
 
@@ -119,9 +227,9 @@ class TvBoxClient(
                     throw IllegalStateException("接口返回 HTTP ${response.code}：$baseUrl")
                 }
                 if (body.isBlank()) throw IllegalStateException("接口返回内容为空：$baseUrl")
-                return runCatching { JSONObject(body) }.getOrElse {
-                    throw IllegalStateException("接口返回的不是 JSON：$baseUrl（请确认填的是 CMS 接口或 TVBox 配置地址）")
-                }
+                return parseConfigJson(body) ?: throw IllegalStateException(
+                    "接口返回的不是 JSON：$baseUrl（请确认填的是 CMS 接口或 TVBox 配置地址）"
+                )
             }
         } catch (e: IllegalStateException) {
             throw e
@@ -197,23 +305,105 @@ class TvBoxClient(
         emptyList()
     }
 
+    /**
+     * 当前配置的站点（线路）列表。
+     * · TVBox 配置 JSON：返回 type=1 CMS + type=3 Spider 全部站点
+     * · 普通 CMS 接口：返回单条「默认线路」
+     * 结果缓存，重复调用不会重复请求。
+     */
+    suspend fun availableSites(): List<TvBoxSite> = withContext(Dispatchers.IO) {
+        cachedSites?.let { return@withContext it }
+        val raw = runCatching { requestRaw(base) }.getOrNull()
+        if (raw == null || raw.length() == 0) return@withContext emptyList()
+        val sites = if (raw.has("sites")) {
+            parseCmsSites(raw).map { TvBoxSite(it.key, it.name, 1, it.api) } +
+                parseSpiderSites(raw).map { TvBoxSite(it.key, it.name, 3, it.api, it.ext) }
+        } else {
+            // 普通 CMS 接口：整个源就是一条线路
+            listOf(TvBoxSite("", "默认线路", 1, base))
+        }
+        cachedSites = sites
+        sites
+    }
+
+    /**
+     * 只拉某个站点（线路）的首页列表。
+     * 用户切换线路时按需调用，避免每次都聚合全部站点。
+     * 返回影片列表 + 该线路 homeContent 的分类（class 数组），供 UI 按动态分区展示。
+     */
+    suspend fun siteHome(site: TvBoxSite, limit: Int = 100): SiteHomeResult = withContext(Dispatchers.IO) {
+        if (site.type == 3) {
+            val loader = spiderLoader ?: return@withContext SiteHomeResult(emptyList())
+            if (configSpiderUrl.isBlank()) {
+                configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+            }
+            if (configSpiderUrl.isBlank()) return@withContext SiteHomeResult(emptyList())
+            val merged = LinkedHashMap<String, Vod>()
+            val categories = try {
+                loadSpiderHome(listOf(SpiderSite(site.key, site.name, site.api, site.ext)), merged, limit)
+            } catch (e: Exception) {
+                // 不再吞异常：把壳初始化/爬虫调用的真实原因透出到 UI（否则切线路静默失败、内容不变）
+                throw IllegalStateException("站点「${site.name}」爬取失败：${e.message ?: e.javaClass.simpleName}")
+            }
+            return@withContext SiteHomeResult(merged.values.take(limit).toList(), categories)
+        }
+        // type 1 CMS 站点
+        val json = runCatching {
+            requestJson(site.api.ifBlank { base }, mapOf("ac" to "videolist", "pg" to "1"))
+        }.getOrNull() ?: return@withContext SiteHomeResult(emptyList())
+        SiteHomeResult(parseList(responseList(json), site.key, site.name).take(limit))
+    }
+
+    /**
+     * 站点分类内容（对应 TVBox 点分类后调 categoryContent 的分页）。
+     * type 3 → spider.categoryContent(tid, pg, filter, extend)；
+     * type 1 → CMS 接口 ac=videolist&t=typeId。
+     */
+    suspend fun categoryContent(site: TvBoxSite, typeId: String, page: Int = 1): List<Vod> =
+        withContext(Dispatchers.IO) {
+            if (site.type == 3) {
+                val loader = spiderLoader ?: return@withContext emptyList()
+                if (configSpiderUrl.isBlank()) {
+                    configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+                }
+                if (configSpiderUrl.isBlank()) return@withContext emptyList()
+                val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull()
+                    ?: return@withContext emptyList()
+                val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: return@withContext emptyList()
+                val json = proxy.categoryContent(typeId, page.toString(), filter = true, extend = null)
+                    ?: return@withContext emptyList()
+                return@withContext CatVodResultParser.parseVodList(json, site.key, site.name)
+            }
+            // type 1 CMS 站点
+            val json = requestJson(
+                site.api.ifBlank { base },
+                mapOf("ac" to "videolist", "t" to typeId, "pg" to page.toString())
+            )
+            parseList(responseList(json), site.key, site.name)
+        }
+
     /** 不带参数的原始请求，用来判断 URL 类型（CMS 还是 TVBox 配置） */
     private fun requestRaw(rawUrl: String): JSONObject {
-        val request = Request.Builder().url(rawUrl).get().build()
+        val punyUrl = toPunycode(rawUrl)
+        val request = Request.Builder()
+            .url(punyUrl)
+            .header("User-Agent", "okhttp/3.12.0")
+            .get()
+            .build()
         return runCatching {
             http.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
-                JSONObject(body)
+                parseConfigJson(body) ?: JSONObject()
             }
         }.getOrNull() ?: JSONObject()
     }
 
-    /** type 3 spider 站点首页聚合 */
+    /** type 3 spider 站点首页聚合；返回各站点 homeContent 的 class（分类）数组 */
     private suspend fun loadSpiderHome(
         sites: List<SpiderSite>,
         merged: LinkedHashMap<String, Vod>,
         limit: Int
-    ) = withContext(Dispatchers.IO) {
+    ): List<CatVodResultParser.ClassItem> = withContext(Dispatchers.IO) {
         val loader = spiderLoader ?: throw IllegalStateException("缺少 Android Context，无法加载爬虫")
         val loaderKey = try {
             loader.ensureLoaded(configSpiderUrl)
@@ -222,27 +412,40 @@ class TvBoxClient(
         }
 
         val reasons = ArrayList<String>()
+        val categories = ArrayList<CatVodResultParser.ClassItem>()
         for (site in sites.take(4)) {
             if (merged.size >= limit) break
             val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: run {
                 reasons += "${site.name}: ${loader.lastError}"
                 null
             } ?: continue
-            val json = proxy.homeContent(filter = true) ?: run {
+            // 壳本地代理冷启动需要时间，首次 homeContent 失败/为空后按 2s/4s/8s 递增重试
+            var json: String? = proxy.homeContent(filter = true)
+            var retries = 0
+            while (json.isNullOrEmpty() && retries < 3) {
+                retries++
+                delay(2000L * retries)
+                json = proxy.homeContent(filter = true)
+            }
+            json ?: run {
                 reasons += "${site.name}: homeContent 返回空"
                 null
             } ?: continue
-            val list = CatVodResultParser.parseVodList(json, site.key, site.name)
-            if (list.isEmpty()) reasons += "${site.name}: homeContent 无影片"
+            // 分类（class）：即使 list 为空、只有分类，站点也「有数据」，UI 可按分类分区浏览
+            categories += CatVodResultParser.parseClasses(json!!)
+            val list = CatVodResultParser.parseVodList(json!!, site.key, site.name)
+            if (list.isEmpty() && categories.isEmpty()) reasons += "${site.name}: homeContent 无影片"
             list.forEach { merged["${site.key}:${it.vodId}"] = it }
         }
 
-        if (merged.isEmpty()) {
+        // 只有 list 和 class 都为空才判失败；有分类就足够支撑 UI 展示了
+        if (merged.isEmpty() && categories.isEmpty()) {
             throw IllegalStateException(
                 if (reasons.isEmpty()) "该配置的爬虫站点没有返回任何影片"
                 else "爬虫站点均无数据：${reasons.take(3).joinToString("；")}"
             )
         }
+        categories
     }
 
     suspend fun category(typeId: String, page: Int = 1): List<Vod> = withContext(Dispatchers.IO) {

@@ -96,6 +96,10 @@ interface MediaDao {
     @Query("SELECT COUNT(*) FROM media WHERE sourceId = :sourceId")
     suspend fun countBySource(sourceId: Long): Int
 
+    /** 统计某来源下 remoteId 前缀匹配的条目数（判断某 TVBox 站点是否已同步过） */
+    @Query("SELECT COUNT(*) FROM media WHERE sourceId = :sourceId AND remoteId LIKE :prefix")
+    suspend fun countByRemotePrefix(sourceId: Long, prefix: String): Int
+
     @Query("SELECT COUNT(*) FROM media")
     suspend fun countAll(): Int
 
