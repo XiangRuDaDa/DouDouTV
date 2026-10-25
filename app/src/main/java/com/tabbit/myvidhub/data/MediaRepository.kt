@@ -59,7 +59,42 @@ class MediaRepository(private val context: Context) {
     suspend fun byRemoteId(remoteId: String): MediaEntity? = mediaDao.byRemoteId(remoteId)
     suspend fun episodes(seriesKey: String): List<MediaEntity> = mediaDao.episodes(seriesKey)
     suspend fun seasons(seriesKey: String): List<Int> = mediaDao.seasons(seriesKey)
+
+    /** TVBox 多播放源：取某剧的全部播放源（云盘/线路）名称，按入库顺序 */
+    suspend fun playSourcesOf(seriesKey: String): List<String> = mediaDao.playSourcesOf(seriesKey)
+
+    /** TVBox 多播放源：取某剧指定播放源下的分集 */
+    suspend fun episodesBySource(seriesKey: String, playSource: String): List<MediaEntity> =
+        mediaDao.episodesBySource(seriesKey, playSource)
     suspend fun hasAnyMedia(): Boolean = mediaDao.countAll() > 0
+
+    /**
+     * 解析 TVBox 云盘播放地址。
+     *
+     * 云盘 scheme 地址（quark://、aliyundrive:// 等）不是视频直链，
+     * 播放器启动前需调用 spider 的 playerContent 解析出真实 URL 及请求头。
+     *
+     * @param episode 分集实体（需包含 sourceId、seriesKey、playSource、uri）
+     * @return 解析结果（URL + headers）；非云盘地址返回 uri 且 headers 为空
+     */
+    suspend fun resolveTvBoxPlayUrl(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl = withContext(Dispatchers.IO) {
+        val source = sourceDao.get(episode.sourceId)
+            ?: return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
+        if (source.kind != SourceKind.TVBOX) return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
+
+        // 云盘 scheme（非 http/https）才需要解析
+        val uri = episode.uri
+        if (uri.startsWith("http://") || uri.startsWith("https://")) {
+            return@withContext TvBoxClient.ResolvedPlayUrl(uri)
+        }
+
+        // episode.seriesKey = tvbox:sourceId:siteKey:vodId
+        val (siteKey, _) = parseTvBoxKey(episode.sourceId, episode.seriesKey)
+        val vipFlags = mediaDao.playSourcesOf(episode.seriesKey)
+
+        val client = TvBoxClient(source.location, context)
+        client.resolvePlayUrl(siteKey, episode.playSource, uri, vipFlags)
+    }
 
     // ---------------- 首页分类 / 浏览页 ----------------
 
@@ -420,25 +455,34 @@ class MediaRepository(private val context: Context) {
             )
         }
 
-        // 取第一条可用线路入库
-        val primary = detail.playSources.firstOrNull() ?: return@withContext detail.playSources
+        // 把所有播放源（云盘/线路）的分集都入库，每条源用 playSource 字段标记。
+        // 详情页据此展示「云盘切换」选项，默认选第一条源。
+        if (detail.playSources.isEmpty()) return@withContext emptyList()
 
-        primary.episodes.forEachIndexed { index, ep ->
-            saveMedia(
-                MediaEntity(
-                    sourceId = source.id,
-                    uri = ep.url,
-                    remoteId = "$remoteId:$index",
-                    seriesKey = seriesKey,
-                    title = ep.name,
-                    kind = MediaKind.EPISODE,
-                    season = 1,
-                    episode = index + 1,
-                    overview = detail.content,
-                    posterUrl = detail.pic,
-                    backdropUrl = detail.pic
+        // 清掉该剧之前入库的分集（避免旧源残留），再按最新详情全量写入。
+        // loadTvBoxDetail 只在分集为空时触发，这里通常删不到东西；仅为重入时去重。
+        mediaDao.deleteEpisodesBySeriesKey(seriesKey)
+
+        detail.playSources.forEachIndexed { sourceIndex, src ->
+            src.episodes.forEachIndexed { epIndex, ep ->
+                saveMedia(
+                    MediaEntity(
+                        sourceId = source.id,
+                        uri = ep.url,
+                        // remoteId 带上源下标，保证不同云盘的同一集不冲突
+                        remoteId = "$remoteId:$sourceIndex:$epIndex",
+                        seriesKey = seriesKey,
+                        title = ep.name,
+                        kind = MediaKind.EPISODE,
+                        season = 1,
+                        episode = epIndex + 1,
+                        overview = detail.content,
+                        posterUrl = detail.pic,
+                        backdropUrl = detail.pic,
+                        playSource = src.name
+                    )
                 )
-            )
+            }
         }
 
         detail.playSources

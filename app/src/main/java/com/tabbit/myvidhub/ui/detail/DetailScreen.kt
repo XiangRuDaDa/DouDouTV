@@ -113,6 +113,12 @@ fun DetailScreen(
     var loading by remember { mutableStateOf(true) }
     var selectedSeason by remember { mutableStateOf(0) }
 
+    /** TVBox 多播放源（云盘/线路）：全部可选源 + 当前选中的源名 */
+    var playSources by remember { mutableStateOf<List<String>>(emptyList()) }
+    var selectedPlaySource by remember { mutableStateOf<String>("") }
+
+    val scope = rememberCoroutineScope()
+
     /** Emby 刮削信息（导演/演员/分级/工作室） */
     var scraped by remember { mutableStateOf<EmbyClient.ItemDetail?>(null) }
 
@@ -191,17 +197,26 @@ fun DetailScreen(
                     when (src?.kind) {
                         SourceKind.TVBOX -> {
                             vm.loadTvBoxDetail(m.sourceId, m.remoteId)
-                            eps = vm.episodesOf(m.seriesKey)
                             media = vm.mediaOf(mediaId) ?: m
                         }
                         SourceKind.EMBY -> {
                             if (vm.loadEmbyEpisodes(m.sourceId, m.remoteId)) {
-                                eps = vm.episodesOf(m.seriesKey)
                                 media = vm.mediaOf(mediaId) ?: m
                             }
                         }
                         null -> Unit
                     }
+                }
+
+                // TVBox：读取全部播放源（云盘/线路），默认选第一条；按选中源过滤分集。
+                // Emby 没有多源概念，playSources 为空、走原来的全量分集。
+                val sources = vm.playSourcesOf(m.seriesKey)
+                playSources = sources
+                if (sources.isNotEmpty()) {
+                    if (selectedPlaySource !in sources) selectedPlaySource = sources.first()
+                    eps = vm.episodesBySource(m.seriesKey, selectedPlaySource)
+                } else {
+                    eps = vm.episodesOf(m.seriesKey)
                 }
 
                 episodes = eps
@@ -658,6 +673,37 @@ fun DetailScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AppColors.TextTertiary
                             )
+                        }
+                    }
+
+                    // ---------- 播放源 / 云盘切换 ----------
+                    // 同一部剧有多条云盘时，展示为横向可选 chips；默认第一条，点击切换该源的分集。
+                    if (playSources.size > 1) {
+                        item {
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                items(playSources) { src ->
+                                    FilterChip(
+                                        selected = selectedPlaySource == src,
+                                        onClick = {
+                                            selectedPlaySource = src
+                                            scope.launch {
+                                                episodes = vm.episodesBySource(item.seriesKey, src)
+                                                selectedSeason = episodes.firstOrNull()?.season ?: 1
+                                            }
+                                        },
+                                        label = { Text(src, maxLines = 1) },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = AppColors.Brand,
+                                            selectedLabelColor = Color.White,
+                                            containerColor = AppColors.SurfaceHi,
+                                            labelColor = AppColors.TextSecondary
+                                        )
+                                    )
+                                }
+                            }
                         }
                     }
 

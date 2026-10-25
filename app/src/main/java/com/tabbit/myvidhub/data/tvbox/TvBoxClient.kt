@@ -1,6 +1,7 @@
 package com.tabbit.myvidhub.data.tvbox
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -516,24 +517,129 @@ class TvBoxClient(
         val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull() ?: return null
         val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: return null
         val json = proxy.detailContent(listOf(vodId)) ?: return null
+        Log.d("SpiderProxy", "detailContent($vodId) raw = $json")
         val vod = CatVodResultParser.parseDetail(json, site.key, site.name) ?: return null
 
-        // 如果 playSources 里的播放地址不是 http 直链，还需要 playerContent 解析
-        val needsResolve = vod.playSources.any { it.episodes.any { ep ->
-            !ep.url.startsWith("http://") && !ep.url.startsWith("https://")
-        } }
-        if (needsResolve) {
-            vod.playSources = vod.playSources.map { src ->
-                src.copy(episodes = src.episodes.map { ep ->
-                    val resolved = runCatching {
-                        val pcJson = proxy.playerContent(src.name, ep.url, emptyList())
-                        pcJson?.let { CatVodResultParser.parsePlayer(it) }?.url ?: ep.url
-                    }.getOrDefault(ep.url)
-                    ep.copy(url = resolved)
-                })
-            }
-        }
+        // 注意：不再在这里对所有非 http 地址统一调 playerContent 解析。
+        // 网盘线路一部剧动辄几十上百集、多条云盘，逐个 playerContent 会让详情加载卡死。
+        // 云盘 scheme 地址（quark://、aliyundrive:// 等）原样保留，播放时再按需解析。
         return vod
+    }
+
+    /** playerContent 解析结果：视频直链 + 所需 HTTP 请求头 */
+    data class ResolvedPlayUrl(val url: String, val headers: Map<String, String> = emptyMap())
+
+    /**
+     * 解析云盘播放地址。
+     *
+     * 云盘 scheme 地址（quark://、aliyundrive://、uc:// 等）不是视频直链，
+     * 必须调用 spider 的 playerContent(flag, id, vipFlags) 才能拿到真实可播放的 URL。
+     * 返回结果同时包含 URL 和所需 HTTP 请求头（如 Cookie、Referer 等）。
+     *
+     * @param siteKey    站点 key（用于定位 spider 站点）
+     * @param playSource 播放源名称（即 vod_play_from，如「夸克网盘」），作为 playerContent 的 flag
+     * @param cloudUrl   云盘原始地址（作为 playerContent 的 id）
+     * @param vipFlags   全部播放源名称列表（playerContent 的 vipFlags）
+     * @return 解析结果（URL + headers）；解析失败抛异常
+     */
+    suspend fun resolvePlayUrl(
+        siteKey: String,
+        playSource: String,
+        cloudUrl: String,
+        vipFlags: List<String>
+    ): ResolvedPlayUrl = withContext(Dispatchers.IO) {
+        val root = runCatching { requestRaw(base) }.getOrNull()
+        val spSites = root?.let { parseSpiderSites(it) } ?: spiderSites
+        if (configSpiderUrl.isBlank()) {
+            configSpiderUrl = root?.optString("spider").orEmpty()
+        }
+        if (configSpiderUrl.isBlank()) throw IllegalStateException("spider 配置缺失")
+
+        val site = if (siteKey.isNotBlank()) {
+            spSites.firstOrNull { it.key == siteKey }
+        } else {
+            spSites.firstOrNull()
+        } ?: throw IllegalStateException("未找到 spider 站点：$siteKey")
+
+        val loader = spiderLoader ?: throw IllegalStateException("SpiderLoader 不可用")
+        val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull()
+            ?: throw IllegalStateException("spider JAR 加载失败")
+        val proxy = loader.getSpider(loaderKey, site.api, site.ext)
+            ?: throw IllegalStateException("spider 实例创建失败：${site.api}")
+
+        val json = proxy.playerContent(playSource, cloudUrl, vipFlags)
+            ?: throw IllegalStateException("playerContent 返回空")
+
+        val resolved = parsePlayerContentResult(json)
+        // 分两行打，避免 logcat 单行截断看不到 URL
+        Log.d("SpiderProxy", "playerContent($playSource) → url=${resolved.url}")
+        Log.d("SpiderProxy", "playerContent($playSource) → headers=${resolved.headers.keys}")
+        resolved
+    }
+
+    /**
+     * 解析 playerContent 返回的 JSON，提取真实视频 URL 及请求头。
+     *
+     * 标准格式：{"parse":0,"url":"https://...","header":"{\"Cookie\":\"...\"}"}
+     * header 可能是 JSON 对象，也可能是 JSON 字符串（需二次解析）。
+     * 错误格式：{"list":[],"msg":"[quark](auth) 还没有配置夸克 Cookie...","parse":0}
+     *
+     * 特殊处理：部分 spider 的 playerContent 返回的 url 指向本地 Go 代理
+     * （形如 http://127.0.0.1:<port>/kaiser?url=<CDN_URL>），而 Go 代理的 /kaiser
+     * 端点不支持 HTTP Range 请求，ExoPlayer 播放时会 EOF。
+     * 此时从 url 参数提取真实 CDN 直链直接播放，CDN 原生支持 Range。
+     *
+     * @throws IllegalStateException 解析失败（含 spider 返回的错误信息）
+     */
+    private fun parsePlayerContentResult(json: String): ResolvedPlayUrl {
+        val obj = JSONObject(json)
+        val rawUrl = obj.optString("url").takeIf { it.isNotBlank() }
+        if (rawUrl == null) {
+            val msg = obj.optString("msg").takeIf { it.isNotBlank() }
+                ?: obj.optString("message").takeIf { it.isNotBlank() }
+                ?: "playerContent 未返回视频地址"
+            throw IllegalStateException(msg)
+        }
+        val headers = parseHeaders(obj.opt("header"))
+        val url = unwrapLocalProxyUrl(rawUrl)
+        return ResolvedPlayUrl(url, headers)
+    }
+
+    /**
+     * 若 url 是本地代理转发地址（http://127.0.0.1:port/xxx?url=<CDN_URL>），
+     * 提取并返回真实 CDN 直链；否则原样返回。
+     */
+    private fun unwrapLocalProxyUrl(url: String): String {
+        if (!url.startsWith("http://127.0.0.1:") && !url.startsWith("http://localhost:")) {
+            return url
+        }
+        return runCatching {
+            val uri = android.net.Uri.parse(url)
+            val cdnUrl = uri.getQueryParameter("url")
+            if (cdnUrl.isNullOrBlank()) url else cdnUrl
+        }.getOrDefault(url)
+    }
+
+    /**
+     * 解析 playerContent 返回的 header 字段。
+     * header 可能是 JSONObject，也可能是 JSON 字符串（夸克等网盘通常返回字符串形式）。
+     */
+    private fun parseHeaders(headerAny: Any?): Map<String, String> {
+        if (headerAny == null) return emptyMap()
+        return runCatching {
+            val headerObj = when (headerAny) {
+                is JSONObject -> headerAny
+                is String -> if (headerAny.isNotBlank()) JSONObject(headerAny) else return emptyMap()
+                else -> return emptyMap()
+            }
+            val out = mutableMapOf<String, String>()
+            val keys = headerObj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                out[k] = headerObj.optString(k)
+            }
+            out
+        }.getOrDefault(emptyMap())
     }
 
     suspend fun categories(): List<Pair<String, String>> = withContext(Dispatchers.IO) {
@@ -637,13 +743,13 @@ class TvBoxClient(
             val episodes = group.split('#').mapIndexedNotNull episode@{ idx, piece ->
                 if (piece.isBlank()) return@episode null
                 val sep = piece.indexOf('$')
+                // 保留所有 URL（含云盘 scheme），不再用 absolutePlayUrl 过滤非 http 地址，
+                // 否则网盘线路的分集会全部丢失。
                 if (sep < 0) {
-                    val url = absolutePlayUrl(piece.trim()) ?: return@episode null
-                    Episode("正片", url)
+                    Episode("正片", absoluteUrl(piece.trim()))
                 } else {
                     val name = piece.substring(0, sep).trim().ifBlank { "第${idx + 1}集" }
-                    val url = absolutePlayUrl(piece.substring(sep + 1).trim())
-                        ?: return@episode null
+                    val url = absoluteUrl(piece.substring(sep + 1).trim())
                     Episode(name, url)
                 }
             }
@@ -652,10 +758,6 @@ class TvBoxClient(
             PlaySource(name, episodes)
         }
     }
-
-    /** 只保留 http(s) 直链线路，避免把迅雷/磁力等客户端专用协议塞给 ExoPlayer */
-    private fun absolutePlayUrl(raw: String): String? =
-        absoluteUrl(raw).takeIf { it.startsWith("http://") || it.startsWith("https://") }
 
     /** 兼容 //host/x、/path/x 这类相对地址 */
     private fun absoluteUrl(raw: String): String {

@@ -527,6 +527,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun episodesOf(seriesKey: String): List<MediaEntity> = repo.episodes(seriesKey)
     suspend fun seasonsOf(seriesKey: String): List<Int> = repo.seasons(seriesKey)
+
+    /** TVBox 多播放源：某剧的全部云盘/线路名称 */
+    suspend fun playSourcesOf(seriesKey: String): List<String> = repo.playSourcesOf(seriesKey)
+
+    /** TVBox 多播放源：某剧指定云盘/线路下的分集 */
+    suspend fun episodesBySource(seriesKey: String, playSource: String): List<MediaEntity> =
+        repo.episodesBySource(seriesKey, playSource)
     suspend fun mediaOf(id: Long): MediaEntity? = repo.getMedia(id)
     suspend fun sourceOf(id: Long): SourceEntity? = repo.getSource(id)
 

@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -65,6 +66,7 @@ import com.tabbit.myvidhub.R
 import com.tabbit.myvidhub.data.MediaRepository
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
+import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
@@ -91,6 +93,10 @@ class PhonePlayerActivity : ComponentActivity() {
 
     private var player: ExoPlayer? = null
     private var playerView: PlayerView? = null
+    /** 基础请求头（如 Emby 的 X-Emby-Authorization），同一次播放会话内不变 */
+    private var baseHeaders: Map<String, String> = emptyMap()
+    /** 当前播放器实际使用的 HTTP 请求头（baseHeaders + 云盘解析出的 headers），切换源时需重建播放器 */
+    private var currentPlayHeaders: Map<String, String> = emptyMap()
     private var current: MediaEntity? = null
     private var lastSavedAt = 0L
 
@@ -451,37 +457,75 @@ class PhonePlayerActivity : ComponentActivity() {
             return
         }
 
-        // 必须先释放旧 player 再创建新的 —— SimpleCache 单例同一时刻只能被一个 player 引用，
-        // 否则会抛 IllegalStateException 或出现 BAD_HTTP_STATUS 等奇怪症状
-        player?.release()
-        player = null
+        // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头，再创建播放器
+        lifecycleScope.launch {
+            val resolved = resolvePlayUrl(item)
+                ?: return@launch // 失败时 toastState 已在 resolvePlayUrl 内设置
 
-        val p = PlayerFactory.createPhonePlayer(this, headers)
-        player = p
-        playerView?.player = p
-        // 进入页面直接播放，不展示控制条 —— 用户触摸/按键时 Media3 会自动 showController
-        playerView?.controllerAutoShow = false
-        playerView?.hideController()
+            Log.d("PhonePlayer", "startPlayback url=${resolved.url.take(120)}")
+            Log.d("PhonePlayer", "startPlayback headers=${resolved.headers.map { "${it.key}=${it.value.take(30)}..." }}")
 
-        p.addListener(object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_ENDED) playNext()
+            // 必须先释放旧 player 再创建新的 —— SimpleCache 单例同一时刻只能被一个 player 引用
+            player?.release()
+            player = null
+
+            // baseHeaders 是本次播放会话的固定头（如 Emby 鉴权），后续切集时复用
+            baseHeaders = headers
+            // 合并调用方传入的 headers（如 Emby 鉴权）与云盘解析出的 headers（如 Cookie）
+            val mergedHeaders = headers + resolved.headers
+            currentPlayHeaders = mergedHeaders
+
+            val p = PlayerFactory.createPhonePlayer(this@PhonePlayerActivity, mergedHeaders)
+            player = p
+            playerView?.player = p
+            playerView?.controllerAutoShow = false
+            playerView?.hideController()
+
+            p.addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(state: Int) {
+                    Log.d("PhonePlayer", "player state=$state")
+                    if (state == Player.STATE_ENDED) playNext()
+                }
+
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    Log.d("PhonePlayer", "isPlaying=$isPlaying")
+                    updatePlayPauseLabel()
+                }
+
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    Log.e("PhonePlayer", "player error: ${error.errorCodeName} ${error.message}", error)
+                    toastState = "播放失败：${error.errorCodeName}"
+                }
+            })
+
+            p.setMediaItem(MediaItem.fromUri(resolved.url))
+            p.prepare()
+            if (startPosition > 3_000L) p.seekTo(startPosition)
+            p.setPlaybackSpeed(speedState)
+            p.playWhenReady = true
+        }
+    }
+
+    /**
+     * 解析播放地址：http(s) 直链原样返回，云盘 scheme 地址调用 spider 的 playerContent 解析。
+     * @return 解析结果（URL + headers）；解析失败返回 null，错误信息写入 [toastState]
+     */
+    private suspend fun resolvePlayUrl(item: MediaEntity): TvBoxClient.ResolvedPlayUrl? {
+        val uri = item.uri
+        if (uri.startsWith("http://") || uri.startsWith("https://")) {
+            return TvBoxClient.ResolvedPlayUrl(uri)
+        }
+        return runCatching {
+            MediaRepository(this@PhonePlayerActivity).resolveTvBoxPlayUrl(item)
+        }.fold(
+            onSuccess = { it },
+            onFailure = {
+                val msg = it.message ?: "云盘解析失败"
+                Log.w("PhonePlayer", "resolvePlayUrl failed: $msg")
+                toastState = msg
+                null
             }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                updatePlayPauseLabel()
-            }
-
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                toastState = "播放失败：${error.errorCodeName}"
-            }
-        })
-
-        p.setMediaItem(MediaItem.fromUri(item.uri))
-        p.prepare()
-        if (startPosition > 3_000L) p.seekTo(startPosition)
-        p.setPlaybackSpeed(speedState)
-        p.playWhenReady = true
+        )
     }
 
     private fun loadEpisodes(item: MediaEntity) {
@@ -522,7 +566,6 @@ class PhonePlayerActivity : ComponentActivity() {
 
     private fun playEpisode(episode: MediaEntity) {
         if (episode.uri.isBlank()) return
-        val p = player ?: return
         saveProgress(force = true)
 
         current = episode
@@ -530,11 +573,46 @@ class PhonePlayerActivity : ComponentActivity() {
         titleView?.text = titleState
         updateEpisodeButtons()
 
-        p.setMediaItem(MediaItem.fromUri(episode.uri))
-        p.prepare()
-        if (episode.positionMs > 3_000L) p.seekTo(episode.positionMs)
-        p.setPlaybackSpeed(speedState)
-        p.playWhenReady = true
+        // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
+        lifecycleScope.launch {
+            val resolved = resolvePlayUrl(episode)
+                ?: return@launch
+
+            // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
+            // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
+            // 对云盘切源：resolved.headers 变化 → mergedHeaders 变化 → 重建播放器带新 Cookie。
+            val mergedHeaders = baseHeaders + resolved.headers
+            val needRebuild = mergedHeaders != currentPlayHeaders
+            val p = if (needRebuild) {
+                // 切换了播放源（Cookie 等 headers 变化），必须重建播放器
+                player?.release()
+                player = null
+                currentPlayHeaders = mergedHeaders
+                val np = PlayerFactory.createPhonePlayer(this@PhonePlayerActivity, mergedHeaders)
+                player = np
+                playerView?.player = np
+                np.addListener(object : Player.Listener {
+                    override fun onPlaybackStateChanged(state: Int) {
+                        if (state == Player.STATE_ENDED) playNext()
+                    }
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        updatePlayPauseLabel()
+                    }
+                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        toastState = "播放失败：${error.errorCodeName}"
+                    }
+                })
+                np
+            } else {
+                player ?: return@launch
+            }
+
+            p.setMediaItem(MediaItem.fromUri(resolved.url))
+            p.prepare()
+            if (episode.positionMs > 3_000L) p.seekTo(episode.positionMs)
+            p.setPlaybackSpeed(speedState)
+            p.playWhenReady = true
+        }
     }
 
     private fun playNext() {

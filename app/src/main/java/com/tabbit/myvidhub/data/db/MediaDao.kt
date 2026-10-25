@@ -62,6 +62,20 @@ interface MediaDao {
     )
     suspend fun episodes(seriesKey: String): List<MediaEntity>
 
+    /** 某剧指定播放源（云盘/线路）的分集 */
+    @Query(
+        "SELECT * FROM media WHERE seriesKey = :seriesKey AND kind = 'EPISODE' " +
+            "AND playSource = :playSource ORDER BY season ASC, episode ASC"
+    )
+    suspend fun episodesBySource(seriesKey: String, playSource: String): List<MediaEntity>
+
+    /** 某剧所有不同的播放源名称（按入库顺序） */
+    @Query(
+        "SELECT playSource FROM media WHERE seriesKey = :seriesKey AND kind = 'EPISODE' " +
+            "AND playSource != '' GROUP BY playSource ORDER BY MIN(addedAt)"
+    )
+    suspend fun playSourcesOf(seriesKey: String): List<String>
+
     @Query("SELECT DISTINCT season FROM media WHERE seriesKey = :seriesKey AND kind='EPISODE' ORDER BY season")
     suspend fun seasons(seriesKey: String): List<Int>
 
@@ -85,6 +99,10 @@ interface MediaDao {
 
     @Query("DELETE FROM media WHERE sourceId = :sourceId")
     suspend fun deleteBySource(sourceId: Long)
+
+    /** 清空某剧的全部分集（TVBox 详情重入时去重用，不删剧集壳） */
+    @Query("DELETE FROM media WHERE seriesKey = :seriesKey AND kind = 'EPISODE'")
+    suspend fun deleteEpisodesBySeriesKey(seriesKey: String)
 
     /** 清理旧版本遗留的 Emby 剧集壳（remoteId 未带 sourceId 的那批） */
     @Query(

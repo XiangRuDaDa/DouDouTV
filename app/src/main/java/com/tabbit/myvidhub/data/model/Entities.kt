@@ -87,5 +87,13 @@ data class MediaEntity(
     /** HDR 类型："" 无；"HDR" / "Dolby Vision" / "HDR10" / "HLG" */
     val hdrType: String = "",
     /** 视频编码器：H.264 / HEVC (H.265) / AV1 / VP9 等 */
-    val videoCodec: String = ""
+    val videoCodec: String = "",
+
+    /**
+     * TVBox 播放源（线路 / 云盘）名称。
+     * 同一部剧可能有多条播放源（如「夸克网盘」「阿里云盘」「百度网盘」），
+     * 每条源的分集都用 seriesKey 归在一起，靠这个字段区分来源，供详情页切换线路。
+     * 非 TVBox 源（Emby）为空。
+     */
+    val playSource: String = ""
 )

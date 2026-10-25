@@ -64,6 +64,9 @@ object SpiderLoader {
     /** key → 已确认的初始化失败原因；命中后直接报错，避免重复触发壳初始化（重复弹「正在初始化本地代理」） */
     private val failedInit = ConcurrentHashMap<String, String>()
 
+    /** 已启动过 LocalServer 的 loader key 集合（进程级，避免重复 start 抛端口占用） */
+    private val localServerStarted = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
     /** 壳初始化专用线程：Init.init 是纯阻塞反射调用，协程取消对纯阻塞无效，只能放独立线程上用超时等待 */
     private val initExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
         Thread(r, "spider-init").apply { isDaemon = true }
@@ -82,7 +85,7 @@ object SpiderLoader {
 
     private const val TAG = "SpiderLoader"
     private val DEX_MAGIC = byteArrayOf(0x64, 0x65, 0x78, 0x0A) // "dex\n"
-    private const val INIT_TIMEOUT_MS = 30_000L
+    private const val INIT_TIMEOUT_MS = 60_000L
     /** Guard 类 loadClass/newInstance 的超时：壳的 Guard 类 static{} 可能无限阻塞，
      *  这两个调用触发它时必须由超时兜底，否则整个流程挂死 */
     private const val CLASS_TIMEOUT_MS = 30_000L
@@ -118,7 +121,12 @@ object SpiderLoader {
         check(url.isNotBlank()) { "配置里没有 spider 字段（此类配置需要 spider 包才能解析）" }
 
         val key = md5.ifBlank { md5Hex(url) }
-        loaders[key]?.let { return@withContext key }
+        loaders[key]?.let {
+            // 缓存命中：spider 已加载，但 LocalServer 可能未启动（进程重启后缓存还在但本地代理已死）。
+            // LocalServer 是端口 9978 的视频代理，云盘播放依赖它，必须确保启动。
+            if (localServerStarted.add(key)) startLocalServer(it)
+            return@withContext key
+        }
 
         // 上次初始化失败过的包：先尝试用已落盘的解密 dex 恢复（Init 可能在超时后于后台完成），
         // 恢复不了则直接报错，不再重复调用壳的 Init —— 否则会一直弹「正在初始化本地代理」。
@@ -126,6 +134,8 @@ object SpiderLoader {
             tryRecoverLoader(key)?.let { recovered ->
                 failedInit.remove(key)
                 loaders[key] = recovered
+                // 恢复路径跳过了 prepareLoader，这里也要启动本地视频代理
+                if (localServerStarted.add(key)) startLocalServer(recovered)
                 return@withContext key
             }
             fail(err)
@@ -184,27 +194,89 @@ object SpiderLoader {
         else DexClassLoader(classpath, optDir.absolutePath, null, ctx().classLoader)
 
         loaders[key] = loader
+
+        // 5) 启动 spider 内置的本地视频代理（LocalServer，默认端口 9978）。
+        //    playerContent 返回的视频地址形如 http://127.0.0.1:9978/proxy?...，
+        //    需要 LocalServer（NanoHTTPD）监听该端口、代理视频流并注入 Cookie。
+        //    标准 TVBox 在 Application.onCreate 里启动，这里在 spider Init 成功后启动。
+        if (localServerStarted.add(key)) startLocalServer(loader)
     }
 
     /**
-     * 带超时的 Init.init 调用（最多 2 次 + 代理端口轮询）。
-     * Init.init 是纯阻塞反射调用（解 so + native 解密 + 本地代理/JSVM 初始化），
-     * 协程取消对它无效，只能放独立线程上用 Future.get 等待，超时即放弃。
-     * 壳的 Init 内部会回连本地代理（127.0.0.1:8964）确认就绪，代理未起时抛
-     * ConnectException；第 1 次失败后轮询等代理端口出现，端口通了再调第 2 次。
+     * 启动 spider 内置的本地视频代理（LocalServer）。
+     *
+     * 云盘线路的 playerContent 会返回 http://127.0.0.1:9978/proxy?... 这样的地址，
+     * 这个本地代理负责把请求转发到真实 CDN 并带上 Cookie。若不启动，播放器会
+     * 收到 ECONNREFUSED → ERROR_CODE_IO_UNSPECIFIED。
+     *
+     * 用反射加载并调用，因为 LocalServer 在 spider JAR（加密壳）里，类名可能是
+     * com.github.catvod.crawler.LocalServer 或 com.github.catvod.spider.LocalServer。
+     * 启动失败不致命（不影响列表/详情爬取），仅记录日志。
+     */
+    private fun startLocalServer(loader: DexClassLoader) {
+        val classNames = listOf(
+            "com.github.catvod.crawler.LocalServer",
+            "com.github.catvod.spider.LocalServer"
+        )
+        for (name in classNames) {
+            val clazz = runCatching { loader.loadClass(name) }.getOrNull() ?: continue
+            try {
+                // 单例：static getInstance()
+                val getInstance = runCatching { clazz.getDeclaredMethod("getInstance") }.getOrNull()
+                val instance = getInstance?.invoke(null)
+                if (instance == null) {
+                    Log.w(TAG, "LocalServer($name).getInstance() 返回 null，跳过")
+                    continue
+                }
+                // 尝试 start() 或 start(int timeout, boolean daemon)
+                val started = runCatching {
+                    clazz.getMethod("start").invoke(instance)
+                }.isSuccess || runCatching {
+                    clazz.getMethod("start", Int::class.javaPrimitiveType, Boolean::class.javaPrimitiveType)
+                        .invoke(instance, 5000, false)
+                }.isSuccess
+                if (started) {
+                    Log.d(TAG, "LocalServer($name) 已启动（视频代理端口 9978）")
+                    return
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "启动 LocalServer($name) 失败：${e.message}")
+            }
+        }
+        Log.w(TAG, "未找到或无法启动 LocalServer（云盘视频代理可能不可用）")
+    }
+
+    /**
+     * 带超时的 Init.init 调用（最多 2 次 + Go 代理端口轮询）。
+     *
+     * 关键发现（来自真机日志）：
+     *  1. 壳的 Init.init 内部会下载配置、解压 so、在后台线程启动 Go 代理；
+     *  2. Go 代理监听**随机端口**（每次启动不同，如 24038 / 42089 / 32600），不是固定 8964；
+     *  3. Init.init 内部会反复重试连接 Go 代理，一旦代理就绪就会继续解密 dex 并正常返回；
+     *     若超时/重试耗尽则会抛异常。
+     *
+     * 策略：
+     *  - 第 1 次 callInit 给足 60s，让 Init.init 内部有时间启动 Go 代理并完成 dex 解密。
+     *    只要不抛异常就视为成功（之前牛二等站点就是这样加载成功的）。
+     *  - 第 1 次失败时，扫描本机监听端口找到响应 {"state":"ok"} 的 Go 代理，
+     *    等它就绪后调第 2 次 Init.init。
      */
     private suspend fun invokeInitTimed(initClazz: Class<*>): Any? {
+        // 第 1 次：给足时间让壳内部完成 Go 代理启动 + dex 解密
         try {
             return callInit(initClazz, INIT_TIMEOUT_MS)
         } catch (e: Exception) {
-            Log.w(TAG, "壳初始化失败（第 1 次）：${e.message}")
+            Log.w(TAG, "壳初始化（第 1 次）失败：${e.message}")
         }
-        // 等壳的本地代理端口起来
-        if (!waitProxyReady(PROXY_WAIT_MS)) {
+
+        // 第 1 次失败：等 Go 代理就绪后重试
+        val proxyPort = waitGoProxyReady(PROXY_WAIT_MS)
+        if (proxyPort == null) {
             throw IllegalStateException(
-                "壳初始化失败：本地代理(127.0.0.1:8964)未启动，连接被拒（${isPortOpen(8964)}）"
+                "壳初始化失败：Go 代理未启动（监听端口中未找到响应 {\"state\":\"ok\"} 的服务）"
             )
         }
+        Log.d(TAG, "Go 代理就绪：127.0.0.1:$proxyPort，重试 Init.init")
         return callInit(initClazz, INIT_TIMEOUT_MS)
     }
 
@@ -238,19 +310,89 @@ object SpiderLoader {
         }
     }
 
-    /** 轮询壳的本地代理端口（127.0.0.1:8964）直到可连接 */
-    private suspend fun waitProxyReady(timeoutMs: Long): Boolean {
+    /**
+     * 轮询等待 Go 代理就绪。
+     * Go 代理监听随机端口，通过扫描 /proc/net/tcp(6) 找监听端口，
+     * 再逐个 HTTP GET 探测，响应体含 {"state":"ok"} 即为目标代理。
+     */
+    private suspend fun waitGoProxyReady(timeoutMs: Long): Int? {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (isPortOpen(8964)) return true
+            findGoProxyPort()?.let { return it }
             delay(PROXY_WAIT_INTERVAL_MS)
         }
-        return isPortOpen(8964)
+        return findGoProxyPort()
+    }
+
+    /** 扫描本机所有监听端口，找 Go 代理（GET /health 返回 {"state":"ok"}） */
+    private fun findGoProxyPort(): Int? {
+        val ports = scanListeningPorts()
+        Log.d(TAG, "扫描到监听端口 ${ports.size} 个：$ports")
+        for (port in ports) {
+            val ok = isGoProxy(port)
+            if (ok) {
+                Log.d(TAG, "找到 Go 代理端口：$port")
+                return port
+            }
+        }
+        return null
+    }
+
+    /**
+     * 获取本机所有 LISTEN 状态的端口。
+     * 优先读 /proc/net/tcp(6)；若读不到（SELinux 限制等），则用 Socket 探测常用端口范围。
+     */
+    private fun scanListeningPorts(): List<Int> {
+        val out = LinkedHashSet<Int>()
+        // 1) 优先从 proc 读取（快、全量）
+        for (path in arrayOf("/proc/net/tcp", "/proc/net/tcp6")) {
+            runCatching {
+                File(path).bufferedReader().useLines { lines ->
+                    lines.drop(1).forEach { line ->
+                        val fields = line.trim().split("\\s+".toRegex())
+                        if (fields.size > 3 && fields[3] == "0A") { // 0A = LISTEN
+                            val local = fields[1]
+                            val portHex = local.substringAfterLast(':')
+                            portHex.toIntOrNull(16)?.takeIf { it in 1025..65535 }?.let { out += it }
+                        }
+                    }
+                }
+            }
+        }
+        if (out.isNotEmpty()) return out.toList()
+
+        // 2) Fallback：Socket 探测 Go 代理常用端口范围（仅 proc 读不到时应急）
+        for (port in 20000..50000) {
+            if (isPortOpen(port)) out += port
+        }
+        return out.toList()
     }
 
     private fun isPortOpen(port: Int): Boolean = runCatching {
-        java.net.Socket().use { s -> s.connect(java.net.InetSocketAddress("127.0.0.1", port), 1_500) }
+        java.net.Socket().use { s -> s.connect(java.net.InetSocketAddress("127.0.0.1", port), 50) }
     }.isSuccess
+
+    /**
+     * 探测某端口是否是 Go 代理（GET /health 返回 {"state":"ok"}）。
+     * 用原生 Socket 发 HTTP，避免 HttpURLConnection 在某些 ROM 上的策略问题。
+     */
+    private fun isGoProxy(port: Int): Boolean = runCatching {
+        java.net.Socket().use { s ->
+            s.connect(java.net.InetSocketAddress("127.0.0.1", port), 800)
+            s.soTimeout = 800
+            s.getOutputStream().apply {
+                write("GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".toByteArray())
+                flush()
+            }
+            val body = s.getInputStream().bufferedReader().readText()
+            val ok = body.contains("\"state\":\"ok\"")
+            if (!ok) Log.d(TAG, "端口 $port 探测失败 body=${body.take(80).replace("\n", "\\n")}")
+            ok
+        }
+    }.getOrElse {
+        Log.d(TAG, "端口 $port 探测异常：${it.javaClass.simpleName}: ${it.message}")
+        false
+    }
 
     /** 不触发壳 Init，直接用已落盘的解密 dex 重建 classloader（兼容 Init 超时后于后台完成的情况） */
     private fun tryRecoverLoader(key: String): DexClassLoader? {

@@ -108,8 +108,11 @@ object CatVodResultParser {
                         val u = piece.substring(sep + 1).trim()
                         n to u
                     }
-                    val absolute = TvBoxClient.AbsolutePlayUrl(epUrl)
-                    if (absolute == null) null else TvBoxClient.Episode(epName, absolute)
+                    // 保留所有 URL，包括云盘 scheme（quark://、aliyundrive://、uc:// 等）。
+                    // 之前用 AbsolutePlayUrl 过滤掉非 http 地址，导致网盘线路的分集全部丢失。
+                    // 云盘地址的真实播放地址由 playerContent 在播放时按需解析。
+                    val absolute = TvBoxClient.AbsoluteUrl(epUrl)
+                    TvBoxClient.Episode(epName, absolute)
                 }
                 if (episodes.isEmpty()) null else {
                     val name = fromNames.getOrNull(gi)?.takeIf { it.isNotBlank() } ?: "线路${gi + 1}"

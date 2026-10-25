@@ -2,19 +2,28 @@ package com.tabbit.myvidhub.player
 
 import android.content.Context
 import android.os.StatFs
+import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.datasource.cache.CacheDataSink
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.RenderersFactory
+import androidx.media3.exoplayer.image.ImageRenderer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import okhttp3.ConnectionPool
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 /**
  * 播放器工厂 —— 手机端与电视端各自一套参数。
@@ -48,11 +57,11 @@ object PlayerFactory {
     /** 保底缓存下限：低于这个值连一集都存不下，缓存就失去意义了 */
     private const val CACHE_MIN_BYTES = 64L * 1024 * 1024
 
-    /** 起播门槛：攒够 5 秒再出画面，避免「播两秒转一圈」 */
-    private const val BUFFER_FOR_PLAYBACK_MS = 5_000
+    /** 起播门槛：攒够 2 秒再出画面（5 秒太激进，夸克 CDN 限速时要等超久） */
+    private const val BUFFER_FOR_PLAYBACK_MS = 2_000
 
-    /** 卡顿后恢复门槛：同样抬到 5 秒，防止恢复后立刻二次卡顿 */
-    private const val BUFFER_AFTER_REBUFFER_MS = 5_000
+    /** 卡顿后恢复门槛：3 秒，兼顾恢复速度与稳定性 */
+    private const val BUFFER_AFTER_REBUFFER_MS = 3_000
 
     @Volatile
     private var cache: SimpleCache? = null
@@ -95,47 +104,116 @@ object PlayerFactory {
         isTv: Boolean,
         headers: Map<String, String> = emptyMap()
     ): ExoPlayer {
-        val http = DefaultHttpDataSource.Factory()
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(if (isTv) 12_000 else 8_000)
-            .setReadTimeoutMs(if (isTv) 18_000 else 12_000)
-            .setUserAgent(if (isTv) "DouDouTV/3.0 (AndroidTV)" else "DouDouTV/3.0 (Android)")
-            .apply {
-                if (headers.isNotEmpty()) setDefaultRequestProperties(headers)
-            }
+        // OkHttp 底层 —— DefaultHttpDataSource (HttpURLConnection) 在 MIUI/Xiaomi 上会静默丢弃
+        // Cookie 等自定义 header，导致夸克/阿里云盘 CDN 返回 412 或空响应，播放器无限卡 BUFFERING。
+        // OkHttpDataSource 直接透传所有 header，行为与 OkHttp 调用完全一致。
+        val connectTimeout = if (isTv) 15_000 else 10_000
+        val readTimeout = if (isTv) 60_000 else 45_000
 
-        // CacheDataSink fragmentSize —— 行业标准做法：把大文件切成 2MB 碎片存入 cache
-        // 每个碎片是一个独立的 cache entry，LRU 就能在写入新碎片时淘汰远离当前
-        // 播放位置的旧碎片，实现滑动窗口式缓存（Netflix/HLS 天然是这样，Emby 客户端
-        // 用这个参数模拟同样效果）。没有这个参数的话，一个 20GB 电影就是一个 entry，
-        // LRU 对正在 active 的 entry 毫无办法，缓存只会涨到文件大小。
-        val dataSink = CacheDataSink.Factory()
-            .setCache(cacheInstance(context, isTv))
-            .setFragmentSize(2 * 1024 * 1024) // 2MB 一片，越大 IO 越少但 LRU 粒度越粗
+        // Range 请求改写逻辑（通用方案，支持所有视频格式）：
+        // ExoPlayer 的 Extractor（MKV/MP4/AVI/FLV/MOV...）对 HTTP 流的典型请求模式是：
+        //   a) 第一次：先发普通 GET（无 Range），想拿 Content-Length 确定总大小，
+        //      同时读文件头 magic number 识别容器格式；
+        //   b) 后续：根据容器结构 seek（如 Matroska 读尾部 SeekHead、MP4 读 moov atom），
+        //      发精准 Range 请求。
+        // 问题：如果 CDN 返回 200 OK 完整 body（动辄 2~5GB），OkHttpDataSource 必须读完
+        // 整个 body 才能 close 并释放连接池，导致后续 seek 卡死。
+        // 所以我们拦截所有请求，按以下策略改写：
+        // 1) 普通 GET（无 Range）→ 改成 "bytes=0-32767"（32KB 探测）
+        //    目的：让 CDN 返回 206 + Content-Range 包含总大小；body 只给前 32KB，
+        //    足够所有 extractor 识别容器格式（MKV 4B、MP4 ftyp 20B、AVI RIFF 4B...），
+        //    瞬间读完 close，连接池立刻释放给后续 seek 用。
+        // 2) 有 start 无 end（"bytes=X-"）→ 改成 "bytes=X-X+chunkSize-1"（固定 8MB 块）
+        //    否则 CDN 返回到 EOF 的完整剩余 body，又会卡死 OkHttp。
+        //    8MB 比 2MB 好：减少 Range 请求次数，降低 RTT 开销。
+        // 3) 已有完整 end（"bytes=X-Y"）→ 原样透传。
+        val probeSize = 32 * 1024L
+        val chunkSize = 8L * 1024 * 1024
+        val client = OkHttpClient.Builder()
+            .connectTimeout(connectTimeout.toLong(), TimeUnit.MILLISECONDS)
+            .readTimeout(readTimeout.toLong(), TimeUnit.MILLISECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            // 显式连接池：保持 5 个空闲连接 5 分钟，Range 请求可复用 keep-alive 连接
+            .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
+            .addInterceptor(Interceptor { chain ->
+                val original = chain.request()
+                val rangeHeader = original.header("Range")
+                val request = when {
+                    rangeHeader == null -> {
+                        // 情况 1：无 Range 头 → 32KB 探测（足够识别 MKV/MP4/AVI/FLV/MOV 所有格式）
+                        original.newBuilder().header("Range", "bytes=0-${probeSize - 1}").build()
+                    }
+                    Regex("bytes=(\\d+)-$").containsMatchIn(rangeHeader) -> {
+                        // 情况 2：有 start 无 end → 2MB 固定块
+                        val m = Regex("bytes=(\\d+)-$").find(rangeHeader)!!
+                        val start = m.groupValues[1].toLong()
+                        val end = start + chunkSize - 1
+                        original.newBuilder().header("Range", "bytes=$start-$end").build()
+                    }
+                    else -> original // 情况 3：已有完整 end → 原样透传
+                }
+                Log.d("PlayerHttp", ">>> ${request.method} ${request.url}")
+                val range = request.header("Range")
+                if (range != null) Log.d("PlayerHttp", "    Range: $range")
+                val response = chain.proceed(request)
+                val ct = response.header("Content-Type", "")
+                val ar = response.header("Accept-Ranges", "")
+                val cr = response.header("Content-Range")
+                val code = response.code
+                val cl = response.body?.contentLength() ?: -1L
+                Log.d("PlayerHttp", "<<< $code ${response.message} size=$cl contentType=$ct acceptRanges=$ar")
+                if (!cr.isNullOrBlank()) Log.d("PlayerHttp", "    Content-Range: $cr")
+                response
+            })
+            .build()
 
-        val cached = CacheDataSource.Factory()
-            .setCache(cacheInstance(context, isTv))
-            .setUpstreamDataSourceFactory(http)
-            .setCacheWriteDataSinkFactory(dataSink)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        val httpFactory = OkHttpDataSource.Factory(client)
+        if (headers.isNotEmpty()) {
+            httpFactory.setDefaultRequestProperties(headers)
+        }
+
+        Log.d("PlayerFactory", "build OkHttpDataSource headers=${headers.keys} connect=${connectTimeout}ms read=${readTimeout}ms")
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 if (isTv) 45_000 else 30_000,
-                if (isTv) 240_000 else 180_000,
+                if (isTv) 300_000 else 240_000,
                 BUFFER_FOR_PLAYBACK_MS,
                 BUFFER_AFTER_REBUFFER_MS
             )
-            .setTargetBufferBytes(if (isTv) 192 * 1024 * 1024 else 128 * 1024 * 1024)
+            .setTargetBufferBytes(if (isTv) 384 * 1024 * 1024 else 256 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(true)
             .setBackBuffer(60_000, true)
             .build()
 
         val errorPolicy = DefaultLoadErrorHandlingPolicy(8)
-        val mediaSourceFactory = DefaultMediaSourceFactory(cached)
+        // 直接用 OkHttpDataSource，不经过 CacheDataSource。
+        // 原因：CacheDataSource 对云盘大文件（夸克/阿里云盘动辄 5GB+）会把完整 GET 响应
+        // 边读边写入有限的磁盘缓存（256MB），LRU 淘汰过程极其缓慢，阻塞了 ExoPlayer 后续
+        // 的 Range 请求，表现为无限 BUFFERING。
+        val mediaSourceFactory = DefaultMediaSourceFactory(httpFactory)
             .setLoadErrorHandlingPolicy(errorPolicy)
 
+        // 自定义 RenderersFactory：过滤掉 ImageRenderer。
+        // 原因：我们的 Range 拦截器会把所有 "bytes=X-" 请求改写成 2MB 块（或首次 32KB 探测），
+        // 这对视频/音频数据完全没问题（ExoPlayer 需要多少就发多少 Range），
+        // 但 MKV/MP4 内嵌的 poster 图片 attachment 轨道也会被截断，
+        // ImageRenderer 拿到残缺数据 → BitmapFactory 解码失败 → ParserException → 播放器崩掉。
+        // 作为视频播放器我们完全不需要渲染内嵌图片，直接把 ImageRenderer 从 renderers 列表里移除。
+        val defaultFactory = DefaultRenderersFactory(context)
+        val renderersFactory = RenderersFactory { handler, videoRendererEventListener, audioRendererEventListener, textRendererOutput, metadataRendererOutput ->
+            defaultFactory.createRenderers(
+                handler,
+                videoRendererEventListener,
+                audioRendererEventListener,
+                textRendererOutput,
+                metadataRendererOutput
+            ).filter { it !is ImageRenderer }.toTypedArray()
+        }
+
         return ExoPlayer.Builder(context)
+            .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .setSeekBackIncrementMs(10_000)

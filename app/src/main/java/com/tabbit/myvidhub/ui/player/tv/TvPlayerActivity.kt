@@ -68,6 +68,7 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.tabbit.myvidhub.data.MediaRepository
 import com.tabbit.myvidhub.data.model.MediaEntity
+import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
@@ -93,6 +94,10 @@ class TvPlayerActivity : ComponentActivity() {
 
     private lateinit var repo: MediaRepository
     private var player: ExoPlayer? = null
+    /** 基础请求头（如 Emby 的 X-Emby-Authorization），同一次播放会话内不变 */
+    private var baseHeaders: Map<String, String> = emptyMap()
+    /** 当前播放器实际使用的 HTTP 请求头（baseHeaders + 云盘解析出的 headers），切换源时需重建播放器 */
+    private var currentPlayHeaders: Map<String, String> = emptyMap()
     private var mediaId = 0L
     private var current: MediaEntity? = null
     private var episodes: List<MediaEntity> = emptyList()
@@ -172,6 +177,8 @@ class TvPlayerActivity : ComponentActivity() {
             }
             // 先释放旧 player（如果有）再创建新的 —— SimpleCache 单例只能有一个引用
             player?.release()
+            baseHeaders = headers
+            currentPlayHeaders = headers
             player = PlayerFactory.createTvPlayer(this@TvPlayerActivity, headers)
 
             current = item
@@ -186,13 +193,56 @@ class TvPlayerActivity : ComponentActivity() {
     }
 
     private fun play(item: MediaEntity, startMs: Long) {
-        val p = player ?: return
-        p.setMediaItem(MediaItem.fromUri(item.uri))
-        p.prepare()
-        if (startMs > 3_000L) p.seekTo(startMs)
-        p.setPlaybackSpeed(speed)
-        p.playWhenReady = true
         titleText = displayTitle(item)
+
+        // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
+        CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
+            val resolved = resolvePlayUrl(item)
+                ?: return@launch
+
+            // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
+            // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
+            // 对云盘切源：resolved.headers 变化 → mergedHeaders 变化 → 重建播放器带新 Cookie。
+            val mergedHeaders = baseHeaders + resolved.headers
+            val needRebuild = mergedHeaders != currentPlayHeaders
+            val p = if (needRebuild) {
+                player?.release()
+                player = null
+                currentPlayHeaders = mergedHeaders
+                val np = PlayerFactory.createTvPlayer(this@TvPlayerActivity, mergedHeaders)
+                player = np
+                playerView?.player = np
+                np
+            } else {
+                player ?: return@launch
+            }
+
+            p.setMediaItem(MediaItem.fromUri(resolved.url))
+            p.prepare()
+            if (startMs > 3_000L) p.seekTo(startMs)
+            p.setPlaybackSpeed(speed)
+            p.playWhenReady = true
+        }
+    }
+
+    /**
+     * 解析播放地址：http(s) 直链原样返回，云盘 scheme 地址调用 spider 的 playerContent 解析。
+     * @return 解析结果（URL + headers）；解析失败返回 null，错误信息写入 [toast]
+     */
+    private suspend fun resolvePlayUrl(item: MediaEntity): TvBoxClient.ResolvedPlayUrl? {
+        val uri = item.uri
+        if (uri.startsWith("http://") || uri.startsWith("https://")) {
+            return TvBoxClient.ResolvedPlayUrl(uri)
+        }
+        return runCatching {
+            repo.resolveTvBoxPlayUrl(item)
+        }.fold(
+            onSuccess = { it },
+            onFailure = {
+                toast = it.message ?: "云盘解析失败"
+                null
+            }
+        )
     }
 
     private fun switchEpisode(ep: MediaEntity) {

@@ -24,6 +24,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +54,7 @@ import com.tabbit.myvidhub.ui.detail.loadPosterBitmap
 import com.tabbit.myvidhub.ui.detail.pageTonesOf
 import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
@@ -108,6 +110,10 @@ fun TvDetailScreen(
     var episodes by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
     var scraped by remember { mutableStateOf<EmbyClient.ItemDetail?>(null) }
 
+    /** TVBox 多播放源（云盘/线路） */
+    var playSources by remember { mutableStateOf<List<String>>(emptyList()) }
+    var selectedPlaySource by remember { mutableStateOf<String>("") }
+
     /**
      * TMDB 刮削结果。
      *
@@ -132,6 +138,7 @@ fun TvDetailScreen(
      */
     var level by remember(mediaId) { mutableStateOf(0) }
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
     /** 进页后遥控器焦点直接落在「播放」按钮上，不用先按一堆方向键 */
     val playFocusRequester = remember { FocusRequester() }
@@ -173,7 +180,18 @@ fun TvDetailScreen(
             }
             val latest = vm.mediaOf(mediaId) ?: m
             media = latest
-            episodes = runCatching { vm.episodesOf(latest.seriesKey) }.getOrDefault(emptyList())
+
+            // TVBox 多播放源：读取全部云盘/线路，默认选第一条，按选中源过滤分集；
+            // Emby 无源概念，playSources 为空时走全量分集。
+            val sources = runCatching { vm.playSourcesOf(latest.seriesKey) }.getOrDefault(emptyList())
+            playSources = sources
+            if (sources.isNotEmpty()) {
+                if (selectedPlaySource !in sources) selectedPlaySource = sources.first()
+                episodes = runCatching { vm.episodesBySource(latest.seriesKey, selectedPlaySource) }
+                    .getOrDefault(emptyList())
+            } else {
+                episodes = runCatching { vm.episodesOf(latest.seriesKey) }.getOrDefault(emptyList())
+            }
             episodes.firstOrNull()?.season?.let { if (selectedSeason == 0) selectedSeason = it }
 
             // TMDB 刮削：与手机端同一套判定（凭据存在 + 未被近期刮过）
@@ -582,6 +600,25 @@ fun TvDetailScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            // 播放源 / 云盘切换：多条源时展示，默认第一条
+                            if (playSources.size > 1) {
+                                playSources.forEach { src ->
+                                    TvPillButton(
+                                        text = src,
+                                        primary = selectedPlaySource == src,
+                                        onClick = {
+                                            selectedPlaySource = src
+                                            epPage = 0
+                                            scope.launch {
+                                                val item2 = media
+                                                if (item2 != null) {
+                                                    episodes = vm.episodesBySource(item2.seriesKey, src)
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
                             if (tvSeasons.size > 1) {
                                 tvSeasons.forEach { sn ->
                                     TvPillButton(
