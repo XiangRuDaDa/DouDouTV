@@ -143,6 +143,17 @@ fun TvDetailScreen(
     /** 进页后遥控器焦点直接落在「播放」按钮上，不用先按一堆方向键 */
     val playFocusRequester = remember { FocusRequester() }
 
+    /** 「选择剧集」按下后把焦点直接送进第一集，省掉一次方向键 */
+    val firstEpFocusRequester = remember { FocusRequester() }
+
+    /**
+     * 跳过「展开后自动滚到列表末尾」。
+     *
+     * 遥控器按「下」逐层展开时，新内容长在底部，滚到末尾是对的；
+     * 但「选择剧集」要停在剧集网格开头，两种意图冲突，这里显式让位。
+     */
+    var suppressAutoScroll by remember { mutableStateOf(false) }
+
     // 首帧就用「上次算好的主色 / 内存缓存 / 标题哈希色」，避免进入瞬间一片黑
     // 同手机端：mediaOf() 是 suspend，组合期不能调，改从已订阅的 library 同步取，
     // 并把 remember 的 key 挂到标题上，库数据晚到时自动重新给初值
@@ -303,7 +314,10 @@ fun TvDetailScreen(
 
     // 展开后把视图滚到新增内容附近，否则新出现的区块在屏幕外，用户看不到变化
     LaunchedEffect(level) {
-        if (level > 0) {
+        if (suppressAutoScroll) {
+            // 这次展开是「选择剧集」发起的，滚到底会把刚送到第一集的焦点顶飞
+            suppressAutoScroll = false
+        } else if (level > 0) {
             kotlinx.coroutines.delay(140)
             val last = listState.layoutInfo.totalItemsCount - 1
             if (last >= 0) runCatching { listState.animateScrollToItem(last) }
@@ -370,10 +384,10 @@ fun TvDetailScreen(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 60.dp)
         ) {
-            // 顶部占位：把 L0（标题/评分/按钮）推到屏幕 45% 处，
+            // 顶部占位：把 L0（标题/评分/按钮）推到屏幕 55% 处，
             // 落在 headerScrim 主色已较浓的区域，不挡海报主体、沉浸感更强
             item {
-                Spacer(Modifier.height(screenH * 0.45f))
+                Spacer(Modifier.height(screenH * 0.55f))
             }
 
             // ---------- 标题区：艺术字 Logo 优先，文字标题兜底 ----------
@@ -397,32 +411,49 @@ fun TvDetailScreen(
                         // Logo 高度封顶，刮削成功与否页面骨架都长得一样。
                         val titleSlotHeight = 48.dp
                         var logoFailed by remember(logo) { mutableStateOf(false) }
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = titleSlotHeight),
-                            contentAlignment = Alignment.CenterStart
-                        ) {
-                            if (logo.isNotBlank() && !logoFailed) {
-                                AsyncImage(
-                                    model = logo,
-                                    contentDescription = item.title,
-                                    contentScale = ContentScale.Fit,
-                                    onError = { logoFailed = true },
-                                    modifier = Modifier
-                                        .heightIn(max = titleSlotHeight)
-                                        .widthIn(max = 340.dp)
-                                )
-                            } else {
-                                Text(
-                                    item.title,
-                                    color = Color.White,
-                                    style = MaterialTheme.typography.displaySmall,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                        // 标题行：标题在左，收藏按钮紧贴标题右侧，两者构成同一个视觉组。
+                        // 收藏原来独立站在操作区里 —— 一个圆图标孤零零挨着播放键，
+                        // 既抢走主按钮的视觉重心，又让人怀疑它是不是「第二个播放动作」。
+                        // 收进标题行后位置在三种状态下恒定，操作区也回到「只有一个主按钮」。
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                // fill = false：标题按内容取宽，短标题时收藏紧跟字尾；
+                                // 长标题才吃掉剩余宽度，收藏不会被挤出屏幕。
+                                Modifier
+                                    .weight(1f, fill = false)
+                                    .heightIn(min = titleSlotHeight),
+                                contentAlignment = Alignment.CenterStart
+                            ) {
+                                if (logo.isNotBlank() && !logoFailed) {
+                                    AsyncImage(
+                                        model = logo,
+                                        contentDescription = item.title,
+                                        contentScale = ContentScale.Fit,
+                                        onError = { logoFailed = true },
+                                        modifier = Modifier
+                                            .heightIn(max = titleSlotHeight)
+                                            .widthIn(max = 340.dp)
+                                    )
+                                } else {
+                                    Text(
+                                        item.title,
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.displaySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
+                            Spacer(Modifier.width(14.dp))
+                            TvIconButton(
+                                icon = if (item.favorite) Icons.Filled.Favorite
+                                else Icons.Filled.FavoriteBorder,
+                                active = item.favorite,
+                                contentDescription = if (item.favorite) "取消收藏" else "收藏",
+                                sizeDp = 40.dp,
+                                onClick = { vm.toggleFavorite(item.id, !item.favorite) }
+                            )
                         }
 
                         // ===== L0 常驻骨架：评分胶囊 + 片源徽章始终同一行 =====
@@ -472,44 +503,62 @@ fun TvDetailScreen(
                             )
                         }
 
-                        // 操作按钮行：播放 + 从头开始（看过后才出现） + 收藏（圆形图标）
-                        // 按钮整体收小一档、收藏改用图标，视觉重心让回给海报。
-                        Spacer(Modifier.height(10.dp))
+                        // 操作按钮行：只出一个主按钮，三种内容状态各自对应一个明确动词。
+                        // 之前「播放 / 从头开始 / 收藏」三件套并排，按钮越多，每个越不像主操作；
+                        // 现在按「有没有看过」分流：没看过的剧先选集，看过的直接续播。
+                        val seriesUnwatched = item.kind == MediaKind.SERIES && item.positionMs <= 5_000L
+                        Spacer(Modifier.height(18.dp))
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // 主按钮：剧集带具体集号，电影就是「立即播放」
-                            TvPlayButton(
-                                text = run {
-                                    if (item.kind == MediaKind.SERIES && item.episode > 0) {
-                                        if (item.positionMs > 5_000L) "继续观看 S${item.season}E${item.episode}"
-                                        else "开始观看 S${item.season}E${item.episode}"
-                                    } else {
-                                        if (item.positionMs > 5_000L) "继续播放" else "立即播放"
-                                    }
-                                },
-                                compact = true,
-                                modifier = Modifier.focusRequester(playFocusRequester),
-                                onClick = { onPlay(item.id) }
-                            )
-                            if (item.positionMs > 5_000L) {
-                                TvPillButton(
-                                    text = "从头开始",
-                                    primary = false,
+                            if (seriesUnwatched) {
+                                // 没看过的剧：不猜「从哪集开始」，让用户自己点。
+                                // 按下即展开剧集层、滚到网格开头、焦点落在第一集上。
+                                TvPlayButton(
+                                    text = "选择剧集",
                                     compact = true,
+                                    modifier = Modifier.focusRequester(playFocusRequester),
                                     onClick = {
-                                        vm.resetPosition(item.id)
-                                        onPlay(item.id)
+                                        epPage = 0
+                                        if (level < 2) {
+                                            suppressAutoScroll = true
+                                            level = 2
+                                        }
+                                        scope.launch {
+                                            kotlinx.coroutines.delay(260)
+                                            runCatching { listState.animateScrollToItem(3) }
+                                            kotlinx.coroutines.delay(280)
+                                            runCatching { firstEpFocusRequester.requestFocus() }
+                                        }
                                     }
                                 )
+                            } else {
+                                // 看过 / 电影：主按钮直接播放，剧集带上集号
+                                TvPlayButton(
+                                    text = run {
+                                        if (item.kind == MediaKind.SERIES && item.episode > 0) {
+                                            "继续观看 S${item.season}E${item.episode}"
+                                        } else {
+                                            if (item.positionMs > 5_000L) "继续播放" else "立即播放"
+                                        }
+                                    },
+                                    compact = true,
+                                    modifier = Modifier.focusRequester(playFocusRequester),
+                                    onClick = { onPlay(item.id) }
+                                )
+                                if (item.positionMs > 5_000L) {
+                                    TvPillButton(
+                                        text = "从头开始",
+                                        primary = false,
+                                        compact = true,
+                                        onClick = {
+                                            vm.resetPosition(item.id)
+                                            onPlay(item.id)
+                                        }
+                                    )
+                                }
                             }
-                            TvIconButton(
-                                icon = if (item.favorite) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                                active = item.favorite,
-                                contentDescription = if (item.favorite) "取消收藏" else "收藏",
-                                onClick = { vm.toggleFavorite(item.id, !item.favorite) }
-                            )
                         }
 
                         // ========== L1：剧情简介（评分与徽章已在 L0 常驻） ==========
@@ -667,10 +716,14 @@ fun TvDetailScreen(
                                 .padding(start = 20.dp, end = 20.dp, bottom = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            rowEps.forEach { ep ->
+                            rowEps.forEachIndexed { idx, ep ->
                                 TvEpisodeCard(
                                     episode = ep,
                                     modifier = Modifier.weight(1f),
+                                    // 首页第一格挂焦点器，「选择剧集」按下后直接落到这里
+                                    focusRequester = if (rowIdx == 0 && idx == 0) {
+                                        firstEpFocusRequester
+                                    } else null,
                                     onClick = { onPlay(ep.id) }
                                 )
                             }
@@ -734,6 +787,7 @@ private const val TV_SCRAPE_FRESH_MS = 7L * 24 * 60 * 60 * 1000
 private fun TvEpisodeCard(
     episode: MediaEntity,
     modifier: Modifier = Modifier,
+    focusRequester: FocusRequester? = null,
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -760,6 +814,8 @@ private fun TvEpisodeCard(
                 shape = RoundedCornerShape(10.dp)
             )
             .onFocusChanged { focused = it.isFocused }
+            // focusRequester 必须排在 focusable 之前，才挂得到这个焦点目标上
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusable()
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
