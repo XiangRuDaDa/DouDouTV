@@ -15,11 +15,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -112,6 +114,14 @@ fun TvHomeScreen(
             .take(5)
     }
 
+    // 继续观看：播放进度 > 5s 且最近 30 天内看过的条目，取最近 8 条
+    val continueItems = remember(filteredLibrary) {
+        filteredLibrary
+            .filter { it.positionMs > 5_000L && it.lastPlayedAt > 0L && it.lastPlayedAt > System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L }
+            .sortedByDescending { it.lastPlayedAt }
+            .take(8)
+    }
+
     var heroIndex by remember { mutableStateOf(0) }
     LaunchedEffect(heroItems.size) {
         if (heroItems.size > 1) {
@@ -183,6 +193,8 @@ fun TvHomeScreen(
                 item {
                     TvHero(
                         item = hero,
+                        heroIndex = heroIndex,
+                        heroTotal = heroItems.size,
                         playFocusRequester = heroPlayFocus,
                         onPlay = { onPlay(hero) },
                         onDetail = { onDetail(hero.id) },
@@ -209,6 +221,12 @@ fun TvHomeScreen(
                 }
             }
             // 选了「只有分类没首页影片」的线路时不提示空：下面的分类入口本身就是内容入口
+
+            // ---------- 继续观看 ----------
+            if (continueItems.isNotEmpty()) {
+                item { TvSectionTitle("▶ 继续观看") { } }
+                item { TvContinueRow(items = continueItems, onDetail = onDetail, onPlay = onPlay) }
+            }
 
             // ---------- 站点分类（动态分区入口）：TVBox 线路 homeContent 返回的 class ----------
             val homeCategories = vm.homeCategories
@@ -262,9 +280,21 @@ fun TvHomeScreen(
             )
         }
 
-        // ---------- 透明悬浮顶部入口条（压在主视觉之上，滚动淡出；只显示操作按钮，不显示软件名） ----------
+        // ---------- 透明悬浮顶部入口条：SpaceBetween 布局；左来源链 + 右操作组 ----------
+        val displaySourceName = selectedSource?.name?.takeIf { it.isNotBlank() } ?: "未选择来源"
+        val displaySiteName = if (showSiteButton) {
+            siteList.firstOrNull { it.key == vm.homeSiteKey }?.name
+                ?.substringBeforeLast("（")?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: namedSites.firstOrNull()?.name?.substringBeforeLast("（")?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: namedSites.firstOrNull()?.key?.takeIf { it.isNotBlank() }
+        } else null
         TvTopBar(
             alpha = topBarAlpha,
+            sourceName = displaySourceName,
+            sourceKind = selectedSource?.kind,
+            siteName = displaySiteName,
             scanning = vm.scanning,
             syncFocusRequester = syncButtonFocus,
             onSyncFocusChanged = { syncFocused = it },
@@ -302,10 +332,13 @@ fun TvHomeScreen(
     }
 }
 
-/** 顶部入口条：同步/搜索/当前来源/当前线路/来源/设置。TV 端不展示软件名称。 */
+/** 顶部入口条：SpaceBetween 布局 — 左侧来源链 PillButton，右侧操作组 */
 @Composable
 private fun TvTopBar(
     alpha: Float,
+    sourceName: String,
+    sourceKind: SourceKind?,
+    siteName: String?,
     syncFocusRequester: FocusRequester,
     onSyncFocusChanged: (Boolean) -> Unit,
     onSearch: () -> Unit,
@@ -316,37 +349,124 @@ private fun TvTopBar(
     onRefresh: () -> Unit,
     scanning: Boolean = false
 ) {
+    val isTvBox = onHomeSite != null || sourceKind == SourceKind.TVBOX
+    val isEmpty = sourceKind == null
+
     Row(
         Modifier
             .fillMaxWidth()
             .graphicsLayer { this.alpha = alpha }
             .padding(start = 20.dp, end = 20.dp, top = 18.dp),
-        horizontalArrangement = Arrangement.End,
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (scanning) {
-            CircularProgressIndicator(color = AppColors.Brand, strokeWidth = 2.dp)
-            Spacer(Modifier.width(18.dp))
-        } else {
-            TvPillButton(
-                "同步", primary = false, onClick = onRefresh,
-                modifier = Modifier
-                    .focusRequester(syncFocusRequester)
-                    .onFocusChanged { onSyncFocusChanged(it.isFocused) }
-            )
-            Spacer(Modifier.width(10.dp))
+        // ---- 左：来源链 PillButton ----
+        // 空状态：提示「＋ 添加来源」点击跳转来源管理
+        // Emby-only：只显示一个 PillButton
+        // TVBox + 线路：来源 PillButton › 线路 PillButton 连在一起
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (isEmpty) {
+                TvPillButton(
+                    text = "＋ 添加来源",
+                    primary = true,
+                    compact = true,
+                    onClick = onSources
+                )
+            } else {
+                TvSourceChainPill(
+                    label = if (isTvBox) "来源" else "Emby",
+                    value = sourceName,
+                    kind = sourceKind,
+                    onClick = onHomeSource
+                )
+                if (onHomeSite != null && !siteName.isNullOrBlank()) {
+                    Text(
+                        text = "›",
+                        color = Color.White.copy(alpha = 0.5f),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    TvSourceChainPill(
+                        label = "线路",
+                        value = siteName,
+                        kind = null,
+                        onClick = onHomeSite
+                    )
+                }
+            }
         }
-        TvPillButton("数据来源", onClick = onHomeSource)
-        Spacer(Modifier.width(10.dp))
-        if (onHomeSite != null) {
-            TvPillButton("线路", onClick = onHomeSite)
-            Spacer(Modifier.width(10.dp))
+
+        // ---- 右：操作组 ----
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (scanning) {
+                CircularProgressIndicator(color = AppColors.Brand, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("同步中…", color = AppColors.TextSecondary, style = MaterialTheme.typography.labelMedium)
+            } else {
+                TvPillButton(
+                    "↻ 同步", primary = false, compact = true, onClick = onRefresh,
+                    modifier = Modifier
+                        .focusRequester(syncFocusRequester)
+                        .onFocusChanged { onSyncFocusChanged(it.isFocused) }
+                )
+            }
+            TvPillButton("🔍 搜索", primary = false, compact = true, onClick = onSearch)
+            TvPillButton("📺 来源", primary = false, compact = true, onClick = onSources)
+            TvPillButton("⚙ 设置", primary = false, compact = true, onClick = onSettings)
         }
-        TvPillButton("搜索", primary = false, onClick = onSearch)
-        Spacer(Modifier.width(10.dp))
-        TvPillButton("来源", primary = false, onClick = onSources)
-        Spacer(Modifier.width(10.dp))
-        TvPillButton("设置", primary = false, onClick = onSettings)
+    }
+}
+
+/** 来源链 PillButton — label 用品牌色，value 用白色；来源名 ellipsis 到 ~16 字 */
+@Composable
+private fun TvSourceChainPill(
+    label: String,
+    value: String,
+    kind: SourceKind?,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "chain")
+    val labelColor = when (kind) {
+        SourceKind.EMBY -> AppColors.BrandSoft
+        SourceKind.TVBOX -> AppColors.Rating
+        null -> Color.White.copy(alpha = 0.7f)
+    }
+    val bg = when {
+        focused -> Color.White
+        kind == SourceKind.EMBY -> AppColors.Brand.copy(alpha = 0.18f)
+        kind == SourceKind.TVBOX -> AppColors.Rating.copy(alpha = 0.16f)
+        else -> Color.White.copy(alpha = 0.10f)
+    }
+    val textColor = if (focused) Color.Black else Color.White
+
+    Row(
+        Modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = label,
+            color = if (focused) Color.Black else labelColor,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Box(Modifier.width(1.dp).height(14.dp).background(Color.White.copy(alpha = if (focused) 0.4f else 0.18f)))
+        Text(
+            text = value,
+            color = textColor,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -395,10 +515,12 @@ private fun TvCategoryChip(
     }
 }
 
-/** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色 */
+/** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下 */
 @Composable
 private fun TvHero(
     item: MediaEntity,
+    heroIndex: Int,
+    heroTotal: Int,
     playFocusRequester: FocusRequester,
     onPlay: () -> Unit,
     onDetail: () -> Unit,
@@ -407,7 +529,7 @@ private fun TvHero(
     Box(
         Modifier
             .fillMaxWidth()
-            .height(430.dp)
+            .height(520.dp)
     ) {
         AsyncImage(
             model = item.backdropUrl.ifBlank { item.posterUrl },
@@ -416,13 +538,14 @@ private fun TvHero(
             modifier = Modifier.fillMaxSize()
         )
 
+        // 渐变遮罩：左→右淡化 + 底部渐隐
         Box(
             Modifier
                 .fillMaxSize()
                 .background(
                     Brush.horizontalGradient(
-                        0f to Color.Black.copy(alpha = 0.86f),
-                        0.45f to Color.Black.copy(alpha = 0.45f),
+                        0f to Color.Black.copy(alpha = 0.88f),
+                        0.45f to Color.Black.copy(alpha = 0.40f),
                         1f to Color.Transparent
                     )
                 )
@@ -438,46 +561,68 @@ private fun TvHero(
                 )
         )
 
+        // 左对齐内容块：logo/标题 + 元信息 + 操作按钮
         Column(
             Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(start = 20.dp, end = 20.dp, bottom = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+                .align(Alignment.BottomStart)
+                .padding(start = 60.dp, end = 320.dp, bottom = 44.dp)
         ) {
             if (item.logoUrl.isNotBlank()) {
                 AsyncImage(
                     model = item.logoUrl,
                     contentDescription = item.title,
                     contentScale = ContentScale.Fit,
-                    modifier = Modifier.height(96.dp).widthIn(max = 460.dp)
+                    modifier = Modifier.height(110.dp).widthIn(max = 520.dp)
                 )
             } else {
                 Text(
                     item.title,
                     color = Color.White,
-                    style = MaterialTheme.typography.displaySmall,
+                    style = MaterialTheme.typography.displayLarge,
                     fontWeight = FontWeight.Bold,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            Spacer(Modifier.height(12.dp))
-            Box(Modifier.fillMaxWidth(0.62f)) {
-                TvMetaRow(item, modifier = Modifier.align(Alignment.Center))
-            }
-            Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Spacer(Modifier.height(14.dp))
+            TvMetaRow(item)
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TvPillButton(
-                    text = if (item.positionMs > 5_000L) "继续播放" else "立即播放",
+                    text = if (item.positionMs > 5_000L) "▶ 继续播放" else "▶ 播放",
                     modifier = Modifier
                         .focusRequester(playFocusRequester)
                         .onFocusChanged { onPlayFocusChanged(it.isFocused) },
                     primary = true,
+                    compact = true,
                     onClick = onPlay
                 )
-                TvPillButton(text = "详情", primary = false, onClick = onDetail)
+                TvPillButton(text = "ⓘ 详情", primary = false, compact = true, onClick = onDetail)
+            }
+        }
+
+        // 轮播指示器（右下）
+        if (heroTotal > 1) {
+            Row(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 60.dp, bottom = 44.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(heroTotal) { idx ->
+                    val active = idx == heroIndex
+                    Box(
+                        Modifier
+                            .height(10.dp)
+                            .width(if (active) 28.dp else 10.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(
+                                if (active) Color.White
+                                else Color.White.copy(alpha = 0.35f)
+                            )
+                    )
+                }
             }
         }
     }
@@ -487,7 +632,8 @@ private fun TvHero(
 @Composable
 private fun TvPosterRow(
     items: List<MediaEntity>,
-    onDetail: (Long) -> Unit
+    onDetail: (Long) -> Unit,
+    cardWidth: androidx.compose.ui.unit.Dp = Prefs.posterSize.tvDp.dp
 ) {
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
@@ -497,8 +643,85 @@ private fun TvPosterRow(
         items(items, key = { "tv_${it.id}" }) { item ->
             TvPosterCard(
                 item = item,
-                onClick = { onDetail(item.id) }
+                onClick = { onDetail(item.id) },
+                width = cardWidth
             )
+        }
+    }
+}
+
+/** 继续观看横排 —— 横向缩略卡，显示进度条 + 集数 */
+@Composable
+private fun TvContinueRow(
+    items: List<MediaEntity>,
+    onDetail: (Long) -> Unit,
+    onPlay: (MediaEntity) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        items(items, key = { "continue_${it.id}" }) { item ->
+            val progress = if (item.durationMs > 0L) (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f) else 0f
+            val interaction = remember { MutableInteractionSource() }
+            val focused by interaction.collectIsFocusedAsState()
+            val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
+            Box(
+                Modifier
+                    .graphicsLayer { scaleX = scale; scaleY = scale }
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AppColors.SurfaceHi)
+                    .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+                    .clickable(interactionSource = interaction, indication = null) {
+                        if (item.positionMs > 5_000L) onPlay(item) else onDetail(item.id)
+                    }
+                    .focusable(interactionSource = interaction)
+                    .width(320.dp)
+                    .height(120.dp)
+            ) {
+                AsyncImage(
+                    model = item.backdropUrl.ifBlank { item.posterUrl },
+                    contentDescription = item.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                // 底部渐变 + 标题 + 进度条
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(Brush.verticalGradient(0.3f to Color.Transparent, 1f to Color.Black.copy(alpha = 0.92f)))
+                )
+                Column(
+                    Modifier.align(Alignment.BottomStart).padding(12.dp).fillMaxWidth()
+                ) {
+                    Text(
+                        item.title,
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (item.seriesKey.isNotBlank() && item.season > 0) {
+                        Text(
+                            "S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')}",
+                            color = Color.White.copy(alpha = 0.7f),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                    if (progress > 0.02f) {
+                        Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.25f))) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(progress)
+                                    .fillMaxHeight()
+                                    .background(AppColors.Brand, RoundedCornerShape(2.dp))
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

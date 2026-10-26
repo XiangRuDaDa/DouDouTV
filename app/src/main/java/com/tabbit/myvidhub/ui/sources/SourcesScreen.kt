@@ -430,8 +430,7 @@ private fun SourceCard(
                     }
                     DropdownMenu(
                         expanded = menuOpen,
-                        onDismissRequest = { menuOpen = false },
-                        containerColor = AppColors.Surface
+                        onDismissRequest = { menuOpen = false }
                     ) {
                         DropdownMenuItem(
                             text = { Text("编辑配置", color = AppColors.TextPrimary) },
