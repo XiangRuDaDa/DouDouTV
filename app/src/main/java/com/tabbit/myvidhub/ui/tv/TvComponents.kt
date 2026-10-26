@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -286,12 +287,17 @@ fun TvPosterCard(
 fun TvSectionTitle(
     text: String,
     modifier: Modifier = Modifier,
+    // 内边距可配：详情页铺满整屏时要把左边界推到 56dp 与信息列对齐，
+    // 其它页面沿用默认值，保持原有观感。
+    contentPadding: PaddingValues = PaddingValues(
+        start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp
+    ),
     trailing: (@Composable () -> Unit)? = null
 ) {
     Row(
         modifier
             .fillMaxWidth()
-            .padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp),
+            .padding(contentPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(

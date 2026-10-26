@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -57,10 +58,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -74,11 +79,6 @@ import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.ui.components.FormatBadgesRow
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
 import androidx.compose.runtime.collectAsState
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -137,6 +137,19 @@ fun TvDetailScreen(
      * （比如剧集还没展开时，主演不可能提前出现）。
      */
     var level by remember(mediaId) { mutableStateOf(0) }
+
+    /**
+     * 渲染层级与逻辑层级分离。
+     *
+     * level 是「用户按到第几层」，pageLevel 是「此刻屏幕上画的是第几层」。
+     * 两者在过渡过程中故意不同步：先是旧页整块上移淡出，中间那一瞬间把 pageLevel
+     * 换成新页并把新页摆到下方，再让新页滑入。这样切换看起来是「翻页」，
+     * 而不是内容在原地长高 / 塌缩。
+     */
+    var pageLevel by remember(mediaId) { mutableStateOf(0) }
+    var lastLevel by remember(mediaId) { mutableStateOf(0) }
+    val flipShift = remember(mediaId) { Animatable(0f) }
+    val flipAlpha = remember(mediaId) { Animatable(1f) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -145,14 +158,6 @@ fun TvDetailScreen(
 
     /** 「选择剧集」按下后把焦点直接送进第一集，省掉一次方向键 */
     val firstEpFocusRequester = remember { FocusRequester() }
-
-    /**
-     * 跳过「展开后自动滚到列表末尾」。
-     *
-     * 遥控器按「下」逐层展开时，新内容长在底部，滚到末尾是对的；
-     * 但「选择剧集」要停在剧集网格开头，两种意图冲突，这里显式让位。
-     */
-    var suppressAutoScroll by remember { mutableStateOf(false) }
 
     // 首帧就用「上次算好的主色 / 内存缓存 / 标题哈希色」，避免进入瞬间一片黑
     // 同手机端：mediaOf() 是 suspend，组合期不能调，改从已订阅的 library 同步取，
@@ -264,6 +269,17 @@ fun TvDetailScreen(
 
     val item = media
 
+    // 主演名单：Emby 刮削优先、TMDB 补齐，取前 5 位（电视一行放得下的量）。
+    // 手机端详情页一直有这排圆形头像，电视端之前只有一行「主演 张三 / 李四」
+    // 的纯文字，最直观的那层信息反而丢了。
+    val tvCast = remember(scraped, tmdb) {
+        val fromEmby = scraped?.actors?.takeIf { it.isNotEmpty() }
+            ?.map { TvCast(it.name, it.role, it.imageUrl) }
+        val fromTmdb = tmdb?.actors?.takeIf { it.isNotEmpty() }
+            ?.map { TvCast(it.name, it.role, it.imageUrl) }
+        (fromEmby ?: fromTmdb).orEmpty().distinctBy { it.name }.take(5)
+    }
+
     // ---------- 分集：按季过滤 + 按页切块 ----------
     val tvSeasons = remember(episodes) { episodes.map { it.season }.distinct().sorted() }
     val seasonEpisodes = remember(episodes, selectedSeason, tvSeasons) {
@@ -312,16 +328,37 @@ fun TvDetailScreen(
     }
     val logo = item?.logoUrl.orEmpty().ifBlank { tmdb?.logoUrl.orEmpty() }
 
-    // 展开后把视图滚到新增内容附近，否则新出现的区块在屏幕外，用户看不到变化
+    /**
+     * 整页上下切换。
+     *
+     * 按「下」：当前页整体上移 + 淡出 → 透明度归零的瞬间换页（并在不可见时把滚动
+     * 位置挪到新页开头）→ 新页从底部轻推上来 + 淡入。
+     * 按「上」方向相反，新页从顶部落下，符合「翻回去」的空间直觉。
+     * 位移用页面高度的比例而不是固定 dp，换分辨率时位移观感一致；不用滑动整屏，
+     * 是因为这里内容是同一条列表的不同段落，小位移 + 换页已经足够表达「翻过一页」。
+     */
     LaunchedEffect(level) {
-        if (suppressAutoScroll) {
-            // 这次展开是「选择剧集」发起的，滚到底会把刚送到第一集的焦点顶飞
-            suppressAutoScroll = false
-        } else if (level > 0) {
-            kotlinx.coroutines.delay(140)
-            val last = listState.layoutInfo.totalItemsCount - 1
-            if (last >= 0) runCatching { listState.animateScrollToItem(last) }
+        if (level == lastLevel) return@LaunchedEffect
+        val down = level > lastLevel
+
+        // ① 旧页退场：向下翻时旧页往上走，向上翻时旧页往下走
+        kotlinx.coroutines.coroutineScope {
+            launch { flipShift.animateTo(if (down) -0.030f else 0.030f, tween(170, easing = FastOutLinearInEasing)) }
+            launch { flipAlpha.animateTo(0f, tween(150, easing = FastOutLinearInEasing)) }
         }
+
+        // ② 不可见的瞬间换页：此时屏幕上没有内容，跳转滚动不会看到跳动
+        pageLevel = level
+        runCatching { listState.scrollToItem(pageScrollTarget(level)) }
+        flipShift.snapTo(if (down) 0.045f else -0.045f)
+
+        // ③ 新页入位：从下方（或上方）推移到正位并淡入
+        kotlinx.coroutines.coroutineScope {
+            launch { flipShift.animateTo(0f, tween(280, easing = LinearOutSlowInEasing)) }
+            launch { flipAlpha.animateTo(1f, tween(230, easing = LinearOutSlowInEasing)) }
+        }
+
+        lastLevel = level
     }
 
     Box(
@@ -381,7 +418,13 @@ fun TvDetailScreen(
         val screenH = LocalConfiguration.current.screenHeightDp.dp
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                // 整页切换的位移与透明度：位移按页面高度取比例，任何分辨率都同一个观感
+                .graphicsLayer {
+                    translationY = flipShift.value * size.height
+                    alpha = flipAlpha.value
+                },
             contentPadding = PaddingValues(bottom = 60.dp)
         ) {
             // 顶部占位：把 L0（标题/评分/按钮）推到屏幕 55% 处，
@@ -400,11 +443,18 @@ fun TvDetailScreen(
                         TvEmptyState("找不到该内容", modifier = boxMod)
                     }
                 } else {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(start = 56.dp, end = 56.dp)
-                    ) {
+                    // 外层通栏：剧情、元信息、导演、类型这些「要读的内容」铺满整屏，
+                    // 右侧不再空出一大片。限宽只作用在下面的 L0 首屏骨架上。
+                    Column(Modifier.fillMaxWidth()) {
+                        // L0 首屏骨架只占左 58%：电视是 16:9 横屏，首屏只有标题、
+                        // 评分胶囊、徽章和一个主按钮，铺满整宽会变成「左边一列字、
+                        // 右边一大片空」。左 58% 放文字与按钮，右 42% 留给海报主视觉；
+                        // 用比例不用固定 dp，换分辨率、换屏幕比例时左右关系都不会跑偏。
+                        Column(
+                            Modifier
+                                .fillMaxWidth(0.58f)
+                                .padding(start = 56.dp, end = 12.dp)
+                        ) {
                         // 标题位：Logo 与文字标题共用同一块「标题槽」。
                         // 以前有刮削时是一张很大的艺术字图、没有刮削时是两行大字，
                         // 两种片子的首屏高度和重心完全不同。现在统一成：起始高度一致、
@@ -521,14 +571,11 @@ fun TvDetailScreen(
                                     modifier = Modifier.focusRequester(playFocusRequester),
                                     onClick = {
                                         epPage = 0
-                                        if (level < 2) {
-                                            suppressAutoScroll = true
-                                            level = 2
-                                        }
+                                        // 展开交给整页切换动画：它会在换页的不可见瞬间
+                                        // 把滚动位置挪到选集开头，这里只负责把焦点送到第一集。
+                                        if (level < 2) level = 2
                                         scope.launch {
-                                            kotlinx.coroutines.delay(260)
-                                            runCatching { listState.animateScrollToItem(3) }
-                                            kotlinx.coroutines.delay(280)
+                                            kotlinx.coroutines.delay(620)
                                             runCatching { firstEpFocusRequester.requestFocus() }
                                         }
                                     }
@@ -561,14 +608,18 @@ fun TvDetailScreen(
                             }
                         }
 
+                        } // ← L0 首屏骨架（58%）到此结束
+
+                        // L1/L3 的正文（剧情、元信息、导演、类型、署名）铺满整屏，
+                        // 左内边距与 L0 骨架的 56dp 对齐，展开后左侧边界连成一条直线。
+                        Column(Modifier.padding(start = 56.dp, end = 56.dp)) {
                         // ========== L1：剧情简介（评分与徽章已在 L0 常驻） ==========
                         // 默认不显示，按下键才展开；这样进页面第一眼只有标题、评分、
                         // 徽章和播放按钮，海报背景仍能占满整屏，是「大图沉浸」的前提。
-                        AnimatedVisibility(
-                            visible = level >= 1,
-                            enter = fadeIn(tween(260)) + expandVertically(tween(260)),
-                            exit = fadeOut(tween(180)) + shrinkVertically(tween(180))
-                        ) {
+                        // 这里不再做「高度展开」动画：展开/收起已经由外层整页切换统一
+                        // 负责（旧页上移淡出 → 换页 → 新页滑入）。两层动画叠加会让
+                        // 文字在淡入过程中又长高一次，看起来像内容在抽搐。
+                        if (pageLevel >= 1) {
                             Column {
                                 val overview = tmdb?.overview?.takeIf { it.isNotBlank() }
                                     ?: scraped?.tagline?.takeIf { it.isNotBlank() }
@@ -590,11 +641,8 @@ fun TvDetailScreen(
                         }
 
                         // ========== L3：主演 / 导演 / 类型 / 署名 ==========
-                        AnimatedVisibility(
-                            visible = level >= 3,
-                            enter = fadeIn(tween(260)) + expandVertically(tween(260)),
-                            exit = fadeOut(tween(180)) + shrinkVertically(tween(180))
-                        ) {
+                        // 同上：只判断显示与否，过渡交给外层整页切换
+                        if (pageLevel >= 3) {
                             Column {
                                 val directors = (tmdb?.directors?.takeIf { it.isNotEmpty() }?.map { it.name }
                                     ?: scraped?.directors?.map { it.name })
@@ -603,12 +651,8 @@ fun TvDetailScreen(
                                     Spacer(Modifier.height(12.dp))
                                     TvInfoLine("导演", directors)
                                 }
-                                val actors = (tmdb?.actors?.takeIf { it.isNotEmpty() }?.map { it.name }
-                                    ?: scraped?.actors?.map { it.name })
-                                    ?.take(8)?.joinToString(" / ").orEmpty()
-                                if (actors.isNotBlank()) {
-                                    TvInfoLine("主演", actors)
-                                }
+                                // 「主演」不再在这里出纯文字：剧集下方已有
+                                // 圆形头像 + 姓名 + 角色的主演行，重复一行字只会挤占空间。
                                 if (item.genres.isNotBlank()) {
                                     TvInfoLine("类型", item.genres)
                                 }
@@ -619,30 +663,25 @@ fun TvDetailScreen(
                             }
                         }
 
-                        // 层级提示：告诉用户还剩下几层，避免「信息被藏起来但不知道」的情况
-                        if (level < 3) {
-                            Spacer(Modifier.height(14.dp))
-                            Text(
-                                if (level == 0) "▼ 按下键查看剧情、评分与剧集"
-                                else if (level == 1) "▼ 按下键查看剧集　　▲ 按上键收起"
-                                else "▲ 按上键收起",
-                                color = Color.White.copy(alpha = 0.42f),
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
+                        } // ← L1/L3 通栏内容到此结束
+                        // 层级提示已移到屏幕最底边固定悬浮，见下方 Box 内的吸底块。
                     }
                 }
             }
 
             // ---------- 分集（网格 + 分季 + 翻页）：L2 才出现 ----------
-            if (level >= 2 && episodes.isNotEmpty()) {
+            if (pageLevel >= 2 && episodes.isNotEmpty()) {
                 item {
                     TvSectionTitle(
                         text = if (tvSeasons.size > 1) {
                             "选集（第 $selectedSeason 季 · 共 ${seasonEpisodes.size} 集）"
                         } else {
                             "选集（共 ${episodes.size} 集）"
-                        }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(
+                            start = 56.dp, end = 56.dp, top = 22.dp, bottom = 10.dp
+                        )
                     ) {
                         // 右上角：季切换 + 翻页，几百集不用一路横划到底
                         Row(
@@ -713,7 +752,7 @@ fun TvDetailScreen(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(start = 20.dp, end = 20.dp, bottom = 10.dp),
+                                .padding(start = 56.dp, end = 56.dp, bottom = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             rowEps.forEachIndexed { idx, ep ->
@@ -733,7 +772,21 @@ fun TvDetailScreen(
                         }
                     }
                 }
-            } else if (level >= 2 && !loading && item != null && item.kind == MediaKind.SERIES) {
+
+                // 剧集下方主演行：与手机端详情页对齐，补上圆形头像 + 姓名 + 角色。
+                if (tvCast.isNotEmpty()) {
+                    item(key = "tv_cast_row") {
+                        TvSectionTitle(
+                            text = "主演",
+                            modifier = Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(
+                                start = 56.dp, end = 56.dp, top = 22.dp, bottom = 10.dp
+                            )
+                        )
+                        TvCastRow(tvCast)
+                    }
+                }
+            } else if (pageLevel >= 2 && !loading && item != null && item.kind == MediaKind.SERIES) {
                 // 剧集但分集为空：加载失败时给用户一个明确提示，而不是一块空白
                 item {
                     TvEmptyState(
@@ -745,7 +798,38 @@ fun TvDetailScreen(
             }
         }
         // 遥控器 Back 键 = TvApp.BackHandler 统一处理，不再显示页面内返回按钮
+
+        // 层级提示：固定吸在屏幕最底边，不随内容滚动。
+        // 之前它跟在信息块末尾，展开几层就被推到屏幕外 —— 用户既看不到
+        // 「还能再展开」，也看不到「怎么收起来」，提示等于失效。
+        // 现在是根 Box 的最后一个子元素，始终浮在内容之上、位置恒定。
+        if (level < 3) {
+            Text(
+                if (level == 0) "▼ 按下键查看剧情、评分与剧集"
+                else if (level == 1) "▼ 按下键查看剧集  ▲ 按上键收起"
+                else "▲ 按上键收起",
+                color = Color.White.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 18.dp)
+            )
+        }
     }
+}
+
+/**
+ * 每一层对应的「页首」在列表里的位置。
+ *
+ * 0 = 顶部占位（看到 55% 处的大图与 L0 首屏），1 = 标题块（剧情/元信息/影人信息），
+ * 2 = 选集标题（剧集网格从第一行开始）。整页切换时在不可见的瞬间跳到这里，
+ * 于是每一层都像独立的一屏，而不是在同一条长列表里滚动了一小段。
+ */
+private fun pageScrollTarget(level: Int): Int = when (level) {
+    0 -> 0
+    1 -> 1
+    2 -> 2
+    else -> 1
 }
 
 @Composable
@@ -767,11 +851,12 @@ private fun TvInfoLine(label: String, value: String) {
     }
 }
 
-/** 每页显示的分集数：电视端一行 6 个、共 4 行，一屏看完，不用横向滑 */
-private const val TV_EPS_PAGE = 24
+/** 每页显示的分集数：电视端一行 10 个、共 4 行，一屏看完，不用横向滑 */
+private const val TV_EPS_PAGE = 40
 
-/** 分集网格列数 */
-private const val TV_GRID_COLS = 6
+/** 分集网格列数：详情区铺满整屏后从 6 列提到 10 列，
+ *  单格宽度维持在 85dp 上下，比原来更宽裕，遥控器焦点框也更好认。 */
+private const val TV_GRID_COLS = 10
 
 /** 本地刮削结果的新鲜期：一周内不重复请求 TMDB */
 private const val TV_SCRAPE_FRESH_MS = 7L * 24 * 60 * 60 * 1000
@@ -901,6 +986,71 @@ private fun FormatBadgesRow(
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium
                 )
+            }
+        }
+    }
+}
+
+/** 电视端主演行用的轻量数据结构，避免直接依赖 Emby / TMDB 两套 Person 类型 */
+private data class TvCast(val name: String, val role: String, val imageUrl: String)
+
+/**
+ * 主演头像行：圆形头像 + 姓名 + 角色。
+ * 尺寸按十英尺界面放大（72dp 头像），三米外也能看清脸；
+ * 通栏铺满，左起 56dp 与上方标题、剧集网格对齐成一条左边界。
+ */
+@Composable
+private fun TvCastRow(cast: List<TvCast>) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 56.dp, end = 56.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        cast.forEach { person ->
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.width(88.dp)
+            ) {
+                Box(
+                    Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(AppColors.SurfaceHi),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (person.imageUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = person.imageUrl,
+                            contentDescription = person.name,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Text(
+                            person.name.take(1),
+                            color = AppColors.TextSecondary,
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    person.name,
+                    color = AppColors.TextPrimary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (person.role.isNotBlank()) {
+                    Text(
+                        person.role,
+                        color = AppColors.TextTertiary,
+                        style = MaterialTheme.typography.labelSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
         }
     }
