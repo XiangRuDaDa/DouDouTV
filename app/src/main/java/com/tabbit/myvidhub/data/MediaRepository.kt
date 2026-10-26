@@ -68,6 +68,9 @@ class MediaRepository(private val context: Context) {
         mediaDao.episodesBySource(seriesKey, playSource)
     suspend fun hasAnyMedia(): Boolean = mediaDao.countAll() > 0
 
+    /** 某来源已入库的条目数（来源页展示「N 部影片」用） */
+    suspend fun countBySource(sourceId: Long): Int = mediaDao.countBySource(sourceId)
+
     /**
      * 解析 TVBox 云盘播放地址。
      *

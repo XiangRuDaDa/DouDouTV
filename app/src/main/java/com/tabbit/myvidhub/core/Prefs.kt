@@ -17,6 +17,7 @@ object Prefs {
     private const val KEY_TONE_PREFIX = "detail_tone_"
     private const val KEY_HOME_SOURCE_ID = "home_source_id"
     private const val KEY_HOME_SITE_KEY = "home_site_key"
+    private const val KEY_SOURCE_LAST_SYNC = "source_last_sync_"
 
     /** 缩略图尺寸三档 */
     enum class PosterSize(val mobileDp: Int, val tvDp: Int) {
@@ -100,6 +101,18 @@ object Prefs {
         set(value) {
             sp.edit().putLong(KEY_HOME_SOURCE_ID, value).apply()
         }
+
+    /**
+     * 某个来源最近一次同步成功的时间戳（毫秒）；0 表示从未同步。
+     *
+     * 只用 SharedPreferences 存，不改 sources 表结构 —— 这是纯展示态数据，
+     * 丢了也不影响同步逻辑，没必要为它写一次 Room Migration。
+     */
+    fun sourceLastSync(sourceId: Long): Long = sp.getLong(KEY_SOURCE_LAST_SYNC + sourceId, 0L)
+
+    fun setSourceLastSync(sourceId: Long, timestamp: Long) {
+        sp.edit().putLong(KEY_SOURCE_LAST_SYNC + sourceId, timestamp).apply()
+    }
 
     /** 首页选中的 TVBox 站点 key；空字符串表示「全部站点」 */
     var homeSiteKey: String

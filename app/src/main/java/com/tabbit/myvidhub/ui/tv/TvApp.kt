@@ -19,7 +19,7 @@ import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.player.tv.TvPlayerActivity
 import com.tabbit.myvidhub.ui.settings.SettingsScreen
-import com.tabbit.myvidhub.ui.sources.SourcesScreen
+import com.tabbit.myvidhub.ui.sources.TvSourcesScreen
 
 /**
  * 电视端外壳（完全独立于手机端 PhoneApp）。
@@ -91,7 +91,7 @@ fun TvApp(vm: LibraryViewModel) {
                     }
                 )
 
-                is TvRoute.Sources -> SourcesScreen(vm = vm, isTv = true)
+                is TvRoute.Sources -> TvSourcesScreen(vm = vm)
                 is TvRoute.Settings -> SettingsScreen(vm = vm)
             }
         }

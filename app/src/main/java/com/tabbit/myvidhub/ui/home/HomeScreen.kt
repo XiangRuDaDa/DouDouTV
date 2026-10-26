@@ -319,14 +319,14 @@ fun HomeScreen(
                     selectedId = selectedSource?.id,
                     onSelect = { vm.selectHomeSource(it) }
                 )
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(5.dp))
                 if (showLineButton) {
                     HomeLineSelector(
                         sites = namedSites,
                         selectedKey = vm.homeSiteKey,
                         onSelect = { key, site -> vm.selectHomeSite(key, site) }
                     )
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(5.dp))
                 }
             }
 

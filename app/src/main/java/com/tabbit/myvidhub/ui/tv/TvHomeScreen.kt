@@ -334,52 +334,19 @@ private fun TvTopBar(
                     .focusRequester(syncFocusRequester)
                     .onFocusChanged { onSyncFocusChanged(it.isFocused) }
             )
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(10.dp))
+        }
+        TvPillButton("数据来源", onClick = onHomeSource)
+        Spacer(Modifier.width(10.dp))
+        if (onHomeSite != null) {
+            TvPillButton("线路", onClick = onHomeSite)
+            Spacer(Modifier.width(10.dp))
         }
         TvPillButton("搜索", primary = false, onClick = onSearch)
-        Spacer(Modifier.width(12.dp))
-        TvIconButton(Icons.Filled.Source, "选择首页来源", onClick = onHomeSource)
-        Spacer(Modifier.width(12.dp))
-        if (onHomeSite != null) {
-            TvIconButton(Icons.Filled.AltRoute, "选择线路", onClick = onHomeSite)
-            Spacer(Modifier.width(12.dp))
-        }
+        Spacer(Modifier.width(10.dp))
         TvPillButton("来源", primary = false, onClick = onSources)
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(10.dp))
         TvPillButton("设置", primary = false, onClick = onSettings)
-    }
-}
-
-/** 电视端图标按钮：聚焦时白底深色图标，未聚焦半透明白底白图标（与文字按钮同尺寸同焦点逻辑） */
-@Composable
-private fun TvIconButton(
-    icon: ImageVector,
-    contentDescription: String?,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "tv_icon")
-    Box(
-        modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (focused) Color.White else Color.White.copy(alpha = 0.14f))
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .focusable()
-            .padding(12.dp)
-    ) {
-        Icon(
-            icon,
-            contentDescription = contentDescription,
-            tint = if (focused) Color.Black else Color.White
-        )
     }
 }
 

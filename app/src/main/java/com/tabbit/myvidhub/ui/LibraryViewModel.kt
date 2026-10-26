@@ -67,6 +67,34 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     var message by mutableStateOf<String?>(null)
 
+    // ---------- 来源页展示用的派生数据 ----------
+
+    /** 各来源已入库条目数（内存缓存，来源增删同步后刷新） */
+    private val _sourceCounts = mutableStateMapOf<Long, Int>()
+    val sourceCounts: Map<Long, Int> get() = _sourceCounts
+
+    /** 各来源最近同步时间的镜像，变化时触发界面重组；真实值落盘在 Prefs */
+    var sourceLastSync by mutableStateOf<Map<Long, Long>>(emptyMap())
+        private set
+
+    fun lastSyncOf(sourceId: Long): Long =
+        sourceLastSync[sourceId] ?: Prefs.sourceLastSync(sourceId)
+
+    /** 刷新所有来源的条目数（删除来源后不清也无妨，界面按 id 取） */
+    private suspend fun refreshSourceCounts() {
+        runCatching {
+            repo.allSources().forEach { _sourceCounts[it.id] = repo.countBySource(it.id) }
+        }
+    }
+
+    /** 记录某来源同步成功的时间与条目数 */
+    private suspend fun markSynced(sourceId: Long) {
+        val ts = System.currentTimeMillis()
+        Prefs.setSourceLastSync(sourceId, ts)
+        sourceLastSync = sourceLastSync + (sourceId to ts)
+        _sourceCounts[sourceId] = runCatching { repo.countBySource(sourceId) }.getOrDefault(0)
+    }
+
     // ---------- 首页来源 / 站点（线路）选择 ----------
 
     /** 选中的首页加载来源；null = 未选择（加载时回退到第一个配置的来源） */
@@ -131,6 +159,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
+        // 启动时汇总各来源已入库条目数（来源页「N 个条目」展示用）
+        viewModelScope.launch { refreshSourceCounts() }
         // 恢复上次选中的来源时，预取该 TVBox 来源的站点（线路）列表
         viewModelScope.launch {
             homeSourceId?.let { loadHomeSites(it) }
@@ -365,9 +395,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun runSync(source: SourceEntity): Int = when (source.kind) {
-        SourceKind.EMBY -> repo.syncEmby(source) { c -> scanMessage = "${source.name}：$c" }
-        SourceKind.TVBOX -> repo.syncTvBox(source) { c -> scanMessage = "${source.name}：$c" }
+    private suspend fun runSync(source: SourceEntity): Int {
+        val count = when (source.kind) {
+            SourceKind.EMBY -> repo.syncEmby(source) { c -> scanMessage = "${source.name}：$c" }
+            SourceKind.TVBOX -> repo.syncTvBox(source) { c -> scanMessage = "${source.name}：$c" }
+        }
+        // 同步成功才记录时间戳：失败时不该把「最近同步」刷新成刚刚
+        markSynced(source.id)
+        return count
     }
 
     fun removeSource(source: SourceEntity) {
@@ -449,6 +484,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     fun scrapeCacheSize(): Int = repo.scrapeCacheSize()
 
     // ---------- 扫描 ----------
+
+    /** 界面顶栏「全部同步」入口，语义等同 scanAll，命名更贴合按钮文案 */
+    fun syncAll() = scanAll()
 
     fun scanAll() {
         if (scanning) return
