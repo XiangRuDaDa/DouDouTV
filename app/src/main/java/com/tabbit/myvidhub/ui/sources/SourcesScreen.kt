@@ -309,53 +309,66 @@ private fun SourceCard(
             .fillMaxWidth()
             .alpha(if (source.enabled) 1f else 0.55f)
     ) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
 
-            // ---- 第一行：状态点 + 名称 + 使用中 + 开关 ----
+            // ───── 第一行：左侧 [状态点 + 名称]  右侧 ["使用中"徽章 + Switch] ─────
+            // 左侧 weight(1f) 撑满剩余空间；右侧自然宽度锚定最右
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .background(statusColor(source), CircleShape)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    source.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = AppColors.TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                if (isActiveHome && source.enabled) {
-                    Spacer(Modifier.width(6.dp))
+                // 左侧组：状态圆点 + 名称（整体 fill，名称 ellipsis）
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f, fill = true)
+                ) {
                     Box(
                         Modifier
-                            .background(AppColors.Brand.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            "使用中",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = AppColors.BrandSoft
-                        )
-                    }
-                }
-                Spacer(Modifier.weight(1f))
-                Switch(
-                    checked = source.enabled,
-                    onCheckedChange = { onToggle() },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = AppColors.Brand,
-                        uncheckedTrackColor = AppColors.SurfaceHi
+                            .size(8.dp)
+                            .background(statusColor(source), CircleShape)
                     )
-                )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        source.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AppColors.TextPrimary,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(Modifier.width(10.dp))
+
+                // 右侧组：徽章（可选）+ Switch —— 位置固定不变
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isActiveHome && source.enabled) {
+                        Box(
+                            Modifier
+                                .background(AppColors.Brand.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 7.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                "使用中",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.BrandSoft,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Switch(
+                        checked = source.enabled,
+                        onCheckedChange = { onToggle() },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = AppColors.Brand,
+                            uncheckedTrackColor = AppColors.SurfaceHi
+                        )
+                    )
+                }
             }
 
-            Spacer(Modifier.height(7.dp))
+            Spacer(Modifier.height(8.dp))
 
-            // ---- 第二行：类型徽章 + 地址 ----
+            // ───── 第二行：类型徽章 + 地址 ─────
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier
@@ -364,18 +377,19 @@ private fun SourceCard(
                             else AppColors.SurfaceHi,
                             RoundedCornerShape(4.dp)
                         )
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .padding(horizontal = 7.dp, vertical = 3.dp)
                 ) {
                     Text(
                         if (source.kind == SourceKind.EMBY) "EMBY" else "TVBOX",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (source.kind == SourceKind.EMBY) AppColors.Brand else AppColors.TextSecondary
+                        color = if (source.kind == SourceKind.EMBY) AppColors.Brand else AppColors.TextSecondary,
+                        fontWeight = FontWeight.Medium
                     )
                 }
-                Spacer(Modifier.width(7.dp))
+                Spacer(Modifier.width(8.dp))
                 Text(
                     source.location,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelMedium,
                     color = AppColors.TextTertiary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -383,13 +397,13 @@ private fun SourceCard(
                 )
             }
 
-            Spacer(Modifier.height(9.dp))
+            Spacer(Modifier.height(10.dp))
 
-            // ---- 第三行：统计信息 + 更多菜单 ----
+            // ───── 第三行：统计信息 + 同步状态 + 更多菜单 ─────
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     buildStats(source, count, lastSync),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelMedium,
                     color = AppColors.TextTertiary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -402,21 +416,22 @@ private fun SourceCard(
                         strokeWidth = 2.dp,
                         color = AppColors.Brand
                     )
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(6.dp))
                 }
 
                 Box {
-                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(30.dp)) {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Filled.MoreVert,
                             contentDescription = "更多操作",
                             tint = AppColors.TextSecondary,
-                            modifier = Modifier.size(19.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                     DropdownMenu(
                         expanded = menuOpen,
-                        onDismissRequest = { menuOpen = false }
+                        onDismissRequest = { menuOpen = false },
+                        containerColor = AppColors.Surface
                     ) {
                         DropdownMenuItem(
                             text = { Text("编辑配置", color = AppColors.TextPrimary) },
@@ -526,19 +541,36 @@ private fun SourceDialog(
     var username by remember { mutableStateOf(initial?.username ?: "") }
     var password by remember { mutableStateOf(initial?.password ?: "") }
 
+    val trimmedName = name.trim()
+    val trimmedLoc = location.trim()
+    val canSubmit = trimmedName.isNotBlank() && trimmedLoc.isNotBlank()
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = AppColors.Surface,
+        shape = RoundedCornerShape(18.dp),
         title = {
-            Text(if (initial == null) "添加视频来源" else "编辑视频来源", color = AppColors.TextPrimary)
+            Text(
+                if (initial == null) "添加视频来源" else "编辑视频来源",
+                color = AppColors.TextPrimary,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.SemiBold
+            )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+
+                // 类型选择器
+                Text(
+                    "来源类型",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AppColors.TextSecondary
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     FilterChip(
                         selected = kind == SourceKind.EMBY,
                         onClick = { kind = SourceKind.EMBY },
-                        label = { Text("Emby") },
+                        label = { Text("Emby 媒体服务器", fontSize = 13.sp) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AppColors.Brand,
                             selectedLabelColor = Color.White,
@@ -549,7 +581,7 @@ private fun SourceDialog(
                     FilterChip(
                         selected = kind == SourceKind.TVBOX,
                         onClick = { kind = SourceKind.TVBOX },
-                        label = { Text("TVBox") },
+                        label = { Text("TVBox 接口", fontSize = 13.sp) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AppColors.Brand,
                             selectedLabelColor = Color.White,
@@ -559,73 +591,100 @@ private fun SourceDialog(
                     )
                 }
 
-                OutlinedTextField(
+                Spacer(Modifier.height(4.dp))
+
+                // 名称（两种类型都需要）
+                MobileFormField(
+                    label = "来源名称",
                     value = name,
+                    placeholder = if (kind == SourceKind.EMBY) "例如：我的 NAS 影库" else "例如：主线路",
                     onValueChange = { name = it },
-                    label = { Text("名称") },
-                    placeholder = { Text(if (kind == SourceKind.EMBY) "我的 NAS 影库" else "主线路") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    imeAction = ImeAction.Next
                 )
 
-                if (kind == SourceKind.EMBY) {
-                    OutlinedTextField(
-                        value = location,
-                        onValueChange = { location = it },
-                        label = { Text("服务器地址") },
-                        placeholder = { Text("https://emby.example.com") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it },
-                        label = { Text("用户名") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("密码") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text(
-                        "添加时会自动登录并保存会话，无需重复输入密码",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AppColors.TextTertiary
-                    )
-                } else {
-                    OutlinedTextField(
-                        value = location,
-                        onValueChange = { location = it },
-                        label = { Text("TVBox / CMS 接口地址") },
-                        placeholder = { Text("https://example.com/api.php/provide/vod/") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text(
-                        "接口需支持 ?ac=videolist 返回 JSON（苹果CMS 通用格式）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AppColors.TextTertiary
-                    )
+                when (kind) {
+                    SourceKind.EMBY -> {
+                        MobileFormField(
+                            label = "服务器地址",
+                            value = location,
+                            placeholder = "https://emby.example.com",
+                            onValueChange = { location = it },
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Next,
+                            hint = "支持 HTTPS 反向代理；局域网可用 http://192.168.x.x:8920"
+                        )
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(Modifier.weight(1f)) {
+                                MobileFormField(
+                                    label = "用户名",
+                                    value = username,
+                                    placeholder = "admin",
+                                    onValueChange = { username = it },
+                                    imeAction = ImeAction.Next
+                                )
+                            }
+                            Box(Modifier.weight(1f)) {
+                                MobileFormField(
+                                    label = "密码",
+                                    value = password,
+                                    placeholder = "••••••••",
+                                    isPassword = true,
+                                    onValueChange = { password = it },
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Done
+                                )
+                            }
+                        }
+                        Text(
+                            "添加时会自动登录并保存会话，下次启动无需重新输入密码",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AppColors.TextTertiary
+                        )
+                    }
+
+                    SourceKind.TVBOX -> {
+                        MobileFormField(
+                            label = "TVBox / CMS 接口地址",
+                            value = location,
+                            placeholder = "https://example.com/api.php/provide/vod/",
+                            onValueChange = { location = it },
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Done,
+                            hint = "接口需支持 ?ac=videolist 返回 JSON（苹果CMS 通用格式）"
+                        )
+                    }
                 }
             }
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(name, kind, location, username, password) },
+                onClick = {
+                    if (canSubmit) {
+                        onConfirm(
+                            trimmedName, kind, trimmedLoc,
+                            if (kind == SourceKind.EMBY) username.trim() else "",
+                            if (kind == SourceKind.EMBY) password else ""
+                        )
+                    }
+                },
+                enabled = canSubmit,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = AppColors.Brand,
-                    contentColor = Color.White
+                    contentColor = Color.White,
+                    disabledContainerColor = AppColors.SurfaceHi,
+                    disabledContentColor = AppColors.TextTertiary
+                ),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(
+                    if (initial == null) "添加来源" else "保存",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium
                 )
-            ) { Text(if (initial == null) "添加" else "保存") }
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
@@ -633,4 +692,63 @@ private fun SourceDialog(
             }
         }
     )
+}
+
+/** 手机端表单输入字段：OutlinedTextField 包装，统一高度 + 品牌色聚焦 + 可选 hint */
+@Composable
+private fun MobileFormField(
+    label: String,
+    value: String,
+    placeholder: String,
+    onValueChange: (String) -> Unit,
+    isPassword: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    imeAction: ImeAction = ImeAction.Next,
+    hint: String? = null
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            label = {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = AppColors.TextSecondary
+                )
+            },
+            placeholder = {
+                Text(
+                    placeholder,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AppColors.TextTertiary
+                )
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            visualTransformation = if (isPassword) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+            keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
+            textStyle = androidx.compose.ui.text.TextStyle(
+                fontSize = 15.sp,
+                color = AppColors.TextPrimary
+            ),
+            shape = RoundedCornerShape(10.dp),
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                unfocusedContainerColor = AppColors.Bg,
+                focusedContainerColor = AppColors.Bg,
+                unfocusedBorderColor = AppColors.SurfaceHi,
+                focusedBorderColor = AppColors.Brand,
+                cursorColor = AppColors.Brand,
+                focusedTextColor = AppColors.TextPrimary,
+                unfocusedTextColor = AppColors.TextPrimary
+            )
+        )
+        if (hint != null) {
+            Text(
+                text = hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = AppColors.TextTertiary
+            )
+        }
+    }
 }

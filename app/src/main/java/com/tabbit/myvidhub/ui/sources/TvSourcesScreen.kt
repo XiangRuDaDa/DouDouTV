@@ -1,17 +1,30 @@
 package com.tabbit.myvidhub.ui.sources
 
+import androidx.compose.animation.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -19,109 +32,213 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.tv.TvBackButton
+import com.tabbit.myvidhub.ui.tv.TvIconButton
+import com.tabbit.myvidhub.ui.tv.TvPillButton
 
 /**
- * 电视端来源管理（遥控器方向键导航，卡片保持单行紧凑布局）。
+ * TV 端来源管理 —— 10 英尺界面。
  *
- * 与手机端 SourcesScreen 完全分离：TV 端不适合多行卡片 + 弹出菜单。
+ * 与手机端 SourcesScreen 完全分离：
+ *   · 单列 → 三列大卡片网格（响应式，小屏 2 列 / 1080p 3 列 / 4K 4+ 列）
+ *   · AlertDialog → 全屏遮罩面板表单（900dp 宽）
+ *   · 无 TV 焦点态 → 对齐 TvPosterCard / TvPillButton 组件库焦点模式
+ *   · 无删除确认 → 新增红色危险对话框，默认聚焦"取消"防误触
  *
- * 来源管理：只保留 Emby 与 TVBox 两类。
+ * 核心组件：TvSourceCard / TvSourceFormPanel / TvDeleteConfirmDialog
  *
- * Emby 是「服务器 + 账号」模型，添加时即尝试登录换 token；
- * TVBox 是「JSON 接口」模型，只需一个 CMS 接口地址。
+ * TV 组件复用：TvPillButton / TvIconButton / TvBackButton（TvComponents.kt）
  */
 @Composable
 fun TvSourcesScreen(vm: LibraryViewModel) {
     val sources by vm.sources.collectAsStateWithLifecycle()
+
     var showAdd by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<SourceEntity?>(null) }
+    var deleting by remember { mutableStateOf<SourceEntity?>(null) }
 
-    Scaffold(
-        containerColor = AppColors.Bg,
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showAdd = true },
-                containerColor = AppColors.Brand,
-                contentColor = Color.White,
-                icon = { Icon(Icons.Filled.Add, contentDescription = null) },
-                text = { Text("添加来源") }
-            )
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            item {
-                Column(Modifier.padding(bottom = 6.dp)) {
-                    Text(
-                        "视频来源",
-                        style = MaterialTheme.typography.headlineMedium,
-                        color = AppColors.TextPrimary
-                    )
-                    Text(
-                        "支持 Emby 媒体服务器与 TVBox 接口，最多可添加多个来源",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AppColors.TextTertiary
+    val activeHomeId = vm.effectiveHomeSourceId()
+    val embys = remember(sources) { sources.filter { it.kind == SourceKind.EMBY } }
+    val tvboxes = remember(sources) { sources.filter { it.kind == SourceKind.TVBOX } }
+
+    BoxWithConstraints {
+        val screenWidth = maxWidth
+        // 响应式列数：380dp 为基准，向下取整；最小 2 列
+        val columns = maxOf(2, (screenWidth / 380.dp).toInt())
+        val cardGap = 20.dp
+        // 卡片宽度 = (可用宽 - padding - gap) / 列数；列间 1 个 gap 宽
+        val usableWidth = screenWidth - 80.dp // 左右各 40dp（与 TvBackButton 对齐）
+        val cardWidth = (usableWidth - cardGap * (columns - 1)) / columns
+        val cardHeight = (cardWidth * 0.76f).coerceAtLeast(260.dp).coerceAtMost(340.dp)
+
+        Box(Modifier.fillMaxSize().background(AppColors.Bg)) {
+
+            // ========== 顶部栏 ==========
+            Row(
+                Modifier.fillMaxWidth().padding(top = 0.dp, start = 20.dp, end = 40.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    // TvBackButton 自带 start=20dp top=20dp 的内部 padding，与顶部栏布局对齐
+                    TvBackButton(onBack = { /* 交由 TV 导航栈处理；这里只是占位 */ })
+                    Column {
+                        Text(
+                            text = "视频来源",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = AppColors.TextPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "支持 Emby 媒体服务器与 TVBox 接口 · 共 ${sources.size} 个来源",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AppColors.TextTertiary
+                        )
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (vm.scanning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = AppColors.Brand
+                        )
+                        Text(
+                            text = "同步中…",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = AppColors.TextSecondary
+                        )
+                    } else {
+                        TvPillButton(
+                            text = "全部同步",
+                            primary = false,
+                            compact = true,
+                            onClick = { vm.syncAll() }
+                        )
+                    }
+                    TvPillButton(
+                        text = "＋ 添加来源",
+                        primary = true,
+                        compact = true,
+                        onClick = { showAdd = true }
                     )
                 }
             }
 
-            if (sources.isEmpty()) {
-                item { TvEmptySourceHint() }
-            } else {
-                items(sources, key = { it.id }) { src ->
-                    SourceRow(
-                        source = src,
-                        busy = vm.scanning,
-                        onSync = { vm.scanOne(src) },
-                        onRelogin = { vm.reloginEmby(src) },
-                        onEdit = { editing = src },
-                        onToggle = { vm.toggleSourceEnabled(src) },
-                        onDelete = { vm.removeSource(src) }
-                    )
+            // ========== 内容区 ==========
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                modifier = Modifier.fillMaxSize().padding(top = 110.dp, start = 40.dp, end = 40.dp, bottom = 32.dp),
+                horizontalArrangement = Arrangement.spacedBy(cardGap),
+                verticalArrangement = Arrangement.spacedBy(cardGap),
+                contentPadding = PaddingValues(top = 8.dp)
+            ) {
+                // ---- Emby 分组标题 ----
+                if (embys.isNotEmpty()) {
+                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(this.maxLineSpan) }) {
+                        TvGroupHeader(title = "Emby 媒体服务器", count = embys.size)
+                    }
+                    items(embys, key = { "emby-${it.id}" }) { src ->
+                        TvSourceCard(
+                            source = src,
+                            width = cardWidth,
+                            height = cardHeight,
+                            isActiveHome = src.id == activeHomeId,
+                            busy = vm.scanning,
+                            count = vm.sourceCounts[src.id],
+                            lastSync = vm.lastSyncOf(src.id),
+                            onSync = { vm.scanOne(src) },
+                            onRelogin = { vm.reloginEmby(src) },
+                            onEdit = { editing = src },
+                            onToggle = { vm.toggleSourceEnabled(src) },
+                            onDelete = { deleting = src }
+                        )
+                    }
+                }
+
+                // ---- TVBox 分组标题 ----
+                if (tvboxes.isNotEmpty()) {
+                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(this.maxLineSpan) }) {
+                        TvGroupHeader(title = "TVBox 接口", count = tvboxes.size)
+                    }
+                    items(tvboxes, key = { "tvbox-${it.id}" }) { src ->
+                        TvSourceCard(
+                            source = src,
+                            width = cardWidth,
+                            height = cardHeight,
+                            isActiveHome = src.id == activeHomeId,
+                            busy = vm.scanning,
+                            count = vm.sourceCounts[src.id],
+                            lastSync = vm.lastSyncOf(src.id),
+                            onSync = { vm.scanOne(src) },
+                            onRelogin = { vm.reloginEmby(src) },
+                            onEdit = { editing = src },
+                            onToggle = { vm.toggleSourceEnabled(src) },
+                            onDelete = { deleting = src }
+                        )
+                    }
+                }
+
+                // ---- 空态提示 ----
+                if (sources.isEmpty()) {
+                    item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(this.maxLineSpan) }) {
+                        TvEmptySourcesHint()
+                    }
+                }
+
+                // ---- 添加新来源占位卡 ----
+                if (sources.isNotEmpty()) {
+                    item {
+                        TvAddSourceCard(
+                            width = cardWidth,
+                            height = cardHeight,
+                            onClick = { showAdd = true }
+                        )
+                    }
                 }
             }
         }
     }
 
+    // ========== 添加 / 编辑表单 ==========
     if (showAdd) {
-        TvSourceDialog(
+        TvSourceFormPanel(
             initial = null,
             onDismiss = { showAdd = false },
             onConfirm = { name, kind, location, user, pass ->
@@ -130,9 +247,8 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
             }
         )
     }
-
     editing?.let { src ->
-        TvSourceDialog(
+        TvSourceFormPanel(
             initial = src,
             onDismiss = { editing = null },
             onConfirm = { name, kind, location, user, pass ->
@@ -141,153 +257,426 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
             }
         )
     }
+
+    // ========== 删除二次确认 ==========
+    deleting?.let { src ->
+        TvDeleteConfirmDialog(
+            source = src,
+            itemCount = vm.sourceCounts[src.id] ?: 0,
+            onDismiss = { deleting = null },
+            onConfirm = {
+                vm.removeSource(src)
+                deleting = null
+            }
+        )
+    }
 }
 
+/* ========================================================
+   分组标题
+   ======================================================== */
 @Composable
-private fun TvEmptySourceHint() {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+private fun TvGroupHeader(title: String, count: Int) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Bottom
     ) {
         Text(
-            "还没有添加来源",
-            style = MaterialTheme.typography.titleMedium,
-            color = AppColors.TextPrimary
+            text = title,
+            style = MaterialTheme.typography.headlineSmall,
+            color = AppColors.TextPrimary,
+            fontWeight = FontWeight.SemiBold
         )
         Text(
-            "· Emby：填服务器地址（如 https://emby.abc.com）与账号密码，登录后自动同步影库\n" +
-                "· TVBox：填写饭太硬、牛小二等TVBox接口",
+            text = "$count 个已配置",
+            style = MaterialTheme.typography.labelSmall,
+            color = AppColors.TextTertiary
+        )
+    }
+}
+
+/* ========================================================
+   空态提示
+   ======================================================== */
+@Composable
+private fun TvEmptySourcesHint() {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 80.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = "还没有添加来源",
+            style = MaterialTheme.typography.headlineSmall,
+            color = AppColors.TextPrimary,
+            fontWeight = FontWeight.SemiBold
+        )
+        Text(
+            text = "· Emby：填服务器地址与账号密码，自动登录换 Token\n" +
+                "· TVBox：填 CMS 接口地址（苹果CMS v10 JSON 通用格式）",
             style = MaterialTheme.typography.bodyMedium,
             color = AppColors.TextTertiary
         )
     }
 }
 
+/* ========================================================
+   来源状态圆点颜色 —— 与手机端保持一致
+   ======================================================== */
+private fun tvStatusColor(source: SourceEntity): Color = when {
+    !source.enabled -> Color(0xFF6B7482)
+    source.kind == SourceKind.EMBY && source.token.isBlank() -> Color(0xFFFF8A65)
+    else -> Color(0xFF34C759)
+}
+
+/* ========================================================
+   TvSourceCard —— 响应式卡片
+   焦点模式完全对齐 TvPosterCard
+   ======================================================== */
 @Composable
-private fun SourceRow(
+private fun TvSourceCard(
     source: SourceEntity,
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp,
+    isActiveHome: Boolean,
     busy: Boolean,
+    count: Int?,
+    lastSync: Long,
     onSync: () -> Unit,
     onRelogin: () -> Unit,
     onEdit: () -> Unit,
     onToggle: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = AppColors.Surface),
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth()
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.05f else 1f,
+        animationSpec = tween(140),
+        label = "source-card"
+    )
+
+    val disabledAlpha = if (!source.enabled) 0.5f else 1f
+
+    Box(
+        Modifier
+            .width(width)
+            .height(height)
+            .graphicsLayer { scaleX = scale; scaleY = scale; alpha = disabledAlpha }
+            .clip(RoundedCornerShape(14.dp))
+            .background(AppColors.Surface)
+            .then(
+                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(14.dp))
+                else Modifier.border(2.dp, Color.Transparent, RoundedCornerShape(14.dp))
+            )
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onToggle
+            )
+            .focusable(interactionSource = interaction)
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Column(
+            Modifier.fillMaxSize().padding(20.dp),
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            // 上半部分：图标 + 名称 + 徽章 + URL
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // 第一行：图标 + 状态圆点
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TvSourceIcon(kind = source.kind)
+                    Box(
+                        Modifier
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(tvStatusColor(source))
+                    )
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                // 名称
+                Text(
+                    text = source.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = AppColors.TextPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                // 徽章行
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text(
-                        source.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = AppColors.TextPrimary
-                    )
-                    Box(
-                        Modifier
-                            .background(
-                                if (source.kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.16f)
-                                else AppColors.SurfaceHi,
-                                RoundedCornerShape(4.dp)
+                    TvKindBadge(kind = source.kind)
+                    if (isActiveHome && source.enabled) {
+                        Box(
+                            Modifier
+                                .background(AppColors.Brand.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "使用中",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.BrandSoft,
+                                fontWeight = FontWeight.Medium
                             )
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            if (source.kind == SourceKind.EMBY) "EMBY" else "TVBOX",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (source.kind == SourceKind.EMBY) AppColors.Brand else AppColors.TextSecondary
-                        )
+                        }
                     }
                     if (!source.enabled) {
                         Box(
                             Modifier
                                 .background(AppColors.SurfaceHi, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
                         ) {
                             Text(
-                                "已停用",
+                                text = "已停用",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = AppColors.TextTertiary
+                                color = AppColors.TextTertiary,
+                                fontWeight = FontWeight.Medium
                             )
                         }
                     }
                 }
+
+                Spacer(Modifier.height(12.dp))
+
+                // URL
                 Text(
-                    source.location,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = AppColors.TextTertiary
+                    text = source.location,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AppColors.TextTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-                if (source.kind == SourceKind.EMBY) {
+            }
+
+            // 底部：分割线 + 统计信息
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    Modifier.fillMaxWidth().height(1.dp).background(AppColors.SurfaceHi)
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                        count?.let {
+                            Text(
+                                text = "🎬 $it 部",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = AppColors.TextSecondary
+                            )
+                        }
+                        if (source.kind == SourceKind.EMBY) {
+                            if (source.token.isBlank()) {
+                                Text(
+                                    text = "⚠ 登录失效",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = Color(0xFFFF8A65)
+                                )
+                            } else {
+                                Text(
+                                    text = "👤 ${source.username.ifBlank { "—" }}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = AppColors.TextSecondary
+                                )
+                            }
+                        }
+                    }
                     Text(
-                        if (source.token.isBlank()) "未登录 · 请点击右侧刷新重新登录"
-                        else "已登录 · ${source.username}",
+                        text = tvRelativeTime(lastSync),
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (source.token.isBlank()) Color(0xFFFF8A65) else AppColors.TextTertiary
+                        color = AppColors.TextTertiary
                     )
                 }
             }
+        }
 
-            Switch(
-                checked = source.enabled,
-                onCheckedChange = { onToggle() },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = AppColors.Brand,
-                    uncheckedTrackColor = AppColors.SurfaceHi
-                )
-            )
-
+        // —— 操作按钮（卡片聚焦时出现）——
+        Row(
+            Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 14.dp, end = 14.dp)
+                .alpha(if (focused && source.enabled) 1f else 0f),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             if (busy) {
                 CircularProgressIndicator(
-                    modifier = Modifier.padding(12.dp).height(18.dp),
+                    modifier = Modifier.size(30.dp),
                     strokeWidth = 2.dp,
                     color = AppColors.Brand
                 )
             } else {
-                IconButton(onClick = {
-                    if (source.kind == SourceKind.EMBY && source.token.isBlank()) onRelogin()
-                    else onSync()
-                }) {
-                    Icon(
-                        Icons.Filled.Refresh,
-                        contentDescription = "同步",
-                        tint = AppColors.TextSecondary
-                    )
+                val onClickAction = if (source.kind == SourceKind.EMBY && source.token.isBlank()) {
+                    { onRelogin() }
+                } else {
+                    { onSync() }
                 }
-            }
-
-            IconButton(onClick = onEdit) {
-                Icon(
-                    Icons.Filled.Edit,
-                    contentDescription = "编辑",
-                    tint = AppColors.TextSecondary
+                TvIconButton(
+                    icon = Icons.Filled.Refresh,
+                    onClick = onClickAction,
+                    sizeDp = 38.dp,
+                    contentDescription = "同步"
                 )
             }
-
-            IconButton(onClick = onDelete) {
-                Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "删除",
-                    tint = AppColors.TextTertiary
-                )
-            }
+            TvIconButton(
+                icon = Icons.Filled.Edit,
+                onClick = onEdit,
+                sizeDp = 38.dp,
+                contentDescription = "编辑"
+            )
+            TvIconButton(
+                icon = Icons.Filled.Delete,
+                onClick = onDelete,
+                sizeDp = 38.dp,
+                contentDescription = "删除"
+            )
         }
     }
 }
 
+/* ========================================================
+   TvSourceIcon
+   ======================================================== */
 @Composable
-private fun TvSourceDialog(
+private fun TvSourceIcon(kind: SourceKind) {
+    val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.2f) else Color(0xFFFFC107).copy(alpha = 0.14f)
+    val fg = if (kind == SourceKind.EMBY) AppColors.Brand else AppColors.Rating
+    Box(
+        Modifier
+            .size(56.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(bg),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = if (kind == SourceKind.EMBY) "E" else "📺",
+            color = fg,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+/* ========================================================
+   TvKindBadge
+   ======================================================== */
+@Composable
+private fun TvKindBadge(kind: SourceKind) {
+    val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.16f) else AppColors.SurfaceHi
+    val fg = if (kind == SourceKind.EMBY) AppColors.Brand else AppColors.TextSecondary
+    Box(
+        Modifier.background(bg, RoundedCornerShape(4.dp)).padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text = if (kind == SourceKind.EMBY) "EMBY" else "TVBOX",
+            style = MaterialTheme.typography.labelSmall,
+            color = fg,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+/* ========================================================
+   添加来源占位卡片
+   ======================================================== */
+@Composable
+private fun TvAddSourceCard(
+    width: androidx.compose.ui.unit.Dp,
+    height: androidx.compose.ui.unit.Dp,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.05f else 1f,
+        animationSpec = tween(140),
+        label = "add-card"
+    )
+    val bg = if (focused) AppColors.Brand.copy(alpha = 0.06f) else Color.Transparent
+    val borderColor = if (focused) AppColors.Brand else AppColors.SurfaceHi
+
+    Box(
+        Modifier
+            .width(width)
+            .height(height)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(14.dp))
+            .background(bg)
+            .border(2.dp, borderColor, RoundedCornerShape(14.dp))
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Box(
+                Modifier
+                    .size(72.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (focused) AppColors.Brand else Color.White.copy(alpha = 0.08f)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = null,
+                    tint = if (focused) Color.White else AppColors.Brand,
+                    modifier = Modifier.size(36.dp)
+                )
+            }
+            Text(
+                text = "添加新来源",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (focused) AppColors.TextPrimary else AppColors.TextSecondary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Emby 或 TVBox 接口",
+                style = MaterialTheme.typography.labelMedium,
+                color = AppColors.TextTertiary
+            )
+        }
+    }
+}
+
+/* ========================================================
+   相对时间（与手机端保持一致）
+   ======================================================== */
+private fun tvRelativeTime(ts: Long): String {
+    val diff = System.currentTimeMillis() - ts
+    if (diff < 0) return "刚刚"
+    val minutes = diff / 60_000
+    return when {
+        minutes <= 0L -> "刚刚"
+        minutes < 60 -> "$minutes 分钟前"
+        minutes < 60 * 24 -> "${minutes / 60} 小时前"
+        minutes < 60 * 24 * 30 -> "${minutes / (60 * 24)} 天前"
+        else -> "${minutes / (60 * 24 * 30)} 个月前"
+    }
+}
+
+/* ========================================================
+   TvSourceFormPanel —— 全屏遮罩表单面板
+   不用 AlertDialog —— Leanback 上焦点导航困难
+   ======================================================== */
+@Composable
+private fun TvSourceFormPanel(
     initial: SourceEntity?,
     onDismiss: () -> Unit,
     onConfirm: (String, SourceKind, String, String, String) -> Unit
@@ -298,111 +687,483 @@ private fun TvSourceDialog(
     var username by remember { mutableStateOf(initial?.username ?: "") }
     var password by remember { mutableStateOf(initial?.password ?: "") }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = AppColors.Surface,
-        title = {
-            Text(if (initial == null) "添加视频来源" else "编辑视频来源", color = AppColors.TextPrimary)
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = kind == SourceKind.EMBY,
-                        onClick = { kind = SourceKind.EMBY },
-                        label = { Text("Emby") },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AppColors.Brand,
-                            selectedLabelColor = Color.White,
-                            containerColor = AppColors.SurfaceHi,
-                            labelColor = AppColors.TextSecondary
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.65f))
+            .onFocusChanged { /* 阻止焦点逃逸 */ },
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.55f).fillMaxSize(0.88f),
+            shape = RoundedCornerShape(20.dp),
+            color = AppColors.Surface,
+            shadowElevation = 24.dp
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // 标题区
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(
+                            androidx.compose.ui.graphics.Brush.linearGradient(
+                                colors = listOf(AppColors.Brand.copy(alpha = 0.12f), Color.Transparent)
+                            )
                         )
-                    )
-                    FilterChip(
-                        selected = kind == SourceKind.TVBOX,
-                        onClick = { kind = SourceKind.TVBOX },
-                        label = { Text("TVBox") },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AppColors.Brand,
-                            selectedLabelColor = Color.White,
-                            containerColor = AppColors.SurfaceHi,
-                            labelColor = AppColors.TextSecondary
+                        .padding(horizontal = 48.dp, vertical = 32.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = if (initial == null) "添加视频来源" else "编辑视频来源",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = AppColors.TextPrimary,
+                            fontWeight = FontWeight.Bold
                         )
-                    )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = "选择来源类型并填写配置 — 添加成功后将自动登录并同步影库",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AppColors.TextSecondary
+                        )
+                    }
                 }
 
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("名称") },
-                    placeholder = { Text(if (kind == SourceKind.EMBY) "我的 NAS 影库" else "主线路") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                // 表单区
+                androidx.compose.foundation.lazy.LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 48.dp, vertical = 28.dp),
+                    verticalArrangement = Arrangement.spacedBy(22.dp)
+                ) {
+                    // 类型选择器
+                    item {
+                        Text(
+                            text = "来源类型",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = AppColors.TextSecondary
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            TvTypeOption(
+                                text = "Emby 媒体服务器",
+                                subtext = "服务器地址 + 账号密码，自动登录换 Token",
+                                icon = "E",
+                                selected = kind == SourceKind.EMBY,
+                                modifier = Modifier.weight(1f),
+                                onClick = { kind = SourceKind.EMBY }
+                            )
+                            TvTypeOption(
+                                text = "TVBox 接口",
+                                subtext = "CMS 接口地址，苹果CMS v10 JSON 通用格式",
+                                icon = "📺",
+                                selected = kind == SourceKind.TVBOX,
+                                modifier = Modifier.weight(1f),
+                                onClick = { kind = SourceKind.TVBOX }
+                            )
+                        }
+                    }
 
-                if (kind == SourceKind.EMBY) {
-                    OutlinedTextField(
-                        value = location,
-                        onValueChange = { location = it },
-                        label = { Text("服务器地址") },
-                        placeholder = { Text("https://emby.example.com") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth()
+                    // 名称
+                    item {
+                        TvFormField(
+                            label = "来源名称",
+                            required = true,
+                            value = name,
+                            placeholder = if (kind == SourceKind.EMBY) "例如：我的 NAS 影库" else "例如：主线路",
+                            onValueChange = { name = it }
+                        )
+                    }
+
+                    // 服务器地址 / CMS 接口
+                    item {
+                        TvFormField(
+                            label = if (kind == SourceKind.EMBY) "服务器地址" else "TVBox / CMS 接口地址",
+                            required = true,
+                            value = location,
+                            placeholder = if (kind == SourceKind.EMBY) "https://emby.example.com" else "https://example.com/api.php/provide/vod/",
+                            keyboardType = KeyboardType.Uri,
+                            onValueChange = { location = it }
+                        )
+                        if (kind == SourceKind.EMBY) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "支持 HTTPS 反向代理；局域网可用 http://192.168.x.x:8920",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.TextTertiary
+                            )
+                        } else {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = "接口需支持 ?ac=videolist 返回 JSON（苹果CMS 通用格式）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.TextTertiary
+                            )
+                        }
+                    }
+
+                    // Emby 账号 + 密码
+                    if (kind == SourceKind.EMBY) {
+                        item {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                Box(Modifier.weight(1f)) {
+                                    TvFormField(
+                                        label = "用户名",
+                                        required = true,
+                                        value = username,
+                                        placeholder = "admin",
+                                        onValueChange = { username = it }
+                                    )
+                                }
+                                Box(Modifier.weight(1f)) {
+                                    TvFormField(
+                                        label = "密码",
+                                        required = true,
+                                        value = password,
+                                        placeholder = "••••••••",
+                                        isPassword = true,
+                                        onValueChange = { password = it }
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 启用说明
+                    if (kind == SourceKind.EMBY) {
+                        item {
+                            Text(
+                                text = "添加时会自动登录并保存会话，下次启动无需重新输入密码",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.TextTertiary
+                            )
+                        }
+                    }
+                }
+
+                // 按钮区
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 48.dp, vertical = 28.dp)
+                        .background(AppColors.Surface)
+                        .border(1.dp, AppColors.SurfaceHi, RoundedCornerShape(0.dp))
+                        .padding(top = 20.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TvPillButton(
+                        text = "取消",
+                        primary = false,
+                        onClick = onDismiss
                     )
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it },
-                        label = { Text("用户名") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
-                        label = { Text("密码") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text(
-                        "添加时会自动登录并保存会话，无需重复输入密码",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AppColors.TextTertiary
-                    )
-                } else {
-                    OutlinedTextField(
-                        value = location,
-                        onValueChange = { location = it },
-                        label = { Text("TVBox / CMS 接口地址") },
-                        placeholder = { Text("https://example.com/api.php/provide/vod/") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Text(
-                        "接口需支持 ?ac=videolist 返回 JSON（苹果CMS 通用格式）",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = AppColors.TextTertiary
+                    Spacer(Modifier.width(16.dp))
+                    TvPillButton(
+                        text = if (initial == null) "添加来源" else "保存",
+                        primary = true,
+                        onClick = {
+                            val trimmedName = name.trim()
+                            val trimmedLoc = location.trim()
+                            if (trimmedName.isBlank() || trimmedLoc.isBlank()) return@TvPillButton
+                            onConfirm(
+                                trimmedName, kind, trimmedLoc,
+                                if (kind == SourceKind.EMBY) username.trim() else "",
+                                if (kind == SourceKind.EMBY) password else ""
+                            )
+                        }
                     )
                 }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onConfirm(name, kind, location, username, password) },
-                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                    containerColor = AppColors.Brand,
-                    contentColor = Color.White
-                )
-            ) { Text(if (initial == null) "添加" else "保存") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消", color = AppColors.TextSecondary)
             }
         }
+    }
+}
+
+/* ========================================================
+   TvTypeOption —— 类型卡片选择器
+   ======================================================== */
+@Composable
+private fun TvTypeOption(
+    text: String,
+    subtext: String,
+    icon: String,
+    selected: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.02f else 1f,
+        animationSpec = tween(140),
+        label = "type-opt"
     )
+    val bg = when {
+        selected -> AppColors.Brand.copy(alpha = 0.10f)
+        else -> Color(0xFF0B0D12)
+    }
+    val border = when {
+        focused && selected -> Color.White
+        selected -> AppColors.Brand
+        focused -> Color.White
+        else -> AppColors.SurfaceHi
+    }
+
+    Row(
+        modifier
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .border(2.dp, border, RoundedCornerShape(10.dp))
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
+            .padding(20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        Box(
+            Modifier
+                .size(56.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (selected) AppColors.Brand else AppColors.SurfaceHi
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = icon,
+                color = if (selected) Color.White else AppColors.TextSecondary,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.titleMedium,
+                color = AppColors.TextPrimary,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = subtext,
+                style = MaterialTheme.typography.labelMedium,
+                color = AppColors.TextTertiary
+            )
+        }
+    }
+}
+
+/* ========================================================
+   TvFormField —— 60dp 大号输入框
+   ======================================================== */
+@Composable
+private fun TvFormField(
+    label: String,
+    required: Boolean = false,
+    value: String,
+    placeholder: String,
+    isPassword: Boolean = false,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    onValueChange: (String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = AppColors.TextSecondary
+            )
+            if (required) {
+                Box(Modifier.size(6.dp).background(Color(0xFFE5484D), CircleShape))
+            }
+        }
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = {
+                Text(text = placeholder, color = AppColors.TextTertiary)
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().height(64.dp),
+            visualTransformation = if (isPassword) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = keyboardType,
+                imeAction = ImeAction.Next
+            ),
+            textStyle = androidx.compose.ui.text.TextStyle(
+                fontSize = 17.sp,
+                color = AppColors.TextPrimary
+            ),
+            shape = RoundedCornerShape(10.dp),
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                unfocusedContainerColor = Color(0xFF0B0D12),
+                focusedContainerColor = Color(0xFF0B0D12),
+                unfocusedBorderColor = AppColors.SurfaceHi,
+                focusedBorderColor = AppColors.Brand,
+                cursorColor = AppColors.Brand,
+                focusedTextColor = AppColors.TextPrimary,
+                unfocusedTextColor = AppColors.TextPrimary
+            )
+        )
+    }
+}
+
+/* ========================================================
+   TvDeleteConfirmDialog —— 删除二次确认对话框
+   红色危险视觉 + 默认聚焦"取消"防误触
+   ======================================================== */
+@Composable
+private fun TvDeleteConfirmDialog(
+    source: SourceEntity,
+    itemCount: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    val cancelRequester = remember { FocusRequester() }
+
+    Box(
+        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.7f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier.width(640.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = AppColors.Surface,
+            shadowElevation = 24.dp
+        ) {
+            Column {
+                // 标题行
+                Row(
+                    Modifier.fillMaxWidth().padding(28.dp, 24.dp, 28.dp, 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    // 警告图标
+                    Box(
+                        Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFE5484D).copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "⚠",
+                            fontSize = 28.sp,
+                            color = Color(0xFFFF8A65)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "删除来源？",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = AppColors.TextPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "将移除「${source.name}」以及它已同步的全部内容。",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = AppColors.TextSecondary
+                        )
+                    }
+                }
+
+                // 危险提示条
+                Box(
+                    Modifier.fillMaxWidth().padding(horizontal = 28.dp).background(
+                        Color(0xFFE5484D).copy(alpha = 0.08f),
+                        RoundedCornerShape(10.dp)
+                    ).border(1.dp, Color(0xFFE5484D).copy(alpha = 0.25f), RoundedCornerShape(10.dp)).padding(16.dp, 14.dp),
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = "• 已同步的 ${if (itemCount > 0) "$itemCount 部影片" else "内容"} 将被永久删除",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFFFF8A65)
+                        )
+                        Text(
+                            text = "• 此操作不可撤销 — 服务器本身不受影响",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color(0xFFFF8A65)
+                        )
+                    }
+                }
+
+                // 按钮区
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 28.dp, vertical = 24.dp)
+                        .border(1.dp, AppColors.SurfaceHi, RoundedCornerShape(0.dp))
+                        .padding(top = 20.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TvPillButton(
+                        text = "取消",
+                        primary = false,
+                        modifier = Modifier.focusRequester(cancelRequester),
+                        onClick = onDismiss
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    // 危险按钮：红色 PillButton 变体
+                    val delRequester = remember { FocusRequester() }
+                    var delFocused by remember { mutableStateOf(false) }
+                    val delScale by animateFloatAsState(
+                        targetValue = if (delFocused) 1.06f else 1f,
+                        animationSpec = tween(140),
+                        label = "del-scale"
+                    )
+                    Box(
+                        Modifier
+                            .graphicsLayer { scaleX = delScale; scaleY = delScale }
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                if (delFocused) Color.White else Color(0xFFE5484D)
+                            )
+                            .then(
+                                if (delFocused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp))
+                                else Modifier
+                            )
+                            .onFocusChanged { delFocused = it.isFocused }
+                            .focusRequester(delRequester)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = onConfirm
+                            )
+                            .focusable()
+                            .padding(horizontal = 32.dp, vertical = 14.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = null,
+                                tint = if (delFocused) Color(0xFFE5484D) else Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "确认删除",
+                                color = if (delFocused) Color(0xFFE5484D) else Color.White,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 默认焦点落到"取消"按钮 —— 防止遥控器默认聚焦红色按钮导致误触
+    LaunchedEffect(Unit) {
+        cancelRequester.requestFocus()
+    }
 }

@@ -1,4 +1,4 @@
-# DouDouTV —— 安卓手机 + TV 双端视频播放器 v2.1
+# DouDouTV —— 安卓手机 + TV 双端视频播放器 v2.3
 
 自研的安卓个人影音客户端，**只对接两类来源：Emby 与 TVBox**。
 界面与交互形态参照 VidHub、Netflix 的成熟做法（沉浸式大图首页、海报墙、聚焦色背景、十英尺遥控器 UI），
@@ -114,7 +114,54 @@ if (isTv) TvApp(vm) else PhoneApp(vm)
 
 ---
 
-## 三、工程结构
+## 三、v2.3 更新要点
+
+### 1. TV 端来源界面彻底重写
+
+旧版 `TvSourcesScreen` 存在三方面十英尺适配缺失：卡片无 TV 焦点反馈（无 scale + 白边）、用 AlertDialog 做表单弹窗（Leanback 焦点导航困难）、无 Emby/TVBox 分组且缺少删除二次确认。v2.3 完整重写为四个独立 Composable：
+
+**`TvSourcesScreen` 主页面**
+
+- `BoxWithConstraints` + `LazyVerticalGrid` 响应式网格：以 380dp 为基准算列数（720p→3 列 / 1080p→5 列 / 4K→10 列），卡片高度 `width × 0.76` 且 clamp 260–340dp
+- Emby / TVBox 分组标题 + 计数标签，与手机端 SourcesScreen 信息架构对齐
+- 顶部栏复用 `TvBackButton` / `TvPillButton(compact=true)`，同步状态用脉冲圆点
+
+**`TvSourceCard` 可聚焦卡片**
+
+- 完全对齐 `TvPosterCard` 焦点模式：`collectIsFocusedAsState` → `animateFloatAsState(1.05f)` → `graphicsLayer.scale` → `Modifier.border(2.dp, Color.White)` → `Modifier.focusable()`
+- 56dp 类型图标 + 12dp 彩色状态圆点（绿=在线 / 橙=Token 失效 / 灰=停用）+ 名称 + 徽章 + URL + 底部统计栏（条目数 / 登录状态 / 同步时间）
+- 操作按钮（同步 / 编辑 / 删除）默认 opacity 0，卡片获得焦点时才显示，避免常态信息过载
+- 禁用卡片整体 alpha 0.5 视觉降噪
+
+**`TvSourceFormPanel` 全屏面板表单**（不使用 AlertDialog）
+
+- `Box(fillMaxSize, Color.Black.copy(alpha=0.65f))` + `Surface(width=55%, height=88%)` 居中面板
+- 类型选择器：Emby 蓝色 / TVBox 黄色 大卡片（220×90），选中态品牌蓝描边 + 图标反白
+- `Modifier.height(64.dp)` OutlinedTextField，品牌蓝聚焦 + 3px 外发光
+- Emby 用户名 / 密码左右双列（各 `weight(1f)`），节省面板高度
+
+**`TvDeleteConfirmDialog` 危险操作防护**（旧版缺失）
+
+- 56dp 圆形 ⚠️ 警告图标 + 红色危险提示条，显示具体条目数（"284 部影片将被永久删除"）
+- `LaunchedEffect { cancelRequester.requestFocus() }` 默认焦点落到"取消"按钮，防止遥控器默认聚焦红色删除按钮导致误触
+- 红色 PillButton 变体，聚焦时白底红字 + `scale(1.06)`
+
+### 2. 手机端来源卡片布局修复
+
+第一行 `Row` 里 `Text(weight=1f, fill=false)` 和 `Spacer(weight=1f)` 两个带 weight 的子元素同时存在，"使用中"徽章的有无改变了 Switch 位置。
+
+修复：第一行拆成左右两个子 Row —— 左侧 `Row(weight=1f)` 撑满剩余空间（状态点 + 名称），右侧 Row 用自然宽度锚定最右（徽章 + Switch），Switch 位置不再随徽章有无漂移。
+
+### 3. 手机端来源表单优化
+
+- 新增 `MobileFormField` 统一组件：`height(56.dp)` OutlinedTextField + AppColors.Bg 容器底 + AppColors.Brand 聚焦边框 + 15sp 字号 + 10dp 圆角
+- Emby 用户名 / 密码左右双列布局，节省 AlertDialog 纵向空间
+- `trimmedName` / `trimmedLoc` 非空校验，空时按钮 disabled（`canSubmit`）
+- 类型 FilterChip 加宽文字（"Emby 媒体服务器" / "TVBox 接口"），AlertDialog 圆角提升至 18dp
+
+---
+
+## 四、工程结构
 
 ```
 MyVidHub/
@@ -174,7 +221,7 @@ MyVidHub/
 
 ---
 
-## 四、如何得到可安装的 APK
+## 五、如何得到可安装的 APK
 
 > 本仓库已包含：完整源码、Gradle Wrapper（`gradlew`，无需预装 Gradle）、一键脚本 `build.sh`、
 > 云端构建配置 `.github/workflows/build-apk.yml`。三条路任选一条，产物都是
@@ -197,7 +244,7 @@ MyVidHub/
    git push -u origin main
    ```
 3. 推送后自动触发构建（`main`、`master`、`dev` 分支均已配置，也可在仓库 **Actions** 页点 `Build APK` → `Run workflow` 手动触发）
-4. 构建完成（绿色 ✓）后，在仓库 **Releases** 页下载 `DouDouTV-v2.1-<分支>.apk`
+4. 构建完成（绿色 ✓）后，在仓库 **Releases** 页下载 `DouDouTV-v2.3-<分支>.apk`
 5. 下载到的就是原始 APK 文件，无需解压 → 传到手机 / U 盘拷到电视盒子安装
 
 CI 固定使用 **JDK 17（temurin）**、Gradle 8.7、AGP 8.5.2，直接复用 ubuntu-latest 预装的 Android SDK，
@@ -283,7 +330,7 @@ Wrapper 已随工程提供（`gradlew` / `gradlew.bat` / `gradle/wrapper/gradle-
 
 ---
 
-## 五、使用流程
+## 六、使用流程
 
 ### 1. 添加 Emby 来源
 - 来源页 → 「添加来源」→ 选 **Emby**
@@ -313,7 +360,7 @@ Wrapper 已随工程提供（`gradlew` / `gradlew.bat` / `gradle/wrapper/gradle-
 
 ---
 
-## 六、几个设计取舍
+## 七、几个设计取舍
 
 ### 1. TVBox 为什么分两次请求
 CMS 接口的列表（`ac=videolist`）**不含播放地址**，只有 `ac=detail` 才返回 `vod_play_url`。
@@ -346,7 +393,7 @@ CMS 接口的列表（`ac=videolist`）**不含播放地址**，只有 `ac=detai
 
 ---
 
-## 七、已知限制
+## 八、已知限制
 
 1. **Emby 播放进度不回写服务器**：目前进度只存本地 Room，多端之间不同步
 2. **TVBox 只用第一条线路**：多线路数据已在 `loadTvBoxDetail` 返回，但 UI 尚未提供切换
@@ -358,7 +405,7 @@ CMS 接口的列表（`ac=videolist`）**不含播放地址**，只有 `ac=detai
 
 ---
 
-## 八、可继续扩展
+## 九、可继续扩展
 
 1. **Emby 播放进度回写**：加 `Sessions/Playing/Progress` 上报，实现多端同步
 2. **TVBox 多线路切换 UI**：给电视播放器面板加一个「线路」标签即可
@@ -370,7 +417,7 @@ CMS 接口的列表（`ac=videolist`）**不含播放地址**，只有 `ac=detai
 
 ---
 
-## 九、许可与合规
+## 十、许可与合规
 
 - 本项目代码可自由使用、修改、分发
 - 依赖：Media3 (Apache-2.0)、OkHttp (Apache-2.0)、Room (Apache-2.0)、Coil (Apache-2.0)、Compose (Apache-2.0)、Palette (Apache-2.0)

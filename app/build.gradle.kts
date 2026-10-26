@@ -22,8 +22,8 @@ android {
         applicationId = "com.tabbit.myvidhub"
         minSdk = 21
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.2"
+        versionCode = 5
+        versionName = "2.3"
 
         vectorDrawables { useSupportLibrary = true }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
