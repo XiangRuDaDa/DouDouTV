@@ -383,6 +383,30 @@ class TvBoxClient(
             parseList(responseList(json), site.key, site.name)
         }
 
+    /**
+     * 远程搜索：调 Spider Guard 的 searchContent 接口，直接在源站搜索。
+     * 跟本地 DB 搜索互补——本地搜已入库的，远程搜 Guard 全网。
+     *
+     * @param site 目标站点（type 3 Spider 才支持）
+     * @param keyword 关键词（支持中文片名/演员/题材，也支持拼音首字母但 Guard 内部不一定认）
+     * @param quick 是否快速搜索（CatVod 协议语义，true 时 Guard 可能只返回前 10 条）
+     */
+    suspend fun search(site: TvBoxSite, keyword: String, quick: Boolean = false): List<Vod> =
+        withContext(Dispatchers.IO) {
+            if (site.type != 3) return@withContext emptyList()
+            val loader = spiderLoader ?: return@withContext emptyList()
+            if (configSpiderUrl.isBlank()) {
+                configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+            }
+            if (configSpiderUrl.isBlank()) return@withContext emptyList()
+            val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull()
+                ?: return@withContext emptyList()
+            val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: return@withContext emptyList()
+            val json = proxy.searchContent(keyword.trim(), quick)
+                ?: return@withContext emptyList()
+            CatVodResultParser.parseVodList(json, site.key, site.name)
+        }
+
     /** 不带参数的原始请求，用来判断 URL 类型（CMS 还是 TVBox 配置） */
     private fun requestRaw(rawUrl: String): JSONObject {
         val punyUrl = toPunycode(rawUrl)

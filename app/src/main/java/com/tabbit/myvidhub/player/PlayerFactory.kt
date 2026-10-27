@@ -198,29 +198,12 @@ object PlayerFactory {
 
         Log.d("PlayerFactory", "build OkHttpDataSource headers=${headers.keys} connect=${connectTimeout}ms read=${readTimeout}ms")
 
-        // ===== 磁盘缓存：CacheDataSource 包 OkHttpDataSource =====
-        // 之前禁用 CacheDataSource 是因为云盘大文件（夸克/阿里云盘 5GB+）连续写入有限缓存时，
-        // LRU 淘汰过于缓慢，阻塞 ExoPlayer 的 Range 请求 → 无限 BUFFERING。
-        //
-        // 现在加回来的关键改动：
-        // 1) CacheDataSink(fragmentSize = 2MB) —— 每个 cache entry 分片写入，大文件不会生成
-        //    单个巨型 entry，LRU 淘汰按 2MB 块快速完成，不会阻塞；
-        // 2) CacheDataSource.FLAG_BLOCK_ON_CACHE —— 缓存能命中时优先读，miss 再走网络；
-        // 3) FLAG_IGNORE_CACHE_ON_ERROR —— 缓存读取失败时 fallback 到网络，不崩；
-        // 4) 视频/音频/字幕全部走同一个 cacheDataSource，Emby 局域网 + TVBox 云盘统一缓存。
-        val cacheDataSourceFactory = CacheDataSource.Factory()
-            .setCache(cacheInstance(context, isTv))
-            .setUpstreamDataSourceFactory(httpFactory)
-            .setCacheWriteDataSinkFactory(
-                CacheDataSink.Factory()
-                    .setCache(cacheInstance(context, isTv))
-                    .setFragmentSize(2 * 1024 * 1024L)  // 2MB 分片，大文件 LRU 秒级淘汰
-            )
-            .setFlags(
-                CacheDataSource.FLAG_BLOCK_ON_CACHE or
-                CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
-            )
-
+        // ===== 永远禁用 CacheDataSource =====
+        // 原因：OkHttp Interceptor 会拦截 ExoPlayer 的 Range 请求并改写（首次探测、固定块等），
+        // 这与 CacheDataSource 内部的缓存片段 bookkeeping 逻辑不兼容，
+        // 导致 open() 阶段直接抛 READ_POSITION_OUT_OF_RANGE。
+        // 此 bug 影响所有来源（Emby 本地直链、夸克/百度云盘 CDN），
+        // 因此直接使用裸 OkHttpDataSource，跳过 CacheDataSource。
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 if (isTv) 45_000 else 30_000,
@@ -234,7 +217,7 @@ object PlayerFactory {
             .build()
 
         val errorPolicy = DefaultLoadErrorHandlingPolicy(8)
-        val mediaSourceFactory = DefaultMediaSourceFactory(cacheDataSourceFactory)
+        val mediaSourceFactory = DefaultMediaSourceFactory(httpFactory)
             .setLoadErrorHandlingPolicy(errorPolicy)
 
         // 自定义 RenderersFactory：过滤掉 ImageRenderer。

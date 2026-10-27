@@ -42,6 +42,7 @@ import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.detail.DetailScreen
 import com.tabbit.myvidhub.ui.home.GenreScreen
 import com.tabbit.myvidhub.ui.home.HomeScreen
+import com.tabbit.myvidhub.ui.home.TvBoxCategoryScreen
 import com.tabbit.myvidhub.ui.home.SearchScreen
 import com.tabbit.myvidhub.ui.player.phone.PhonePlayerActivity
 import com.tabbit.myvidhub.ui.settings.SettingsScreen
@@ -67,6 +68,7 @@ internal sealed interface PhoneRoute {
     data object Search : PhoneRoute
     data class Detail(val mediaId: Long) : PhoneRoute
     data class Genre(val kind: String?, val genre: String?) : PhoneRoute
+    data class Category(val typeId: String, val typeName: String) : PhoneRoute
 }
 
 internal enum class PhoneTab(val label: String, val icon: ImageVector) {
@@ -100,7 +102,7 @@ fun PhoneApp(vm: LibraryViewModel) {
     BackHandler(enabled = navStack.size > 1) { goBack() }
 
     val currentTab = when (navStack.last()) {
-        is PhoneRoute.Home, is PhoneRoute.Detail, is PhoneRoute.Search, is PhoneRoute.Genre -> PhoneTab.HOME
+        is PhoneRoute.Home, is PhoneRoute.Detail, is PhoneRoute.Search, is PhoneRoute.Genre, is PhoneRoute.Category -> PhoneTab.HOME
         is PhoneRoute.Sources -> PhoneTab.SOURCES
         is PhoneRoute.Settings -> PhoneTab.SETTINGS
     }
@@ -164,6 +166,7 @@ fun PhoneApp(vm: LibraryViewModel) {
                         onOpenSearch = { push(PhoneRoute.Search) },
                         onOpenDetail = { id -> push(PhoneRoute.Detail(id)) },
                         onOpenGenre = { kind, genre -> push(PhoneRoute.Genre(kind, genre)) },
+                        onOpenCategory = { tid, tname -> push(PhoneRoute.Category(tid, tname)) },
                         onPlay = { item: MediaEntity ->
                             context.startActivity(PhonePlayerActivity.intent(context, item.id))
                         }
@@ -174,6 +177,14 @@ fun PhoneApp(vm: LibraryViewModel) {
                         isTv = false,
                         initialKind = target.kind,
                         initialGenre = target.genre,
+                        onBack = goBack,
+                        onOpenDetail = { id -> push(PhoneRoute.Detail(id)) }
+                    )
+
+                    is PhoneRoute.Category -> TvBoxCategoryScreen(
+                        vm = vm,
+                        typeId = target.typeId,
+                        typeName = target.typeName,
                         onBack = goBack,
                         onOpenDetail = { id -> push(PhoneRoute.Detail(id)) }
                     )

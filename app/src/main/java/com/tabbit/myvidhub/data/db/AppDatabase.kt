@@ -12,7 +12,7 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 
 @Database(
     entities = [SourceEntity::class, MediaEntity::class],
-    version = 7,
+    version = 8,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -51,6 +51,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v7 → v8：新增 pinyinInitials（拼音首字母）和 sourceName（来源名称）。
+         * 拼音首字母用于运行时 LIKE 前缀匹配，支持拼音搜索。
+         * sourceName 用于搜索结果按来源分组展示。
+         */
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE media ADD COLUMN pinyinInitials TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE media ADD COLUMN sourceName TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -61,7 +73,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "myvidhub.db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

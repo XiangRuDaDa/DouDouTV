@@ -45,10 +45,22 @@ interface MediaDao {
 
     @Query(
         "SELECT m.* FROM media m JOIN sources s ON m.sourceId = s.id " +
-            "WHERE s.enabled = 1 AND m.title LIKE '%' || :keyword || '%' " +
+            "WHERE s.enabled = 1 AND (m.title LIKE '%' || :keyword || '%' " +
+            "OR m.pinyinInitials LIKE '%' || :pinyin || '%') " +
             "AND m.kind IN ('MOVIE','SERIES') ORDER BY m.addedAt DESC LIMIT 60"
     )
-    suspend fun search(keyword: String): List<MediaEntity>
+    suspend fun search(keyword: String, pinyin: String = keyword): List<MediaEntity>
+
+    /**
+     * 拼音联想：对用户输入做前缀匹配（只匹配 MOVIE/SERIES，不包含分集），
+     * 返回 top 10 的原标题供 UI 下拉展示。
+     */
+    @Query(
+        "SELECT DISTINCT m.title FROM media m JOIN sources s ON m.sourceId = s.id " +
+            "WHERE s.enabled = 1 AND m.pinyinInitials LIKE :pinyinPrefix " +
+            "AND m.kind IN ('MOVIE','SERIES') ORDER BY m.addedAt DESC LIMIT 10"
+    )
+    suspend fun pinyinSuggest(pinyinPrefix: String): List<String>
 
     @Query("SELECT * FROM media WHERE id = :id")
     suspend fun get(id: Long): MediaEntity?

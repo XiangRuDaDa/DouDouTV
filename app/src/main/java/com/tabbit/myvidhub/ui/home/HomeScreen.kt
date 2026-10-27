@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -72,6 +73,7 @@ import com.tabbit.myvidhub.ui.components.ContinueCard
 import com.tabbit.myvidhub.ui.components.HeroBanner
 import com.tabbit.myvidhub.ui.components.PosterCard
 import com.tabbit.myvidhub.ui.components.SectionTitle
+import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -94,6 +96,7 @@ fun HomeScreen(
     onOpenSearch: () -> Unit,
     onOpenDetail: (Long) -> Unit,
     onOpenGenre: (kind: String?, genre: String?) -> Unit,
+    onOpenCategory: (typeId: String, typeName: String) -> Unit,
     onPlay: (MediaEntity) -> Unit
 ) {
     val continueList by vm.continueWatching.collectAsStateWithLifecycle()
@@ -155,79 +158,13 @@ fun HomeScreen(
                         onPlay = { onPlay(it) }
                     )
                 }
-            } else if (filteredLibrary.isEmpty()) {
+            } else {
                 // 整库为空 → 引导添加来源；库里有内容但当前来源/站点没内容 → 提示同步；
                 // 选了「只有分类没首页影片」的线路时不提示空（分类入口本身就是内容入口）
                 item {
                     when {
                         library.isEmpty() -> EmptyState(vm)
                         vm.homeCategories.isEmpty() -> LineEmptyHint(vm.homeSitesError)
-                    }
-                }
-            }
-
-            // ---------- 站点分类（动态分区入口）：TVBox 线路 homeContent 返回的 class ----------
-            val homeCategories = vm.homeCategories
-            if (homeCategories.isNotEmpty()) {
-                item {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        items(homeCategories, key = { it.typeId }) { cat ->
-                            val selected = vm.activeCategoryId == cat.typeId
-                            FilterChip(
-                                selected = selected,
-                                onClick = { vm.selectHomeCategory(cat.typeId) },
-                                label = { Text(cat.typeName, fontWeight = FontWeight.Medium) },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = AppColors.Brand,
-                                    selectedLabelColor = Color.White,
-                                    containerColor = AppColors.SurfaceHi,
-                                    labelColor = AppColors.TextSecondary
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-
-            // ---------- 展开的站点分类分区：点分类后展示该分类内容（categoryContent） ----------
-            val activeCategory = homeCategories.firstOrNull { it.typeId == vm.activeCategoryId }
-            if (activeCategory != null) {
-                val catItems = vm.categoryVods[activeCategory.typeId].orEmpty()
-                if (vm.categoryLoading && catItems.isEmpty()) {
-                    item {
-                        Box(
-                            Modifier.fillMaxWidth().padding(vertical = 20.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
-                        }
-                    }
-                } else if (catItems.isNotEmpty()) {
-                    item { SectionTitle(activeCategory.typeName, trailing = { CountBadge(catItems.size) }) }
-                    item {
-                        LazyRow(
-                            contentPadding = PaddingValues(horizontal = 18.dp),
-                            horizontalArrangement = Arrangement.spacedBy(9.dp)
-                        ) {
-                            items(catItems, key = { "cat_${it.id}" }) { item ->
-                                Box(Modifier.width(cardWidth)) {
-                                    PosterCard(item = item, onClick = { onOpenDetail(item.id) })
-                                }
-                            }
-                        }
-                    }
-                } else if (vm.categoryError != null) {
-                    item {
-                        Text(
-                            vm.categoryError.orEmpty(),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = AppColors.TextTertiary,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)
-                        )
                     }
                 }
             }
@@ -242,6 +179,67 @@ fun HomeScreen(
                     ) {
                         items(continueList, key = { "cw_${it.id}" }) { item ->
                             ContinueCard(item = item, onClick = { onPlay(item) })
+                        }
+                    }
+                }
+            }
+
+            // ---------- TVBox 线路动态分类 section：每个分类纵向一个 section，跟 Emby 动态分区风格一致 ----------
+            val homeCategories = vm.homeCategories
+            if (homeCategories.isNotEmpty()) {
+                homeCategories.take(7).forEach { cat ->
+                    val catItems = vm.categoryVods[cat.typeId].orEmpty()
+                    val isLoading = vm.categoryPreviewLoading[cat.typeId] ?: false
+                    // 首次进入 composition 时懒加载前 LAZY_TAKE=10 条（不阻塞）
+                    item(key = "cat_ensure_${cat.typeId}") {
+                        LaunchedEffect(cat.typeId) { vm.ensureCategoryPreview(cat.typeId) }
+                    }
+                    item {
+                        SectionTitle(
+                            cat.typeName,
+                            trailing = {
+                                if (catItems.isNotEmpty()) MoreLink { onOpenCategory(cat.typeId, cat.typeName) }
+                                else CountBadge(catItems.size)
+                            }
+                        )
+                    }
+                    item {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 18.dp),
+                            horizontalArrangement = Arrangement.spacedBy(9.dp)
+                        ) {
+                            when {
+                                // 加载中 → 4 个 shimmer 骨架卡
+                                isLoading && catItems.isEmpty() -> {
+                                    items(4) { Box(Modifier.width(cardWidth)) { ShimmerCard() } }
+                                }
+                                // 有数据 → 正常卡片
+                                catItems.isNotEmpty() -> {
+                                    items(catItems.take(LAZY_TAKE), key = { "cat_${cat.typeId}_${it.id}" }) { item ->
+                                        Box(Modifier.width(cardWidth)) {
+                                            PosterCard(item = item, onClick = { onOpenDetail(item.id) })
+                                        }
+                                    }
+                                }
+                                // 加载完但该分类 Guard 返回空（如玩偶/观影线路）→ 空占位提示
+                                else -> {
+                                    item {
+                                        Box(
+                                            Modifier
+                                                .width(cardWidth * 3)
+                                                .height(cardWidth * 3 / 2)
+                                                .padding(vertical = 12.dp),
+                                            contentAlignment = Alignment.CenterStart
+                                        ) {
+                                            Text(
+                                                "暂无内容",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = AppColors.TextTertiary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -865,25 +863,45 @@ fun SearchScreen(
 ) {
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+    var grouped by remember { mutableStateOf<Map<String, List<MediaEntity>>>(emptyMap()) }
     var searching by remember { mutableStateOf(false) }
+    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var searched by remember { mutableStateOf(false) }
 
+    // 联想：输入停顿 200ms 后查库，只有用户输入是字母（拼音首字母）时才做联想
     LaunchedEffect(query) {
         val q = query.trim()
         if (q.isEmpty()) {
-            results = emptyList()
-            searching = false
+            suggestions = emptyList()
             return@LaunchedEffect
+        }
+        if (q.any { it in 'a'..'z' || it in 'A'..'Z' }) {
+            delay(200)
+            suggestions = runCatching { vm.pinyinSuggest(q.lowercase()) }.getOrDefault(emptyList())
+        } else {
+            suggestions = emptyList()
+        }
+    }
+
+    // 实际搜索：停顿 300ms 后，本地 DB + TVBox Guard 远程并发
+    LaunchedEffect(query) {
+        val q = query.trim()
+        if (q.isEmpty()) {
+            results = emptyList(); grouped = emptyMap(); searched = false; return@LaunchedEffect
         }
         searching = true
         delay(300)
-        results = vm.searchMedia(q)
+        results = runCatching { vm.searchMerged(q) }.getOrDefault(emptyList())
+        grouped = results.groupBy { it.sourceName.ifBlank { "未知来源" } }
         searching = false
+        searched = true
     }
 
     val columns = if (isTv) 6 else 3
     val hSpacing = if (isTv) 14.dp else 9.dp
 
     Column(Modifier.fillMaxSize()) {
+        // 搜索框 + 返回
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -900,14 +918,38 @@ fun SearchScreen(
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = { Text("搜索标题…", color = AppColors.TextTertiary) },
+                placeholder = {
+                    Text(
+                        if (isTv) "搜索片名 / 演员 / 拼音首字母" else "搜索片名 / 拼音首字母 (如 tthr)",
+                        color = AppColors.TextTertiary
+                    )
+                },
                 singleLine = true,
                 modifier = Modifier.weight(1f)
             )
         }
 
+        // 联想下拉（只有 TV 端和手机端都显示）
+        if (suggestions.isNotEmpty() && query.isNotBlank() && !searched) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                suggestions.take(if (isTv) 6 else 5).forEach { title ->
+                    FilterChip(
+                        selected = false,
+                        onClick = { query = title },
+                        label = { Text(title, maxLines = 1) },
+                        modifier = Modifier.height(36.dp)
+                    )
+                }
+            }
+        }
+
         when {
-            query.isBlank() -> HintText("输入关键字，搜索已同步的电影与剧集")
+            query.isBlank() -> HintText("输入关键字或拼音首字母（如 tthr = 偷天换日）")
 
             searching && results.isEmpty() -> Box(
                 Modifier.fillMaxWidth().padding(40.dp),
@@ -916,13 +958,144 @@ fun SearchScreen(
 
             results.isEmpty() -> HintText("没有找到「${query.trim()}」相关内容")
 
+            // 有结果：按来源分组展示
             else -> LazyColumn(contentPadding = PaddingValues(bottom = 28.dp)) {
-                item { SectionTitle("搜索结果", trailing = { CountBadge(results.size) }) }
-                items(results.chunked(columns)) { row ->
+                item { SectionTitle("搜索结果 ${results.size} 条 · ${grouped.size} 个来源") }
+                grouped.forEach { (srcName, itemsOfSource) ->
+                    item {
+                        SectionTitle(
+                            srcName,
+                            trailing = { CountBadge(itemsOfSource.size) }
+                        )
+                    }
+                    item {
+                        LazyRow(
+                            contentPadding = PaddingValues(horizontal = 18.dp),
+                            horizontalArrangement = Arrangement.spacedBy(hSpacing)
+                        ) {
+                            items(itemsOfSource, key = { "srch_${it.id}" }) { item ->
+                                val cardW = cardWidthOf(isTv)
+                                Box(Modifier.width(cardW)) {
+                                    PosterCard(item = item, onClick = { onOpenDetail(item.id) })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** TV 海报卡片宽度，复用 HomeScreen 的 cardWidth */
+private fun cardWidthOf(isTv: Boolean) = if (isTv) 136.dp else 112.dp
+
+@Composable
+private fun HintText(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = AppColors.TextTertiary,
+        modifier = Modifier.fillMaxWidth().padding(36.dp)
+    )
+}
+
+/**
+ * TVBox 线路分类全量浏览页。
+ * 入口：首页 TVBox 动态分类 section 的「查看全部」MoreLink。
+ * 分页策略：先拉 page=1（最多 72 条/页），到底后点「加载更多」继续 page++，直到 Guard 返回空 list 停止。
+ * 布局跟 GenreScreen 保持一致（顶栏返回 + 3 列网格 + 加载更多）。
+ */
+@Composable
+fun TvBoxCategoryScreen(
+    vm: LibraryViewModel,
+    typeId: String,
+    typeName: String,
+    onBack: () -> Unit,
+    onOpenDetail: (Long) -> Unit
+) {
+    val columns = 3
+    val hSpacing = 9.dp
+
+    var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+    var page by remember { mutableIntStateOf(1) }
+    var loading by remember { mutableStateOf(true) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var exhausted by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(typeId) {
+        loading = true
+        page = 1
+        exhausted = false
+        val first = runCatching { vm.tvBoxCategoryPage(typeId, page) }.getOrDefault(emptyList())
+        items = first
+        page = 2
+        loading = false
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    0f to AppColors.Brand.copy(alpha = 0.09f),
+                    0.22f to AppColors.Bg,
+                    1f to AppColors.Bg
+                )
+            )
+    ) {
+        // ---------- 顶栏 ----------
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 6.dp, end = 16.dp, top = 12.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                    tint = AppColors.TextSecondary
+                )
+            }
+            Text(
+                typeName,
+                style = MaterialTheme.typography.titleLarge,
+                color = AppColors.TextPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        // ---------- 网格 ----------
+        when {
+            loading -> LazyColumn(contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp)) {
+                items(List(9) { it }.chunked(columns)) { row ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 18.dp, vertical = if (hSpacing > 10.dp) 8.dp else 6.dp),
+                            .padding(horizontal = 18.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(hSpacing)
+                    ) {
+                        row.forEach { Box(Modifier.weight(1f)) { ShimmerCard() } }
+                        repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+
+            items.isEmpty() -> Text(
+                "该分类下暂无内容",
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.TextTertiary,
+                modifier = Modifier.fillMaxWidth().padding(36.dp)
+            )
+
+            else -> LazyColumn(contentPadding = PaddingValues(bottom = 28.dp)) {
+                items(items.chunked(columns)) { row ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 18.dp, vertical = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(hSpacing)
                     ) {
                         row.forEach { item ->
@@ -933,17 +1106,41 @@ fun SearchScreen(
                         repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
                     }
                 }
+
+                // 分页加载更多（Guard 每页默认 72 条，到底了才停）
+                if (!exhausted) {
+                    item {
+                        Box(
+                            Modifier.fillMaxWidth().padding(top = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (loadingMore) CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
+                            else Button(
+                                onClick = {
+                                    if (loadingMore) return@Button
+                                    loadingMore = true
+                                    scope.launch {
+                                        val more = runCatching { vm.tvBoxCategoryPage(typeId, page) }
+                                            .getOrDefault(emptyList())
+                                        if (more.isEmpty()) exhausted = true
+                                        else {
+                                            items = items + more.filterNot { next -> items.any { it.id == next.id } }
+                                            page++
+                                        }
+                                        loadingMore = false
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AppColors.SurfaceHi,
+                                    contentColor = AppColors.TextPrimary
+                                )
+                            ) {
+                                Text("加载更多")
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-}
-
-@Composable
-private fun HintText(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodyMedium,
-        color = AppColors.TextTertiary,
-        modifier = Modifier.fillMaxWidth().padding(36.dp)
-    )
 }

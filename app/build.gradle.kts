@@ -74,6 +74,9 @@ android {
 dependencies {
     val media3 = "1.4.1"
 
+    // TVBox Spider Guard 内部依赖（饭太硬/花卷/玩偶/观影等线路的加密壳都用了 Gson 做 JSON 解析）
+    implementation("com.google.code.gson:gson:2.10.1")
+
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")

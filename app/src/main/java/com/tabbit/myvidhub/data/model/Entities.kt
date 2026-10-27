@@ -95,5 +95,15 @@ data class MediaEntity(
      * 每条源的分集都用 seriesKey 归在一起，靠这个字段区分来源，供详情页切换线路。
      * 非 TVBox 源（Emby）为空。
      */
-    val playSource: String = ""
+    val playSource: String = "",
+
+    /**
+     * 拼音首字母缩写，由入库逻辑预计算。
+     * 例："偷天换日" → "tthr"，"Verity" → "verity"（英文保留小写）。
+     * 用于搜索时 LIKE 前缀匹配，运行时零开销。
+     */
+    val pinyinInitials: String = "",
+
+    /** 来源名称（搜索结果按来源分组展示用） */
+    val sourceName: String = ""
 )

@@ -19,6 +19,8 @@ import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.CatVodResultParser
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -129,6 +131,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val _categoryVods = mutableStateMapOf<String, List<MediaEntity>>()
     val categoryVods: Map<String, List<MediaEntity>> get() = _categoryVods
 
+    /** 每个分类是否正在加载（用于首页 section 显示骨架屏） */
+    private val _categoryPreviewLoading = mutableStateMapOf<String, Boolean>()
+    val categoryPreviewLoading: Map<String, Boolean> get() = _categoryPreviewLoading
+
     var categoryLoading by mutableStateOf(false)
         private set
 
@@ -183,6 +189,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         homeCategories = emptyList()
         activeCategoryId = null
         _categoryVods.clear()
+        _categoryPreviewLoading.clear()
         categoryError = null
         activeSite = null
         Prefs.homeSourceId = sourceId ?: -1L
@@ -198,6 +205,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         homeCategories = emptyList()
         activeCategoryId = null
         _categoryVods.clear()
+        _categoryPreviewLoading.clear()
         categoryError = null
         activeSite = site
         val sourceId = homeSourceId ?: return
@@ -206,15 +214,43 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (siteKey.isNullOrBlank()) return
         viewModelScope.launch {
             val src = repo.getSource(sourceId) ?: return@launch
-            // 每次切线路都拉一次首页：除了合并影片，更重要的是取 homeContent 的 class 分类
+            // 每次切线路都拉一次首页：取 homeContent 的 class 分类名
+            // 分类内容（categoryContent）按需懒加载，每个分类的 section 在 UI 首次可见时触发
             try {
                 val result = repo.syncTvBoxSite(src, s)
                 homeCategories = result.categories
-                // 有分类但首页 list 为空（4K/网盘线路常见）不算失败：首页会展示分类入口
             } catch (e: Exception) {
                 homeSitesError = "线路「${s.name}」加载失败：${e.message ?: "网络或接口异常"}"
             }
         }
+    }
+
+    /**
+     * 按需懒加载某个分类的首页预览条目（前 LAZY_TAKE=10 条）。
+     * UI 层每个分类 section 首次进入 composition 时调用，
+     * 避免并发预加载所有分类导致首页卡顿。
+     */
+    fun ensureCategoryPreview(typeId: String) {
+        if (_categoryVods.containsKey(typeId)) return
+        val sourceId = homeSourceId ?: return
+        val site = activeSite ?: return
+        viewModelScope.launch {
+            _categoryPreviewLoading[typeId] = true
+            val src = repo.getSource(sourceId) ?: return@launch
+            val items = runCatching { repo.tvBoxCategory(src, site, typeId, 1) }
+                .getOrNull().orEmpty()
+            _categoryVods[typeId] = items
+            _categoryPreviewLoading[typeId] = false
+        }
+    }
+
+    /** TVBoxCategoryScreen 分页拉取：typeId + page → 该页 MediaEntity 列表 */
+    suspend fun tvBoxCategoryPage(typeId: String, page: Int): List<MediaEntity> {
+        val sourceId = homeSourceId ?: return emptyList()
+        val site = activeSite ?: return emptyList()
+        val src = repo.getSource(sourceId) ?: return emptyList()
+        return runCatching { repo.tvBoxCategory(src, site, typeId, page) }
+            .getOrDefault(emptyList())
     }
 
     /** 点选站点分类：加载该分类的内容并展开为分区（对应 TVBox 的 categoryContent） */
@@ -456,6 +492,29 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun searchMedia(keyword: String): List<MediaEntity> =
         if (keyword.isBlank()) emptyList() else repo.search(keyword)
+
+    /** 拼音联想（debounce 在 UI 层做，这里直接跑） */
+    suspend fun pinyinSuggest(input: String): List<String> = repo.pinyinSuggest(input)
+
+    /**
+     * 按来源分组的搜索结果：返回 Map<来源名称, List<MediaEntity>>。
+     * 同一部剧可能从 TVBox 多个云盘线路入库，按 sourceName 分组后 UI 直接分组展示。
+     */
+    suspend fun searchGrouped(keyword: String): Map<String, List<MediaEntity>> =
+        searchMedia(keyword).groupBy { it.sourceName.ifBlank { "未知来源" } }
+
+    /**
+     * 合并搜索：本地 DB + TVBox 远程（并发执行）。
+     * 远程结果 id 为负数，点进去时走 TVBox 详情页；本地结果 id 正数，走已有详情页。
+     */
+    suspend fun searchMerged(keyword: String): List<MediaEntity> {
+        val local = searchMedia(keyword)
+        val remote = runCatching { repo.tvBoxRemoteSearch(keyword) }.getOrDefault(emptyList())
+        // 远程结果不要跟本地重复（同一个 vodId 可能本地也有了）
+        val localRemoteIds = local.map { it.remoteId }.toSet()
+        val dedupRemote = remote.filter { it.remoteId !in localRemoteIds }
+        return local + dedupRemote
+    }
 
     /** 分类浏览页：按类型/题材分页查询 */
     suspend fun browseGenre(kind: String?, genre: String?, limit: Int, offset: Int): List<MediaEntity> =

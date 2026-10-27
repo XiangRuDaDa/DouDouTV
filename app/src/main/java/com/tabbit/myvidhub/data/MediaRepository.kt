@@ -3,6 +3,7 @@ package com.tabbit.myvidhub.data
 import android.content.Context
 import com.tabbit.myvidhub.MyVidHubApp
 import com.tabbit.myvidhub.data.db.AppDatabase
+import com.tabbit.myvidhub.data.db.toPinyinInitials
 import com.tabbit.myvidhub.data.emby.EmbyClient
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
@@ -14,6 +15,8 @@ import com.tabbit.myvidhub.data.tmdb.TmdbCache
 import com.tabbit.myvidhub.data.tmdb.TmdbClient
 import com.tabbit.myvidhub.core.Prefs
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
@@ -37,7 +40,60 @@ class MediaRepository(private val context: Context) {
     fun observeFeatured(): Flow<List<MediaEntity>> = mediaDao.observeFeatured()
     fun observeFavorites(): Flow<List<MediaEntity>> = mediaDao.observeFavorites()
 
-    suspend fun search(keyword: String): List<MediaEntity> = mediaDao.search(keyword)
+    suspend fun search(keyword: String): List<MediaEntity> = mediaDao.search(keyword, keyword)
+
+    /** 拼音联想：输入 "tthr" → 返回 ["偷天换日", "偷天换日2", ...] 最多 10 条 */
+    suspend fun pinyinSuggest(input: String): List<String> {
+        val q = input.trim().lowercase()
+        if (q.isBlank()) return emptyList()
+        return if (q.any { it in 'a'..'z' }) mediaDao.pinyinSuggest("$q%")
+        else mediaDao.search(q, q).map { it.title }.distinct().take(10)
+    }
+
+    /**
+     * TVBox 远程搜索：遍历所有已启用的 TVBox 源，每个源下再遍历它的全部线路站点，
+     * 并发调 Guard.searchContent()。返回的 Vod 不入库，直接转临时 MediaEntity 展示。
+     */
+    suspend fun tvBoxRemoteSearch(keyword: String): List<MediaEntity> = withContext(Dispatchers.IO) {
+        val tvboxSources = enabledSources().filter { it.kind == SourceKind.TVBOX }
+        if (tvboxSources.isEmpty()) return@withContext emptyList()
+
+        // 所有 (source, site) 对并发搜索
+        val jobs = tvboxSources.flatMap { source ->
+            runCatching {
+                val client = TvBoxClient(source.location, context)
+                client.availableSites().filter { it.type == 3 }.map { site ->
+                    async {
+                        runCatching { client.search(site, keyword) }
+                            .getOrDefault(emptyList())
+                            .map { it to source.name }
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+        val flat = jobs.awaitAll().flatten()
+
+        // 去重（同一影片可能被多个线路搜到）
+        val dedup = flat.distinctBy { (vod, _) -> vod.vodId + vod.siteKey }
+
+        dedup.mapIndexed { index, (vod, srcName) ->
+            MediaEntity(
+                id = -(index + 1).toLong(),  // 负数 id = 远程临时结果
+                sourceId = 0L,
+                uri = "",
+                remoteId = "remote:${vod.siteKey}:${vod.vodId}",
+                title = vod.name,
+                kind = MediaKind.MOVIE,
+                year = vod.year,
+                posterUrl = vod.pic,
+                genres = vod.typeName,
+                overview = vod.content,
+                sourceName = srcName,
+                // 远程结果也计算拼音（方便再搜）
+                pinyinInitials = vod.name.toPinyinInitials()
+            )
+        }
+    }
     suspend fun setFavorite(id: Long, favorite: Boolean) = mediaDao.setFavorite(id, favorite)
 
     /** 从头播放：把进度归零，播放器读取后就从 0s 开始 */
@@ -208,12 +264,18 @@ class MediaRepository(private val context: Context) {
      * 不能用 upsert(REPLACE)：那会删行重插，进度和收藏都会丢。
      */
     private suspend fun saveMedia(entity: MediaEntity) {
-        val existing = mediaDao.byRemoteId(entity.remoteId)
+        // 入库前统一补齐拼音首字母和来源名称（运行时零开销，库里有就覆盖）
+        val srcName = sourceDao.get(entity.sourceId)?.name ?: ""
+        val enriched = entity.copy(
+            pinyinInitials = entity.title.toPinyinInitials(),
+            sourceName = srcName
+        )
+        val existing = mediaDao.byRemoteId(enriched.remoteId)
         if (existing == null) {
-            mediaDao.insert(entity)
+            mediaDao.insert(enriched)
         } else {
             mediaDao.update(
-                entity.copy(
+                enriched.copy(
                     id = existing.id,
                     // ---- 播放相关：始终保留已有进度，源同步不会覆盖 ----
                     positionMs = existing.positionMs,
