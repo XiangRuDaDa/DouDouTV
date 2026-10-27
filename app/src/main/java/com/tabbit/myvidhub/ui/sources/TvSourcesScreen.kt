@@ -55,6 +55,11 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -98,13 +103,12 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
 
     BoxWithConstraints {
         val screenWidth = maxWidth
-        // 响应式列数：380dp 为基准，向下取整；最小 2 列
-        val columns = maxOf(2, (screenWidth / 380.dp).toInt())
-        val cardGap = 20.dp
-        // 卡片宽度 = (可用宽 - padding - gap) / 列数；列间 1 个 gap 宽
-        val usableWidth = screenWidth - 80.dp // 左右各 40dp（与 TvBackButton 对齐）
+        // 响应式列数：**290dp 基准**（75 寸 1080p ≈ 5 列，1080p ≈ 5-6 列，4K ≈ 12+ 列）；最小 3 列
+        val columns = maxOf(3, (screenWidth / 290.dp).toInt())
+        val cardGap = 16.dp
+        val usableWidth = screenWidth - 72.dp // 左右各 36dp
         val cardWidth = (usableWidth - cardGap * (columns - 1)) / columns
-        val cardHeight = (cardWidth * 0.76f).coerceAtLeast(260.dp).coerceAtMost(340.dp)
+        val cardHeight = (cardWidth * 0.72f).coerceIn(210.dp, 280.dp)
 
         Box(Modifier.fillMaxSize().background(AppColors.Bg)) {
 
@@ -164,10 +168,10 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
             // ========== 内容区 ==========
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize().padding(top = 110.dp, start = 40.dp, end = 40.dp, bottom = 32.dp),
+                modifier = Modifier.fillMaxSize().padding(top = 110.dp, start = 36.dp, end = 36.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(cardGap),
                 verticalArrangement = Arrangement.spacedBy(cardGap),
-                contentPadding = PaddingValues(top = 8.dp)
+                contentPadding = PaddingValues(top = 4.dp)
             ) {
                 // ---- Emby 分组标题 ----
                 if (embys.isNotEmpty()) {
@@ -378,7 +382,7 @@ private fun TvSourceCard(
             .focusable(interactionSource = interaction)
     ) {
         Column(
-            Modifier.fillMaxSize().padding(20.dp),
+            Modifier.fillMaxSize().padding(14.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             // 上半部分：图标 + 名称 + 徽章 + URL
@@ -687,15 +691,35 @@ private fun TvSourceFormPanel(
     var username by remember { mutableStateOf(initial?.username ?: "") }
     var password by remember { mutableStateOf(initial?.password ?: "") }
 
+    // Dialog 焦点根容器 + 第一个输入框焦点
+    val dialogRootFocus = remember { FocusRequester() }
+    val nameFieldFocus = remember { FocusRequester() }
+    // Dialog 首次显示时，先让 Box 成为焦点根，再延迟 requestFocus 到「来源名称」输入框
+    LaunchedEffect(Unit) {
+        dialogRootFocus.requestFocus()
+        kotlinx.coroutines.delay(160)
+        runCatching { nameFieldFocus.requestFocus() }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.65f))
-            .onFocusChanged { /* 阻止焦点逃逸 */ },
+            .background(Color.Black.copy(alpha = 0.72f))
+            // focusRequester + focusable 让 Box 成为 Dialog 的焦点子树根容器，
+            // 阻止焦点从 Dialog 内部逃逸到上层 LazyVerticalGrid 的卡片
+            .focusRequester(dialogRootFocus)
+            .focusable()
+            .onPreviewKeyEvent { e ->
+                // Back 键关闭 Dialog
+                if (e.type == KeyEventType.KeyDown && e.key == Key.Back) {
+                    onDismiss()
+                    true
+                } else false
+            },
         contentAlignment = Alignment.Center
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth(0.55f).fillMaxSize(0.88f),
+            modifier = Modifier.fillMaxWidth(0.62f).fillMaxSize(0.90f),
             shape = RoundedCornerShape(20.dp),
             color = AppColors.Surface,
             shadowElevation = 24.dp
@@ -707,23 +731,17 @@ private fun TvSourceFormPanel(
                         .fillMaxWidth()
                         .background(
                             androidx.compose.ui.graphics.Brush.linearGradient(
-                                colors = listOf(AppColors.Brand.copy(alpha = 0.12f), Color.Transparent)
+                                colors = listOf(AppColors.Brand.copy(alpha = 0.10f), Color.Transparent)
                             )
                         )
-                        .padding(horizontal = 48.dp, vertical = 32.dp)
+                        .padding(horizontal = 36.dp, vertical = 22.dp)
                 ) {
                     Column {
                         Text(
                             text = if (initial == null) "添加视频来源" else "编辑视频来源",
-                            style = MaterialTheme.typography.headlineMedium,
+                            style = MaterialTheme.typography.headlineSmall,
                             color = AppColors.TextPrimary,
                             fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            text = "选择来源类型并填写配置 — 添加成功后将自动登录并同步影库",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = AppColors.TextSecondary
                         )
                     }
                 }
@@ -731,8 +749,8 @@ private fun TvSourceFormPanel(
                 // 表单区
                 androidx.compose.foundation.lazy.LazyColumn(
                     Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 48.dp, vertical = 28.dp),
-                    verticalArrangement = Arrangement.spacedBy(22.dp)
+                    contentPadding = PaddingValues(horizontal = 36.dp, vertical = 18.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     // 类型选择器
                     item {
@@ -741,14 +759,14 @@ private fun TvSourceFormPanel(
                             style = MaterialTheme.typography.labelMedium,
                             color = AppColors.TextSecondary
                         )
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(10.dp))
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             TvTypeOption(
                                 text = "Emby 媒体服务器",
-                                subtext = "服务器地址 + 账号密码，自动登录换 Token",
+                                subtext = "服务器 + 账号密码",
                                 icon = "E",
                                 selected = kind == SourceKind.EMBY,
                                 modifier = Modifier.weight(1f),
@@ -756,7 +774,7 @@ private fun TvSourceFormPanel(
                             )
                             TvTypeOption(
                                 text = "TVBox 接口",
-                                subtext = "CMS 接口地址，苹果CMS v10 JSON 通用格式",
+                                subtext = "CMS / TVBox JSON",
                                 icon = "📺",
                                 selected = kind == SourceKind.TVBOX,
                                 modifier = Modifier.weight(1f),
@@ -765,12 +783,13 @@ private fun TvSourceFormPanel(
                         }
                     }
 
-                    // 名称
+                    // 名称（**第一个可聚焦字段 —— Dialog 显示时自动 requestFocus 这里**）
                     item {
                         TvFormField(
                             label = "来源名称",
                             required = true,
                             value = name,
+                            focusRequester = nameFieldFocus,
                             placeholder = if (kind == SourceKind.EMBY) "例如：我的 NAS 影库" else "例如：主线路",
                             onValueChange = { name = it }
                         )
@@ -968,9 +987,10 @@ private fun TvFormField(
     placeholder: String,
     isPassword: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
+    focusRequester: FocusRequester? = null,
     onValueChange: (String) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
                 text = label,
@@ -988,7 +1008,10 @@ private fun TvFormField(
                 Text(text = placeholder, color = AppColors.TextTertiary)
             },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth().height(64.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(60.dp)
+                .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier),
             visualTransformation = if (isPassword) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
             keyboardOptions = KeyboardOptions(
                 keyboardType = keyboardType,

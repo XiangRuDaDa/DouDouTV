@@ -96,10 +96,18 @@ fun TvPillButton(
     ) {
         Text(
             text,
-            color = if (primary && (focused || !primary)) Color.Black else Color.White,
+            color = when {
+                primary && focused -> Color.Black       // 主按钮 + 聚焦：白底黑字
+                primary -> Color.White                 // 主按钮 + 正常：蓝底白字
+                focused -> Color.Black                 // 次按钮 + 聚焦：白底黑字
+                compact -> Color.White.copy(alpha = 0.72f)  // 紧凑顶栏按钮：72% opacity 轻量化
+                else -> Color.White.copy(alpha = 0.90f)     // 次按钮：90% opacity
+            },
+            // 非紧凑（主操作）→ Level 3: titleMedium 16sp Bold 100%
+            // 紧凑（顶栏/工具栏）→ labelLarge 14sp Medium 72%
             style = if (compact) MaterialTheme.typography.labelLarge
             else MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = if (compact) FontWeight.Medium else FontWeight.Bold,
             maxLines = 1
         )
     }
@@ -147,9 +155,10 @@ fun TvPlayButton(
         Text(
             text,
             color = if (focused) Color.Black else Color.White,
+            // Level 3: titleMedium 16sp Bold 100%（主操作语气要肯定）
             style = if (compact) MaterialTheme.typography.labelLarge
             else MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            fontWeight = FontWeight.Bold,
             maxLines = 1
         )
     }
@@ -272,9 +281,10 @@ fun TvPosterCard(
         }
         Text(
             item.title,
-            color = AppColors.TextPrimary,
+            // 卡片标题：100% 白 + Bold —— 和海报视觉竞争不能输
+            color = Color.White,
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
+            fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp)
@@ -302,9 +312,11 @@ fun TvSectionTitle(
     ) {
         Text(
             text,
-            color = AppColors.TextPrimary,
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.SemiBold,
+            // Level 2 分区标题：titleLarge 22sp Bold · 90% White
+            // headlineSmall(24sp) 太大太粗，分区标题比 Hero 标题低一档
+            color = Color.White.copy(alpha = 0.90f),
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f)
         )
         trailing?.invoke()
@@ -317,7 +329,7 @@ fun TvMoreButton(onClick: () -> Unit) {
     TvPillButton(text = "查看全部", primary = false, onClick = onClick)
 }
 
-/** 空状态提示 */
+/** 空状态提示 —— 主文 headlineSmall 24sp 粗 + hint bodyMedium 14sp 55% */
 @Composable
 fun TvEmptyState(text: String, hint: String? = null, modifier: Modifier = Modifier) {
     Column(
@@ -329,22 +341,30 @@ fun TvEmptyState(text: String, hint: String? = null, modifier: Modifier = Modifi
     ) {
         Text(
             text,
-            color = AppColors.TextSecondary,
-            style = MaterialTheme.typography.headlineSmall
+            color = Color.White.copy(alpha = 0.90f),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
         )
         if (hint != null) {
             Spacer(Modifier.height(10.dp))
-            Text(hint, color = AppColors.TextTertiary, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = hint,
+                // Level 7 信息标签级：14sp · 55% White —— 别和主文抢注意力
+                color = Color.White.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
 
 /** 元信息条：年份 · 评分 · 类型，中间用圆点分隔 */
+/** TV 端元信息行：年份 · 类型 · 时长（已移除评分 —— 避免与海报背景 IMDb 分重复）。
+ *  字号 14sp / Medium / rgba(255,255,255,.72) —— 介于标题与徽章之间的视觉权重。 */
 @Composable
 fun TvMetaRow(item: MediaEntity, modifier: Modifier = Modifier) {
     val bits = buildList {
         if (item.year > 0) add(item.year.toString())
-        if (item.rating > 0) add("★ %.1f".format(item.rating))
         if (item.genres.isNotBlank()) add(item.genres.split(",", "/", " ", "，").first().trim())
         if (item.durationMs > 0) add("${item.durationMs / 60_000} 分钟")
     }.filter { it.isNotBlank() }
@@ -352,11 +372,16 @@ fun TvMetaRow(item: MediaEntity, modifier: Modifier = Modifier) {
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         bits.forEachIndexed { index, s ->
             if (index > 0) {
-                Text("  ·  ", color = AppColors.TextTertiary, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    text = "  ·  ",
+                    color = Color.White.copy(alpha = 0.30f),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Normal
+                )
             }
             Text(
-                s,
-                color = if (s.startsWith("★")) AppColors.Rating else AppColors.TextSecondary,
+                text = s,
+                color = Color.White.copy(alpha = 0.72f),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium
             )
@@ -385,8 +410,9 @@ fun TvBackButton(onBack: () -> Unit) {
     ) {
         Text(
             "← 返回",
-            color = if (focused) Color.Black else Color.White,
-            style = MaterialTheme.typography.titleMedium,
+            // 返回按钮：titleSmall 14sp Medium · 72% White —— 不要抢焦点
+            color = if (focused) Color.Black else Color.White.copy(alpha = 0.72f),
+            style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Medium
         )
     }
@@ -431,10 +457,12 @@ fun TvFilterChip(
             color = when {
                 focused -> Color.Black
                 selected -> Color.White
-                else -> AppColors.TextSecondary
+                // 未选中 chip ：85% White —— 徽章级视觉权重
+                else -> Color.White.copy(alpha = 0.85f)
             },
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Normal,
+            // Level 6 徽章：labelMedium 11sp SemiBold
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
             maxLines = 1
         )
     }

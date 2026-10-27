@@ -1,4 +1,4 @@
-package com.tabbit.myvidhub.ui.tv
+﻿package com.tabbit.myvidhub.ui.tv
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -372,12 +373,14 @@ fun TvDetailScreen(
                     false
                 } else {
                     when (e.key) {
+                        // 按一次 DOWN → 一次性展开到 L3（全部展开），而不是逐级展开让用户按多次
                         Key.DirectionDown -> if (level < 3) {
-                            level += 1
+                            level = 3
                             true
                         } else false
+                        // 按一次 UP → 一次性收起回 L0，而不是逐级收起
                         Key.DirectionUp -> if (level > 0) {
-                            level -= 1
+                            level = 0
                             true
                         } else false
                         else -> false
@@ -452,8 +455,8 @@ fun TvDetailScreen(
                         // 用比例不用固定 dp，换分辨率、换屏幕比例时左右关系都不会跑偏。
                         Column(
                             Modifier
-                                .fillMaxWidth(0.58f)
-                                .padding(start = 56.dp, end = 12.dp)
+                                .fillMaxWidth(0.72f)
+                                .padding(start = 20.dp, end = 12.dp)
                         ) {
                         // 标题位：Logo 与文字标题共用同一块「标题槽」。
                         // 以前有刮削时是一张很大的艺术字图、没有刮削时是两行大字，
@@ -488,7 +491,7 @@ fun TvDetailScreen(
                                     Text(
                                         item.title,
                                         color = Color.White,
-                                        style = MaterialTheme.typography.displaySmall,
+                                        style = MaterialTheme.typography.displayLarge,
                                         fontWeight = FontWeight.Bold,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
@@ -506,52 +509,19 @@ fun TvDetailScreen(
                             )
                         }
 
-                        // ===== L0 常驻骨架：评分胶囊 + 片源徽章始终同一行 =====
-                        // 关键点：这里不做「有数据才渲染」的分支。有刮削、没刮削都必须
-                        // 出同样的结构，缺数据只把文字降级（TMDB x.x → 评分 x.x → 暂无评分），
-                        // 这样两种片子的首屏高度和节奏才一致，不会一个多一块、一个少一块。
-                        val tmdbRating = tmdb?.rating ?: 0.0
-                        val hasTmdbRating = tmdb != null && tmdbRating > 0.0
-                        val shownRating = when {
-                            hasTmdbRating -> tmdbRating
-                            item.rating > 0.0 -> item.rating
-                            else -> 0.0
-                        }
+                        // ===== L0 常驻骨架：TvMetaRow（年份·类型·时长）上移到标题下、徽章上 =====
+                        // 设计决策：评分胶囊从 L0 彻底移除 —— 海报背景图通常已带 IMDb 评分，
+                        // 再加一层「TMDB x.x」白胶囊是重复。TvMetaRow 放在标题与徽章之间，
+                        // 形成节奏：标题(40sp 粗) → 元信息(14sp 中) → 徽章(11sp) → 按钮(15sp 粗)
                         Spacer(Modifier.height(8.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            // 评分胶囊：恒定存在，三种状态只换文字和底色深浅
-                            Box(
-                                Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(
-                                        if (shownRating > 0.0) Color.White
-                                        else Color.White.copy(alpha = 0.16f)
-                                    )
-                                    .padding(horizontal = 9.dp, vertical = 3.dp)
-                            ) {
-                                Text(
-                                    when {
-                                        hasTmdbRating -> "TMDB " + "%.1f".format(tmdbRating)
-                                        shownRating > 0.0 -> "评分 " + "%.1f".format(shownRating)
-                                        else -> "暂无评分"
-                                    },
-                                    color = if (shownRating > 0.0) Color.Black
-                                    else Color.White.copy(alpha = 0.62f),
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            // 评分胶囊已带「TMDB」字样，徽章行不再重复放 TMDB
-                            FormatBadgesRow(
-                                tmdbEnabled = tmdb != null && !hasTmdbRating,
-                                resolution = scraped?.videoResolution.orEmpty(),
-                                hdr = scraped?.hdrType.orEmpty(),
-                                codec = scraped?.videoCodec.orEmpty()
-                            )
-                        }
+                        TvMetaRow(item)
+                        Spacer(Modifier.height(10.dp))
+                        FormatBadgesRow(
+                            tmdbEnabled = false,   // 评分胶囊已删，徽章行不再显示 TMDB 字样
+                            resolution = scraped?.videoResolution.orEmpty(),
+                            hdr = scraped?.hdrType.orEmpty(),
+                            codec = scraped?.videoCodec.orEmpty()
+                        )
 
                         // 操作按钮行：只出一个主按钮，三种内容状态各自对应一个明确动词。
                         // 之前「播放 / 从头开始 / 收藏」三件套并排，按钮越多，每个越不像主操作；
@@ -612,7 +582,7 @@ fun TvDetailScreen(
 
                         // L1/L3 的正文（剧情、元信息、导演、类型、署名）铺满整屏，
                         // 左内边距与 L0 骨架的 56dp 对齐，展开后左侧边界连成一条直线。
-                        Column(Modifier.padding(start = 56.dp, end = 56.dp)) {
+                        Column(Modifier.padding(start = 20.dp, end = 20.dp)) {
                         // ========== L1：剧情简介（评分与徽章已在 L0 常驻） ==========
                         // 默认不显示，按下键才展开；这样进页面第一眼只有标题、评分、
                         // 徽章和播放按钮，海报背景仍能占满整屏，是「大图沉浸」的前提。
@@ -627,16 +597,16 @@ fun TvDetailScreen(
                                 if (overview.isNotBlank()) {
                                     Spacer(Modifier.height(22.dp))
                                     Text(
-                                        overview,
-                                        color = Color.White.copy(alpha = 0.82f),
+                                        text = overview,
+                                        color = Color.White.copy(alpha = 0.85f),
                                         style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Normal,
+                                        lineHeight = 28.sp,
                                         maxLines = 5,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
-                                // 元信息行：年份 · 类型 · 时长 · 剧集数
-                                Spacer(Modifier.height(18.dp))
-                                TvMetaRow(item)
+                                // 元信息行（年份·类型·时长）已在 L0 常驻骨架里，这里不再重复
                             }
                         }
 
@@ -680,7 +650,7 @@ fun TvDetailScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(
-                            start = 56.dp, end = 56.dp, top = 22.dp, bottom = 10.dp
+                            start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp
                         )
                     ) {
                         // 右上角：季切换 + 翻页，几百集不用一路横划到底
@@ -752,7 +722,7 @@ fun TvDetailScreen(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(start = 56.dp, end = 56.dp, bottom = 10.dp),
+                                .padding(start = 20.dp, end = 20.dp, bottom = 10.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             rowEps.forEachIndexed { idx, ep ->
@@ -780,7 +750,7 @@ fun TvDetailScreen(
                             text = "主演",
                             modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(
-                                start = 56.dp, end = 56.dp, top = 22.dp, bottom = 10.dp
+                                start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp
                             )
                         )
                         TvCastRow(tvCast)
@@ -1004,7 +974,7 @@ private fun TvCastRow(cast: List<TvCast>) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 56.dp, end = 56.dp, bottom = 8.dp),
+            .padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         cast.forEach { person ->

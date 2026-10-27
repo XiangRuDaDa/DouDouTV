@@ -49,6 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -134,12 +135,14 @@ fun TvHomeScreen(
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
 
     val listState = rememberLazyListState()
-    // 滚动距离驱动顶栏透明度（下滑到 heroHeight 后淡出）
+    // 滚动距离驱动顶栏透明度 —— 注意：**不要用 animateFloatAsState + 直接读 listState**（那会让 LazyColumn 每次
+    // scroll 都触发整个 Box 重组）。把计算延后到 TvTopBar 内部 graphicsLayer 的 draw phase 执行：
     val configuration = LocalConfiguration.current
-    val heroCollapseDistPx = (configuration.screenHeightDp * 0.40f).toInt()
-    val rawFade = if (heroCollapseDistPx == 0) 0f
-        else (listState.firstVisibleItemScrollOffset.toFloat() / heroCollapseDistPx).coerceIn(0f, 1f)
-    val topBarAlpha by animateFloatAsState(targetValue = 1f - rawFade, label = "tv_topbar_fade")
+    val heroCollapseDistPx = (configuration.screenHeightDp * 0.40f).toInt().coerceAtLeast(1)
+    val alphaProvider: () -> Float = {
+        val offset = listState.firstVisibleItemScrollOffset.toFloat()
+        (1f - offset / heroCollapseDistPx).coerceIn(0.45f, 1f)  // 最小 0.45f 保底可点击
+    }
 
     // 来源/站点（线路）选择器数据
     // 当前生效的来源：手动选择的来源（已删除则回退），未选择时默认第一个配置的来源
@@ -152,18 +155,18 @@ fun TvHomeScreen(
     var showSourceDialog by remember { mutableStateOf(false) }
     var showSiteDialog by remember { mutableStateOf(false) }
 
-    // 焦点 requester 链：同步按钮 ↔ TvHero 播放按钮
-    // 统一在最外层 Box 拦截方向键，避免被 LazyColumn 内部的焦点导航先消费掉
+    // 焦点 requester 链：Hero 播放按钮 ↔ TopBar 任意按钮
+    // TopBar 在 Box 顶层悬浮，和 LazyColumn 不在同一焦点子树 → 必须手动在 onPreviewKeyEvent 拦截 DPad
     val syncButtonFocus = remember { FocusRequester() }
     val heroPlayFocus = remember { FocusRequester() }
-    // 用状态跟踪当前焦点层级（Hero = true，TopBar = false）
     var heroFocused by remember { mutableStateOf(false) }
-    var syncFocused by remember { mutableStateOf(false) }
+    var topBarFocused by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { runCatching { heroPlayFocus.requestFocus() } }
 
-    // 最外层统一焦点导航：根据当前焦点所在层级拦截 DPad Up/Down
-    // 必须在最外层做，否则 LazyColumn 内部的焦点导航会先消费掉方向键
+    // 最外层统一焦点导航：
+    //   Hero 播放按钮 ↑ → TopBar 同步按钮（首落点）
+    //   TopBar 任意按钮 ↓ → Hero 播放按钮（只要 Hero 还在视口内）
     Box(
         Modifier
             .fillMaxSize()
@@ -171,22 +174,24 @@ fun TvHomeScreen(
             .onPreviewKeyEvent { event ->
                 if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val keyCode = event.nativeKeyEvent.keyCode
-                // 焦点在 Hero 播放按钮上时按↑ → 跳到顶部同步按钮
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP && heroFocused) {
                     syncButtonFocus.requestFocus()
                     true
-                }
-                // 焦点在顶部同步按钮上时按↓ → 跳到 Hero 播放按钮
-                else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && syncFocused) {
-                    heroPlayFocus.requestFocus()
-                    true
+                } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && topBarFocused) {
+                    // 只有 Hero 还可见（未滚出视口）才跳 Hero；否则让 LazyColumn 默认处理
+                    if (listState.firstVisibleItemIndex <= 1) {
+                        heroPlayFocus.requestFocus()
+                        true
+                    } else false
                 } else false
             }
     ) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 32.dp)
+            // top=64dp 避让悬浮 TvTopBar（padding top 18dp + 按钮 44dp），
+            // 让 Hero item 从 y=64dp 开始，图片顶部不被遮挡，播放按钮有正常呼吸空间
+            contentPadding = PaddingValues(top = 64.dp, bottom = 32.dp)
         ) {
             // ---------- 主视觉（置顶，TvTopBar 悬浮其上） ----------
             if (hero != null) {
@@ -291,13 +296,13 @@ fun TvHomeScreen(
                 ?: namedSites.firstOrNull()?.key?.takeIf { it.isNotBlank() }
         } else null
         TvTopBar(
-            alpha = topBarAlpha,
+            alphaProvider = alphaProvider,
             sourceName = displaySourceName,
             sourceKind = selectedSource?.kind,
             siteName = displaySiteName,
             scanning = vm.scanning,
             syncFocusRequester = syncButtonFocus,
-            onSyncFocusChanged = { syncFocused = it },
+            onAnyButtonFocusChanged = { topBarFocused = it },
             onSearch = onSearch,
             onHomeSource = { showSourceDialog = true },
             onHomeSite = if (showSiteButton) ({ showSiteDialog = true }) else null,
@@ -332,15 +337,17 @@ fun TvHomeScreen(
     }
 }
 
-/** 顶部入口条：SpaceBetween 布局 — 左侧来源链 PillButton，右侧操作组 */
+/** 顶部入口条：SpaceBetween 布局 — 左侧来源链 PillButton，右侧操作组。
+ *  所有可聚焦元素（来源/线路 PillButton、同步/搜索/来源/设置按钮）gain focus 时
+ *  都通过 onAnyButtonFocusChanged 通知顶层，让 Box 的 onPreviewKeyEvent 能统一处理 D-PAD。 */
 @Composable
 private fun TvTopBar(
-    alpha: Float,
+    alphaProvider: () -> Float,
     sourceName: String,
     sourceKind: SourceKind?,
     siteName: String?,
     syncFocusRequester: FocusRequester,
-    onSyncFocusChanged: (Boolean) -> Unit,
+    onAnyButtonFocusChanged: (Boolean) -> Unit,
     onSearch: () -> Unit,
     onHomeSource: () -> Unit,
     onHomeSite: (() -> Unit)? = null,
@@ -351,45 +358,40 @@ private fun TvTopBar(
 ) {
     val isTvBox = onHomeSite != null || sourceKind == SourceKind.TVBOX
     val isEmpty = sourceKind == null
+    val markTopBarFocus: (FocusState) -> Unit = { onAnyButtonFocusChanged(it.isFocused) }
 
     Row(
         Modifier
             .fillMaxWidth()
-            .graphicsLayer { this.alpha = alpha }
+            // alpha 在 draw phase 从 listState 计算 —— 不触发 composition 重组，滚动流畅
+            .graphicsLayer { this.alpha = alphaProvider() }
             .padding(start = 20.dp, end = 20.dp, top = 18.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         // ---- 左：来源链 PillButton ----
-        // 空状态：提示「＋ 添加来源」点击跳转来源管理
-        // Emby-only：只显示一个 PillButton
-        // TVBox + 线路：来源 PillButton › 线路 PillButton 连在一起
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (isEmpty) {
                 TvPillButton(
-                    text = "＋ 添加来源",
-                    primary = true,
-                    compact = true,
-                    onClick = onSources
+                    text = "＋ 添加来源", primary = true, compact = true, onClick = onSources,
+                    modifier = Modifier.onFocusChanged(markTopBarFocus)
                 )
             } else {
                 TvSourceChainPill(
                     label = if (isTvBox) "来源" else "Emby",
                     value = sourceName,
                     kind = sourceKind,
-                    onClick = onHomeSource
+                    onClick = onHomeSource,
+                    onFocusChanged = markTopBarFocus
                 )
                 if (onHomeSite != null && !siteName.isNullOrBlank()) {
-                    Text(
-                        text = "›",
-                        color = Color.White.copy(alpha = 0.5f),
-                        style = MaterialTheme.typography.titleMedium
-                    )
+                    Text("›", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.titleMedium)
                     TvSourceChainPill(
                         label = "线路",
                         value = siteName,
                         kind = null,
-                        onClick = onHomeSite
+                        onClick = onHomeSite,
+                        onFocusChanged = markTopBarFocus
                     )
                 }
             }
@@ -406,23 +408,28 @@ private fun TvTopBar(
                     "↻ 同步", primary = false, compact = true, onClick = onRefresh,
                     modifier = Modifier
                         .focusRequester(syncFocusRequester)
-                        .onFocusChanged { onSyncFocusChanged(it.isFocused) }
+                        .onFocusChanged(markTopBarFocus)
                 )
             }
-            TvPillButton("🔍 搜索", primary = false, compact = true, onClick = onSearch)
-            TvPillButton("📺 来源", primary = false, compact = true, onClick = onSources)
-            TvPillButton("⚙ 设置", primary = false, compact = true, onClick = onSettings)
+            TvPillButton("🔍 搜索", primary = false, compact = true, onClick = onSearch,
+                modifier = Modifier.onFocusChanged(markTopBarFocus))
+            TvPillButton("📺 来源", primary = false, compact = true, onClick = onSources,
+                modifier = Modifier.onFocusChanged(markTopBarFocus))
+            TvPillButton("⚙ 设置", primary = false, compact = true, onClick = onSettings,
+                modifier = Modifier.onFocusChanged(markTopBarFocus))
         }
     }
 }
 
-/** 来源链 PillButton — label 用品牌色，value 用白色；来源名 ellipsis 到 ~16 字 */
+/** 来源链 PillButton — label 用品牌色，value 用白色；来源名 ellipsis 到 ~16 字。
+ *  通过 onFocusChanged 把焦点状态冒泡到 TvHomeScreen 顶层，供 onPreviewKeyEvent 统一处理。 */
 @Composable
 private fun TvSourceChainPill(
     label: String,
     value: String,
     kind: SourceKind?,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onFocusChanged: (FocusState) -> Unit = {}
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -448,6 +455,7 @@ private fun TvSourceChainPill(
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
+            .onFocusChanged(onFocusChanged)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -515,7 +523,8 @@ private fun TvCategoryChip(
     }
 }
 
-/** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下 */
+/** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下。
+ *  顶部 64dp padding 避让悬浮 TvTopBar，防止 Hero 播放按钮被遮盖。 */
 @Composable
 private fun TvHero(
     item: MediaEntity,
@@ -529,7 +538,7 @@ private fun TvHero(
     Box(
         Modifier
             .fillMaxWidth()
-            .height(520.dp)
+            .height(430.dp)
     ) {
         AsyncImage(
             model = item.backdropUrl.ifBlank { item.posterUrl },
@@ -538,27 +547,25 @@ private fun TvHero(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 渐变遮罩：左→右淡化 + 底部渐隐
+        // 渐变遮罩 —— remember 缓存避免每次重绘都重建 Brush
+        val horizVignette = remember {
+            Brush.horizontalGradient(
+                0f to Color.Black.copy(alpha = 0.88f),
+                0.45f to Color.Black.copy(alpha = 0.40f),
+                1f to Color.Transparent
+            )
+        }
+        val bottomVignette = remember {
+            Brush.verticalGradient(
+                0.55f to Color.Transparent,
+                1f to AppColors.Bg
+            )
+        }
+        Box(Modifier.fillMaxSize().background(horizVignette))
         Box(
             Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        0f to Color.Black.copy(alpha = 0.88f),
-                        0.45f to Color.Black.copy(alpha = 0.40f),
-                        1f to Color.Transparent
-                    )
-                )
-        )
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.55f to Color.Transparent,
-                        1f to AppColors.Bg
-                    )
-                )
+                .background(bottomVignette)
         )
 
         // 左对齐内容块：logo/标题 + 元信息 + 操作按钮
