@@ -595,7 +595,7 @@ fun TvDetailScreen(
                                     ?: scraped?.tagline?.takeIf { it.isNotBlank() }
                                     ?: item.overview
                                 if (overview.isNotBlank()) {
-                                    Spacer(Modifier.height(22.dp))
+                                    Spacer(Modifier.height(16.dp))
                                     Text(
                                         text = overview,
                                         color = Color.White.copy(alpha = 0.85f),
@@ -641,6 +641,7 @@ fun TvDetailScreen(
 
             // ---------- 分集（网格 + 分季 + 翻页）：L2 才出现 ----------
             if (pageLevel >= 2 && episodes.isNotEmpty()) {
+                // ===== 选集标题（简洁单行，按钮不挤在这里）=====
                 item {
                     TvSectionTitle(
                         text = if (tvSeasons.size > 1) {
@@ -650,11 +651,22 @@ fun TvDetailScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(
-                            start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp
+                            start = 20.dp, end = 20.dp, top = 16.dp, bottom = 6.dp
                         )
-                    ) {
-                        // 右上角：季切换 + 翻页，几百集不用一路横划到底
+                    )
+                }
+
+                // ===== 按钮行：独立 item，整行宽度可用 =====
+                // 根因修复：之前把所有 pill（云盘×N + 季×N + 翻页×3）塞进
+                // TvSectionTitle 的 trailing Row 里，后者只有标题右边那点剩宽度，
+                // 多季/多云盘时 8+ 个 pill 全部溢出裁掉 → 中间大片空白 → 用户以为
+                // 「简介和剧集之间间隔太大」。拆成独立 item 后按钮行拿到整宽。
+                if (playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1) {
+                    item(key = "ep_controls") {
                         Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(start = 20.dp, end = 20.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
@@ -705,7 +717,7 @@ fun TvDetailScreen(
                                     primary = false,
                                     onClick = { if (pageIndex < totalPages - 1) epPage = pageIndex + 1 }
                                 )
-                                // 末集直达：几百集的剧不用一路翻到底，参考截图的「末集」
+                                // 末集直达：几百集的剧不用一路翻到底
                                 TvPillButton(
                                     text = "末集",
                                     primary = false,
@@ -722,7 +734,7 @@ fun TvDetailScreen(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(start = 20.dp, end = 20.dp, bottom = 10.dp),
+                                .padding(start = 20.dp, end = 20.dp, bottom = 6.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             rowEps.forEachIndexed { idx, ep ->
@@ -750,7 +762,7 @@ fun TvDetailScreen(
                             text = "主演",
                             modifier = Modifier.fillMaxWidth(),
                             contentPadding = PaddingValues(
-                                start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp
+                                start = 20.dp, end = 20.dp, top = 16.dp, bottom = 6.dp
                             )
                         )
                         TvCastRow(tvCast)

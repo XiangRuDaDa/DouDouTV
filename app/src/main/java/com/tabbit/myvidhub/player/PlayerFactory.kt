@@ -164,6 +164,29 @@ object PlayerFactory {
                 val cl = response.body?.contentLength() ?: -1L
                 Log.d("PlayerHttp", "<<< $code ${response.message} size=$cl contentType=$ct acceptRanges=$ar")
                 if (!cr.isNullOrBlank()) Log.d("PlayerHttp", "    Content-Range: $cr")
+
+                // ===== 404 资源失效拦截：提前抛出带明确消息的 IOException =====
+                // Media3 的 ERROR_CODE_IO_BAD_HTTP_STATUS 只给错误码，用户看不懂。
+                // 在 OkHttp 层拦截 404 → 抛带中文提示的 IOException → ExoPlayer 把 message
+                // 放进 PlaybackException → onPlayerError 能拿到 message 翻译。
+                if (code == 404) {
+                    val host = request.url.host
+                    Log.e("PlayerHttp", "404 Not Found — 资源已失效 host=$host url=${request.url}")
+                    response.close()
+                    throw java.io.IOException(
+                        "HTTP 404: 该资源已失效（$host），可能是云盘分享链接过期或内容被移除。"
+                    )
+                }
+                // 403/412 = Cookie 失效或签名过期（云盘常见）
+                if (code == 403 || code == 412) {
+                    val host = request.url.host
+                    Log.e("PlayerHttp", "$code ${response.message} — 认证失效 host=$host")
+                    response.close()
+                    throw java.io.IOException(
+                        "HTTP $code: 访问被拒绝（$host），云盘 Cookie 或登录状态可能已过期。"
+                    )
+                }
+
                 response
             })
             .build()
@@ -174,6 +197,29 @@ object PlayerFactory {
         }
 
         Log.d("PlayerFactory", "build OkHttpDataSource headers=${headers.keys} connect=${connectTimeout}ms read=${readTimeout}ms")
+
+        // ===== 磁盘缓存：CacheDataSource 包 OkHttpDataSource =====
+        // 之前禁用 CacheDataSource 是因为云盘大文件（夸克/阿里云盘 5GB+）连续写入有限缓存时，
+        // LRU 淘汰过于缓慢，阻塞 ExoPlayer 的 Range 请求 → 无限 BUFFERING。
+        //
+        // 现在加回来的关键改动：
+        // 1) CacheDataSink(fragmentSize = 2MB) —— 每个 cache entry 分片写入，大文件不会生成
+        //    单个巨型 entry，LRU 淘汰按 2MB 块快速完成，不会阻塞；
+        // 2) CacheDataSource.FLAG_BLOCK_ON_CACHE —— 缓存能命中时优先读，miss 再走网络；
+        // 3) FLAG_IGNORE_CACHE_ON_ERROR —— 缓存读取失败时 fallback 到网络，不崩；
+        // 4) 视频/音频/字幕全部走同一个 cacheDataSource，Emby 局域网 + TVBox 云盘统一缓存。
+        val cacheDataSourceFactory = CacheDataSource.Factory()
+            .setCache(cacheInstance(context, isTv))
+            .setUpstreamDataSourceFactory(httpFactory)
+            .setCacheWriteDataSinkFactory(
+                CacheDataSink.Factory()
+                    .setCache(cacheInstance(context, isTv))
+                    .setFragmentSize(2 * 1024 * 1024L)  // 2MB 分片，大文件 LRU 秒级淘汰
+            )
+            .setFlags(
+                CacheDataSource.FLAG_BLOCK_ON_CACHE or
+                CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR
+            )
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
@@ -188,11 +234,7 @@ object PlayerFactory {
             .build()
 
         val errorPolicy = DefaultLoadErrorHandlingPolicy(8)
-        // 直接用 OkHttpDataSource，不经过 CacheDataSource。
-        // 原因：CacheDataSource 对云盘大文件（夸克/阿里云盘动辄 5GB+）会把完整 GET 响应
-        // 边读边写入有限的磁盘缓存（256MB），LRU 淘汰过程极其缓慢，阻塞了 ExoPlayer 后续
-        // 的 Range 请求，表现为无限 BUFFERING。
-        val mediaSourceFactory = DefaultMediaSourceFactory(httpFactory)
+        val mediaSourceFactory = DefaultMediaSourceFactory(cacheDataSourceFactory)
             .setLoadErrorHandlingPolicy(errorPolicy)
 
         // 自定义 RenderersFactory：过滤掉 ImageRenderer。

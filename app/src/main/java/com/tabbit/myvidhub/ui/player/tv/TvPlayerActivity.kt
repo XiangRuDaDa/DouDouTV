@@ -222,6 +222,24 @@ class TvPlayerActivity : ComponentActivity() {
             if (startMs > 3_000L) p.seekTo(startMs)
             p.setPlaybackSpeed(speed)
             p.playWhenReady = true
+
+            // ===== TV 端补上 Player.Listener（之前完全缺失！播放失败用户什么都看不到）=====
+            // onPlayerError 把 Media3 errorCode 翻译成用户能懂的中文，
+            // 优先用 OkHttp 层拦截时抛出的带明确提示的 IOException message（404/403/412）。
+            p.addListener(object : androidx.media3.common.Player.Listener {
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    val causeMsg = error.cause?.message
+                    toast = when {
+                        causeMsg?.startsWith("HTTP 404") == true -> causeMsg
+                        causeMsg?.startsWith("HTTP 403") == true ||
+                        causeMsg?.startsWith("HTTP 412") == true -> causeMsg
+                        error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
+                        error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
+                        error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
+                        else -> "播放失败：${error.errorCodeName}"
+                    }
+                }
+            })
         }
     }
 

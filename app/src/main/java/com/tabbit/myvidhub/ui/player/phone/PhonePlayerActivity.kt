@@ -494,7 +494,19 @@ class PhonePlayerActivity : ComponentActivity() {
 
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     Log.e("PhonePlayer", "player error: ${error.errorCodeName} ${error.message}", error)
-                    toastState = "播放失败：${error.errorCodeName}"
+                    // 优先使用 OkHttp 层拦截时抛出的带中文提示的 IOException message
+                    // （我们在 PlayerFactory Interceptor 里对 404/403/412 抛了明确中文消息）
+                    val causeMsg = error.cause?.message
+                    val translated = when {
+                        causeMsg?.startsWith("HTTP 404") == true -> causeMsg
+                        causeMsg?.startsWith("HTTP 403") == true ||
+                        causeMsg?.startsWith("HTTP 412") == true -> causeMsg
+                        error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
+                        error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
+                        error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
+                        else -> "播放失败：${error.errorCodeName}"
+                    }
+                    toastState = translated
                 }
             })
 
@@ -599,7 +611,15 @@ class PhonePlayerActivity : ComponentActivity() {
                         updatePlayPauseLabel()
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        toastState = "播放失败：${error.errorCodeName}"
+                        val causeMsg = error.cause?.message
+                        toastState = when {
+                            causeMsg?.startsWith("HTTP 404") == true -> causeMsg
+                            causeMsg?.startsWith("HTTP 403") == true ||
+                            causeMsg?.startsWith("HTTP 412") == true -> causeMsg
+                            error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
+                            error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
+                            else -> "播放失败：${error.errorCodeName}"
+                        }
                     }
                 })
                 np
