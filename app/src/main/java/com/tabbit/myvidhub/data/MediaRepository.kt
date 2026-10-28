@@ -251,7 +251,7 @@ class MediaRepository(private val context: Context) {
      * 详情页就能正常加载分集、播放。
      */
     suspend fun materializeRemote(mediaId: Long): Long? = withContext(Dispatchers.IO) {
-        val hit = remoteHits[mediaId] ?: return@withContext null
+        val hit = remoteHits[mediaId] ?: browseHits[mediaId] ?: return@withContext null
         runCatching { saveTvBoxVods(hit.source, listOf(hit.vod)) {} }
             .getOrDefault(emptyList())
             .firstOrNull()?.id
@@ -279,16 +279,22 @@ class MediaRepository(private val context: Context) {
     /** 从头播放：把进度归零，播放器读取后就从 0s 开始 */
     suspend fun resetPosition(id: Long) = mediaDao.saveProgress(id, 0L, 0L)
 
-    suspend fun addSource(source: SourceEntity): Long = sourceDao.insert(source)
+    suspend fun addSource(source: SourceEntity): Long = sourceDao.insert(source).also {
+        if (source.kind == SourceKind.TVBOX) TvBoxClient.invalidateConfig(source.location)
+    }
+
     suspend fun getSource(id: Long): SourceEntity? = sourceDao.get(id)
     suspend fun allSources(): List<SourceEntity> = sourceDao.getAll()
     suspend fun enabledSources(): List<SourceEntity> = sourceDao.getEnabled()
-    suspend fun updateSource(source: SourceEntity) = sourceDao.update(source)
+    suspend fun updateSource(source: SourceEntity) = sourceDao.update(source).also {
+        if (source.kind == SourceKind.TVBOX) TvBoxClient.invalidateConfig(source.location)
+    }
     suspend fun setSourceEnabled(id: Long, enabled: Boolean) = sourceDao.setEnabled(id, enabled)
 
     suspend fun deleteSource(source: SourceEntity) {
         mediaDao.deleteBySource(source.id)
         sourceDao.delete(source)
+        if (source.kind == SourceKind.TVBOX) TvBoxClient.invalidateConfig(source.location)
     }
 
     suspend fun getMedia(id: Long): MediaEntity? = mediaDao.get(id)
@@ -620,8 +626,11 @@ class MediaRepository(private val context: Context) {
     }
 
     /**
-     * 拉取某站点某分类的内容（categoryContent）并入库，返回带 DB id 的实体列表，
-     * 供首页点分类后按分区展示、并能进详情。
+     * 拉取某站点某分类的内容（categoryContent）。
+     *
+     * 浏览列表**不落库**：之前每拉一页 72 条就逐条 insert/update（一页 100+ 次 DB 往返），
+     * 首页 7 个分类就是几百次写库，电视上直接表现为卡顿。
+     * 这里改成内存实体（负 id）并登记到 [browseHits]，点进详情时由 [materializeRemote] 单条落库。
      */
     suspend fun tvBoxCategory(
         source: SourceEntity,
@@ -631,26 +640,90 @@ class MediaRepository(private val context: Context) {
     ): List<MediaEntity> = withContext(Dispatchers.IO) {
         if (source.kind != SourceKind.TVBOX) return@withContext emptyList()
         val vods = TvBoxClient(source.location, context).categoryContent(site, typeId, page)
-        if (vods.isEmpty()) return@withContext emptyList()
-        saveTvBoxVods(source, vods) {}
+        vods.map { browseEntity(source, it) }
     }
 
-    /** TVBox 列表入库（全站点聚合 / 单站点切换 / 分类内容共用）；返回入库后的实体列表（含 DB id） */
+    /** 浏览列表 → 内存 MediaEntity（负 id），登记到 [browseHits] 供详情页落库 */
+    private fun browseEntity(source: SourceEntity, vod: TvBoxClient.Vod): MediaEntity {
+        val key = "${source.id}:${vod.siteKey}:${vod.vodId}"
+        // 长会话浏览几千条后清一次，避免 Vod 的简介字符串常驻内存
+        if (browseHits.size > 3000) {
+            browseHits.clear()
+            browseIds.clear()
+        }
+        val id = browseIds.getOrPut(key) { -browseSeq.getAndIncrement() }
+        browseHits[id] = RemoteHit(source, vod)
+        return MediaEntity(
+            id = id,
+            sourceId = 0L,
+            uri = "",
+            remoteId = tvboxKey(source.id, vod.siteKey, vod.vodId),
+            title = vod.name,
+            kind = MediaKind.SERIES,
+            year = vod.year,
+            overview = vod.content,
+            posterUrl = vod.pic,
+            backdropUrl = vod.pic,
+            rating = vod.score,
+            genres = vod.typeName
+        )
+    }
+
+    /** 浏览临时 id 注册表（与搜索共用详情页落库入口） */
+    private val browseHits = java.util.concurrent.ConcurrentHashMap<Long, RemoteHit>()
+    private val browseIds = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val browseSeq = java.util.concurrent.atomic.AtomicLong(1_000_000L)
+
+    /**
+     * TVBox 列表入库（全站点聚合 / 单站点切换共用）。
+     *
+     * 改成批处理：一次 `byRemoteIds` 查已有行 → 一次 `insertAll` / 一次 `updateAll` → 一次回填 id，
+     * 整批只走 3~4 次 DB 调用，替代之前的「每条 insert + byRemoteId」。
+     */
     private suspend fun saveTvBoxVods(
         source: SourceEntity,
         list: List<TvBoxClient.Vod>,
         onProgress: (Int) -> Unit
     ): List<MediaEntity> {
-        val saved = ArrayList<MediaEntity>(list.size)
-        var count = 0
-        for (vod in list) {
-            val entity = vodToEntity(source.id, vod)
-            saveMedia(entity)
-            saved += mediaDao.byRemoteId(entity.remoteId) ?: entity
-            count++
-            if (count % 10 == 0) onProgress(count)
+        if (list.isEmpty()) return emptyList()
+        val incoming = list.map { vod ->
+            vodToEntity(source.id, vod).copy(
+                pinyinInitials = vod.name.toPinyinInitials(),
+                sourceName = source.name
+            )
         }
-        return saved
+        val existing = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
+        val toInsert = ArrayList<MediaEntity>(incoming.size)
+        val toUpdate = ArrayList<MediaEntity>(incoming.size)
+        for (entity in incoming) {
+            val old = existing[entity.remoteId]
+            if (old == null) {
+                toInsert += entity
+            } else {
+                toUpdate += entity.copy(
+                    id = old.id,
+                    // ---- 播放相关：始终保留已有进度，源同步不会覆盖 ----
+                    positionMs = old.positionMs,
+                    lastPlayedAt = old.lastPlayedAt,
+                    favorite = old.favorite,
+                    addedAt = old.addedAt,
+                    durationMs = if (entity.durationMs > 0) entity.durationMs else old.durationMs,
+                    // ---- 媒体元数据：源有值就用它，源给空就保留 DB 已有（可能是 TMDB 补的） ----
+                    posterUrl = entity.posterUrl.ifBlank { old.posterUrl },
+                    backdropUrl = entity.backdropUrl.ifBlank { old.backdropUrl },
+                    logoUrl = entity.logoUrl.ifBlank { old.logoUrl },
+                    overview = entity.overview.ifBlank { old.overview },
+                    genres = entity.genres.ifBlank { old.genres },
+                    rating = if (entity.rating > 0) entity.rating else old.rating,
+                    year = if (entity.year > 0) entity.year else old.year
+                )
+            }
+        }
+        if (toInsert.isNotEmpty()) mediaDao.insertAll(toInsert)
+        if (toUpdate.isNotEmpty()) mediaDao.updateAll(toUpdate)
+        onProgress(incoming.size)
+        val saved = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
+        return incoming.map { saved[it.remoteId] ?: it }
     }
 
     /** TVBox 条目 → 剧集壳 MediaEntity（remoteId 带 siteKey，多站点不冲突） */

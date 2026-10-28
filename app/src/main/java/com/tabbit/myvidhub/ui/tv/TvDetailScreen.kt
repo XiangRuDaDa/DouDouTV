@@ -183,7 +183,16 @@ fun TvDetailScreen(
         // 整个加载过程兜底：任何 IO/解析异常都不允许冒泡到 Composition，
         // 否则电视端会直接崩溃退出（用户看到的就是「点详情闪退」）。
         try {
-        val m = vm.mediaOf(mediaId)
+        // 首页分类行是内存临时条目（负 id）：先落库换成真实 id，否则 mediaOf() 查不到
+        var id = mediaId
+        var m = vm.mediaOf(id)
+        if (m == null && id < 0) {
+            val realId = runCatching { vm.materializeRemote(id) }.getOrNull()
+            if (realId != null && realId > 0) {
+                id = realId
+                m = vm.mediaOf(id)
+            }
+        }
         media = m
         if (m != null) {
             val src = vm.sourceOf(m.sourceId)
@@ -195,7 +204,7 @@ fun TvDetailScreen(
             } else if (src?.kind == SourceKind.TVBOX && m.kind == MediaKind.SERIES) {
                 runCatching { vm.loadTvBoxDetail(m.sourceId, m.remoteId) }
             }
-            val latest = vm.mediaOf(mediaId) ?: m
+            val latest = vm.mediaOf(id) ?: m
             media = latest
 
             // TVBox 多播放源：读取全部云盘/线路，默认选第一条，按选中源过滤分集；
@@ -218,10 +227,10 @@ fun TvDetailScreen(
                 val localReady = latest.posterUrl.isNotBlank() || latest.logoUrl.isNotBlank()
                 if (!(fresh && localReady)) {
                     tmdb = runCatching {
-                        vm.tmdbScrape(latest.title, latest.year, latest.kind, mediaId)
+                        vm.tmdbScrape(latest.title, latest.year, latest.kind, id)
                     }.getOrNull()
                     // 刮削会把海报/Logo 回填进库，取回最新的再渲染
-                    vm.mediaOf(mediaId)?.let { media = it }
+                    vm.mediaOf(id)?.let { media = it }
                 }
             }
         }

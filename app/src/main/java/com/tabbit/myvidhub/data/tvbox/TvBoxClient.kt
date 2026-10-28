@@ -33,9 +33,7 @@ class TvBoxClient(
 ) {
 
     /** 用户可能只填了 192.168.1.2:8080 或 example.com/api.php/provide/vod/，这里自动补协议 */
-    private val base: String = endpoint.trim()
-        .let { if (it.startsWith("http://", true) || it.startsWith("https://", true)) it else "http://$it" }
-        .let { toPunycode(it) }
+    private val base: String = normalizeEndpoint(endpoint)
 
     private val origin: String = base.toHttpUrlOrNull()?.let { url ->
         val defaultPort = if (url.scheme == "https") 443 else 80
@@ -45,11 +43,13 @@ class TvBoxClient(
         }
     }.orEmpty()
 
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .callTimeout(30, TimeUnit.SECONDS)
-        .build()
+    /**
+     * 全局共享的 HTTP 客户端。
+     * 之前每个 TvBoxClient 都 new 一个 OkHttpClient，而 Repository 每次操作（切线路、拉分类、
+     * 开详情）都会 new TvBoxClient —— 等于每条请求都重新建连接池/线程池、重新 TCP+TLS 握手。
+     * 改成进程级单例后，首页连续拉 7 个分类也能复用同一条长连接。
+     */
+    private val http: OkHttpClient = sharedHttp
 
     /** Spider 加载器（type 3 需要 Android Context；进程级单例，整个 App 只初始化一次） */
     private val spiderLoader: SpiderLoader? = context?.applicationContext?.let {
@@ -113,6 +113,71 @@ class TvBoxClient(
     private data class SpiderSite(val key: String, val name: String, val api: String, val ext: Any?)
 
     companion object {
+        /** 默认 UA：部分采集站按 UA 区分线路/限速 */
+        private const val DEFAULT_UA = "okhttp/3.12.0"
+
+        /** 配置缓存有效期：10 分钟。配置只在用户新增/修改/删除来源时才变化 */
+        private const val CONFIG_TTL_MS = 10 * 60 * 1000L
+
+        /** 进程级共享 HTTP 客户端（连接池复用，避免每次操作重新握手） */
+        private val sharedHttp = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .callTimeout(25, TimeUnit.SECONDS)
+            .build()
+
+        private data class ConfigEntry(val json: JSONObject, val at: Long)
+        private val configCache = java.util.concurrent.ConcurrentHashMap<String, ConfigEntry>()
+        private val siteListCache = java.util.concurrent.ConcurrentHashMap<String, List<TvBoxSite>>()
+        private val uaCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+        /** 地址归一化：补协议 + 中文域名转 punycode */
+        internal fun normalizeEndpoint(raw: String): String =
+            toPunycode(
+                raw.trim().let {
+                    if (it.startsWith("http://", true) || it.startsWith("https://", true)) it else "http://$it"
+                }
+            )
+
+        /** 来源新增/修改/删除后清掉缓存，下次重新拉配置 */
+        fun invalidateConfig(endpoint: String) {
+            val key = normalizeEndpoint(endpoint)
+            configCache.remove(key)
+            siteListCache.remove(key)
+            uaCache.remove(key)
+        }
+
+        /**
+         * 整份配置 JSON（进程级缓存，带 TTL）。
+         * 之前 homeContent / availableSites / detail / resolvePlayUrl 每处都重新下载一次整包配置，
+         * 多仓配置动辄几百 KB~几 MB，在电视上一次解析就是几百毫秒起步。
+         */
+        private fun configOf(base: String): JSONObject? {
+            configCache[base]?.let {
+                if (System.currentTimeMillis() - it.at < CONFIG_TTL_MS) return it.json
+            }
+            val json = fetchRaw(base) ?: return null
+            configCache[base] = ConfigEntry(json, System.currentTimeMillis())
+            return json
+        }
+
+        private fun fetchRaw(url: String): JSONObject? = runCatching {
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", DEFAULT_UA)
+                .get()
+                .build()
+            sharedHttp.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (body.isBlank()) null else parseConfigJson(body)
+            }
+        }.getOrNull()
+
+        /** 配置里可选的 userAgent（TVBox 配置标准字段），没有就沿用默认 */
+        private fun userAgentOf(base: String): String = uaCache.getOrPut(base) {
+            configOf(base)?.optString("userAgent")?.takeIf { it.isNotBlank() } ?: DEFAULT_UA
+        }
+
         /**
          * 中文域名（IDN）→ punycode。
          * 饭太硬等源常是中文域名（如 www.饭太硬.cc），OkHttp 无法解析中文 host，
@@ -209,6 +274,12 @@ class TvBoxClient(
 
     // ---------- HTTP ----------
 
+    /** 当前地址的整份配置（进程级缓存，10 分钟内只下载解析一次） */
+    private fun baseConfig(): JSONObject? = configOf(base)
+
+    /** 当前来源使用的 UA（优先配置里的 userAgent） */
+    private fun ua(): String = userAgentOf(base)
+
     private fun requestJson(baseUrl: String, params: Map<String, String>): JSONObject {
         val punyBase = toPunycode(baseUrl)
         val url = punyBase.toHttpUrlOrNull()?.newBuilder()?.apply {
@@ -217,7 +288,7 @@ class TvBoxClient(
 
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "okhttp/3.12.0")
+            .header("User-Agent", ua())
             .get()
             .build()
 
@@ -255,7 +326,7 @@ class TvBoxClient(
     suspend fun homeContent(limit: Int = 100): List<Vod> = withContext(Dispatchers.IO) {
         // 先不带任何参数拉一次 —— 如果这是 TVBox 配置 JSON，响应里会有 sites/spider 字段。
         // 如果这是 CMS 接口，响应里会有 list 字段（或 ac=videolist 的数据）。
-        val raw = runCatching { requestRaw(base) }.getOrNull()
+        val raw = baseConfig()
         val configRoot = raw?.takeIf { it.has("sites") }
         val cmsList = raw?.let { responseList(it) }
 
@@ -314,16 +385,21 @@ class TvBoxClient(
      */
     suspend fun availableSites(): List<TvBoxSite> = withContext(Dispatchers.IO) {
         cachedSites?.let { return@withContext it }
-        val raw = runCatching { requestRaw(base) }.getOrNull()
-        if (raw == null || raw.length() == 0) return@withContext emptyList()
+        siteListCache[base]?.let { cachedSites = it; return@withContext it }
+        val raw = baseConfig() ?: return@withContext emptyList()
+        if (raw.length() == 0) return@withContext emptyList()
         val sites = if (raw.has("sites")) {
-            parseCmsSites(raw).map { TvBoxSite(it.key, it.name, 1, it.api) } +
+            val parsed = parseCmsSites(raw).map { TvBoxSite(it.key, it.name, 1, it.api) } +
                 parseSpiderSites(raw).map { TvBoxSite(it.key, it.name, 3, it.api, it.ext) }
+            // 配置里声明了 sites 但解析不出可用站点（多仓/字段变体）：退化成单条默认线路，
+            // 否则切到这个来源后既没有线路按钮，首页也永远拉不到内容（表现为「切了没反应」）
+            parsed.ifEmpty { listOf(TvBoxSite("", "默认线路", 1, base)) }
         } else {
             // 普通 CMS 接口：整个源就是一条线路
             listOf(TvBoxSite("", "默认线路", 1, base))
         }
         cachedSites = sites
+        siteListCache[base] = sites
         sites
     }
 
@@ -336,7 +412,7 @@ class TvBoxClient(
         if (site.type == 3) {
             val loader = spiderLoader ?: return@withContext SiteHomeResult(emptyList())
             if (configSpiderUrl.isBlank()) {
-                configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+                configSpiderUrl = baseConfig()?.optString("spider").orEmpty()
             }
             if (configSpiderUrl.isBlank()) return@withContext SiteHomeResult(emptyList())
             val merged = LinkedHashMap<String, Vod>()
@@ -365,7 +441,7 @@ class TvBoxClient(
             if (site.type == 3) {
                 val loader = spiderLoader ?: return@withContext emptyList()
                 if (configSpiderUrl.isBlank()) {
-                    configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+                    configSpiderUrl = baseConfig()?.optString("spider").orEmpty()
                 }
                 if (configSpiderUrl.isBlank()) return@withContext emptyList()
                 val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull()
@@ -410,7 +486,7 @@ class TvBoxClient(
             if (site.type == 3) {
                 val loader = spiderLoader ?: return@withContext emptyList()
                 if (configSpiderUrl.isBlank()) {
-                    configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+                    configSpiderUrl = baseConfig()?.optString("spider").orEmpty()
                 }
                 if (configSpiderUrl.isBlank()) return@withContext emptyList()
                 // 关键：只查缓存，不调 ensureLoaded（那会触发 Go 代理初始化）
@@ -424,22 +500,6 @@ class TvBoxClient(
             }
             emptyList()
         }
-
-    /** 不带参数的原始请求，用来判断 URL 类型（CMS 还是 TVBox 配置） */
-    private fun requestRaw(rawUrl: String): JSONObject {
-        val punyUrl = toPunycode(rawUrl)
-        val request = Request.Builder()
-            .url(punyUrl)
-            .header("User-Agent", "okhttp/3.12.0")
-            .get()
-            .build()
-        return runCatching {
-            http.newCall(request).execute().use { response ->
-                val body = response.body?.string().orEmpty()
-                parseConfigJson(body) ?: JSONObject()
-            }
-        }.getOrNull() ?: JSONObject()
-    }
 
     /** type 3 spider 站点首页聚合；返回各站点 homeContent 的 class（分类）数组 */
     private suspend fun loadSpiderHome(
@@ -511,7 +571,8 @@ class TvBoxClient(
             fetchCmsDetail(base, vodId, "", "")?.let { return@withContext it }
         }
 
-        val root = runCatching { requestJson(base, emptyMap()) }.getOrNull()
+        // 配置走缓存：之前这里每次都重新下载整份配置，开一个详情就多一次整包请求
+        val root = baseConfig()
         val cmsSites = root?.let { parseCmsSites(it) } ?: emptyList()
         val spSites = root?.let { parseSpiderSites(it) } ?: spiderSites
 
@@ -590,7 +651,7 @@ class TvBoxClient(
         cloudUrl: String,
         vipFlags: List<String>
     ): ResolvedPlayUrl = withContext(Dispatchers.IO) {
-        val root = runCatching { requestRaw(base) }.getOrNull()
+        val root = baseConfig()
         val spSites = root?.let { parseSpiderSites(it) } ?: spiderSites
         if (configSpiderUrl.isBlank()) {
             configSpiderUrl = root?.optString("spider").orEmpty()

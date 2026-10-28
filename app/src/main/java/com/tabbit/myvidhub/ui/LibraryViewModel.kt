@@ -30,6 +30,11 @@ import kotlinx.coroutines.withContext
 
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
+    private companion object {
+        /** 首页分类行首批展示条数（够铺满电视一行），滚到尾部再追加 */
+        const val CATEGORY_PREVIEW_BATCH = 10
+    }
+
     private val repo = MediaRepository(app)
 
     val sources: StateFlow<List<SourceEntity>> = repo.observeSources()
@@ -136,6 +141,19 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     private val _categoryPreviewLoading = mutableStateMapOf<String, Boolean>()
     val categoryPreviewLoading: Map<String, Boolean> get() = _categoryPreviewLoading
 
+    /**
+     * 每个分类当前展示条数：首屏只铺满一行（10 条），横向滚到尾部再追加。
+     * 之前一次塞 60~72 张海报进 LazyRow，电视上首屏组合开销很大。
+     */
+    private val _categoryVisibleCount = mutableStateMapOf<String, Int>()
+    val categoryVisibleCount: Map<String, Int> get() = _categoryVisibleCount
+
+    /** 每个分类已加载到第几页（page 从 1 开始） */
+    private val _categoryLoadedPage = mutableStateMapOf<String, Int>()
+
+    /** 每个分类是否已经到底（下一页返回空） */
+    private val _categoryEnded = mutableStateMapOf<String, Boolean>()
+
     var categoryLoading by mutableStateOf(false)
         private set
 
@@ -185,7 +203,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- 首页来源 / 站点（线路）选择 ----------
 
     fun selectHomeSource(sourceId: Long?) {
-        if (homeSourceId == sourceId) return
+        if (homeSourceId == sourceId) {
+            // 重复点同一个来源不算切换，但把线路列表（重新）拉一次，避免之前失败留下空列表
+            sourceId?.let { loadHomeSites(it) }
+            return
+        }
         homeSourceId = sourceId
         homeSiteKey = null
         homeSitesError = null
@@ -193,6 +215,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         activeCategoryId = null
         _categoryVods.clear()
         _categoryPreviewLoading.clear()
+        _categoryVisibleCount.clear()
+        _categoryLoadedPage.clear()
+        _categoryEnded.clear()
         categoryError = null
         activeSite = null
         Prefs.homeSourceId = sourceId ?: -1L
@@ -209,12 +234,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         activeCategoryId = null
         _categoryVods.clear()
         _categoryPreviewLoading.clear()
+        _categoryVisibleCount.clear()
+        _categoryLoadedPage.clear()
+        _categoryEnded.clear()
         categoryError = null
         activeSite = site
         val sourceId = homeSourceId ?: return
         val s = site ?: return
-        // 匿名 CMS 只有一条默认线路（key 为空），无需按需同步
-        if (siteKey.isNullOrBlank()) return
         viewModelScope.launch {
             val src = repo.getSource(sourceId) ?: return@launch
             // 每次切线路都拉一次首页：取 homeContent 的 class 分类名
@@ -243,6 +269,41 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val items = runCatching { repo.tvBoxCategory(src, site, typeId, 1) }
                 .getOrNull().orEmpty()
             _categoryVods[typeId] = items
+            _categoryLoadedPage[typeId] = 1
+            _categoryVisibleCount[typeId] = items.size.coerceAtMost(CATEGORY_PREVIEW_BATCH)
+            if (items.isEmpty()) _categoryEnded[typeId] = true
+            _categoryPreviewLoading[typeId] = false
+        }
+    }
+
+    /**
+     * 分类行滚到尾部时追加内容：
+     * 先把已拉到内存的条目再放出一批（10 条），内存用完才向源站要下一页。
+     */
+    fun loadMoreCategoryPreview(typeId: String) {
+        val items = _categoryVods[typeId] ?: return
+        val visible = _categoryVisibleCount[typeId] ?: CATEGORY_PREVIEW_BATCH
+        if (visible < items.size) {
+            _categoryVisibleCount[typeId] = (visible + CATEGORY_PREVIEW_BATCH).coerceAtMost(items.size)
+            return
+        }
+        if (_categoryEnded[typeId] == true || _categoryPreviewLoading[typeId] == true) return
+        val sourceId = homeSourceId ?: return
+        val site = activeSite ?: return
+        val nextPage = (_categoryLoadedPage[typeId] ?: 1) + 1
+        viewModelScope.launch {
+            _categoryPreviewLoading[typeId] = true
+            val src = repo.getSource(sourceId)
+            val more = if (src == null) emptyList()
+            else runCatching { repo.tvBoxCategory(src, site, typeId, nextPage) }.getOrDefault(emptyList())
+            if (more.isEmpty()) {
+                _categoryEnded[typeId] = true
+            } else {
+                val merged = items + more
+                _categoryVods[typeId] = merged
+                _categoryLoadedPage[typeId] = nextPage
+                _categoryVisibleCount[typeId] = (visible + CATEGORY_PREVIEW_BATCH).coerceAtMost(merged.size)
+            }
             _categoryPreviewLoading[typeId] = false
         }
     }
@@ -270,6 +331,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 val src = repo.getSource(sourceId) ?: return@launch
                 val items = repo.tvBoxCategory(src, site, typeId)
                 _categoryVods[typeId] = items
+                _categoryLoadedPage[typeId] = 1
+                _categoryVisibleCount[typeId] = items.size.coerceAtMost(CATEGORY_PREVIEW_BATCH)
                 if (items.isEmpty()) categoryError = "该分类暂无内容"
             } catch (e: Exception) {
                 categoryError = "分类加载失败：${e.message ?: "网络或接口异常"}"
@@ -279,24 +342,32 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 首页首次进入 / 冷启动时确保线路列表已加载（之前只有「切来源」才会拉，冷启动首页没有线路按钮） */
+    fun ensureHomeSites(sourceId: Long) = loadHomeSites(sourceId)
+
     private fun loadHomeSites(sourceId: Long) {
-        if (_homeSitesBySource.containsKey(sourceId)) return
+        // 之前只要走过一次（哪怕拿到的是空列表）就不再重试，导致切到第二个来源后永远没有线路可选
+        if (_homeSitesBySource[sourceId]?.isNotEmpty() == true) return
         viewModelScope.launch {
             homeSitesLoading = true
             homeSitesError = null
             val src = repo.getSource(sourceId)
-            _homeSitesBySource[sourceId] = if (src?.kind == SourceKind.TVBOX) {
+            val sites = if (src?.kind == SourceKind.TVBOX) {
                 runCatching { repo.tvBoxSites(src) }.getOrElse {
                     homeSitesError = "获取「${src.name}」线路列表失败：${it.message ?: "网络或接口异常"}"
                     emptyList()
                 }
             } else emptyList()
+            _homeSitesBySource[sourceId] = sites
             homeSitesLoading = false
             // 冷启动恢复上次选中的线路时，重新拉一次首页分类（分类只在 homeContent 里，重启后需重新获取）
-            if (homeSiteKey != null && activeSite == null) {
-                _homeSitesBySource[sourceId].orEmpty().firstOrNull { it.key == homeSiteKey }?.let {
-                    selectHomeSite(it.key, it)
-                }
+            val restored = homeSiteKey?.let { key -> sites.firstOrNull { it.key == key } }
+            when {
+                restored != null && activeSite == null -> selectHomeSite(restored.key, restored)
+                // 只有一条线路的来源：自动选中，避免首页空白又没按钮可点。
+                // 多线路（如 38 个站点的配置）保持「全部站点」聚合视图，由用户自己挑线路。
+                homeSiteKey == null && homeSourceId == sourceId && sites.size == 1 ->
+                    sites.first().let { selectHomeSite(it.key, it) }
             }
         }
     }

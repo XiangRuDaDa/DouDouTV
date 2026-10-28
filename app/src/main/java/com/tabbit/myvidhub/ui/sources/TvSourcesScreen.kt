@@ -73,6 +73,7 @@ import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.tv.TvBackButton
+import com.tabbit.myvidhub.ui.tv.TvFilterChip
 import com.tabbit.myvidhub.ui.tv.TvIconButton
 import com.tabbit.myvidhub.ui.tv.TvPillButton
 
@@ -746,38 +747,34 @@ private fun TvSourceFormPanel(
                     }
                 }
 
-                // 表单区
+                // 表单区：必须用 weight(1f)，否则 fillMaxSize 的 LazyColumn 会吃掉全部高度，
+                // 底部「取消/保存」按钮被挤到 0 高度而看不见
                 androidx.compose.foundation.lazy.LazyColumn(
-                    Modifier.fillMaxSize(),
+                    Modifier.weight(1f).fillMaxWidth(),
                     contentPadding = PaddingValues(horizontal = 36.dp, vertical = 18.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    // 类型选择器
+                    // 类型选择器：一行两个紧凑 chip，不再用大卡片占掉半个屏幕
                     item {
-                        Text(
-                            text = "来源类型",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = AppColors.TextSecondary
-                        )
-                        Spacer(Modifier.height(10.dp))
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            TvTypeOption(
+                            Text(
+                                text = "来源类型",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = AppColors.TextSecondary
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            TvFilterChip(
                                 text = "Emby 媒体服务器",
-                                subtext = "服务器 + 账号密码",
-                                icon = "E",
                                 selected = kind == SourceKind.EMBY,
-                                modifier = Modifier.weight(1f),
                                 onClick = { kind = SourceKind.EMBY }
                             )
-                            TvTypeOption(
+                            TvFilterChip(
                                 text = "TVBox 接口",
-                                subtext = "CMS / TVBox JSON",
-                                icon = "📺",
                                 selected = kind == SourceKind.TVBOX,
-                                modifier = Modifier.weight(1f),
                                 onClick = { kind = SourceKind.TVBOX }
                             )
                         }
@@ -897,81 +894,6 @@ private fun TvSourceFormPanel(
                     )
                 }
             }
-        }
-    }
-}
-
-/* ========================================================
-   TvTypeOption —— 类型卡片选择器
-   ======================================================== */
-@Composable
-private fun TvTypeOption(
-    text: String,
-    subtext: String,
-    icon: String,
-    selected: Boolean,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    val interaction = remember { MutableInteractionSource() }
-    val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.02f else 1f,
-        animationSpec = tween(140),
-        label = "type-opt"
-    )
-    val bg = when {
-        selected -> AppColors.Brand.copy(alpha = 0.10f)
-        else -> Color(0xFF0B0D12)
-    }
-    val border = when {
-        focused && selected -> Color.White
-        selected -> AppColors.Brand
-        focused -> Color.White
-        else -> AppColors.SurfaceHi
-    }
-
-    Row(
-        modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(10.dp))
-            .background(bg)
-            .border(2.dp, border, RoundedCornerShape(10.dp))
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .focusable(interactionSource = interaction)
-            .padding(20.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(18.dp)
-    ) {
-        Box(
-            Modifier
-                .size(56.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(
-                    if (selected) AppColors.Brand else AppColors.SurfaceHi
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = icon,
-                color = if (selected) Color.White else AppColors.TextSecondary,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.titleMedium,
-                color = AppColors.TextPrimary,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = subtext,
-                style = MaterialTheme.typography.labelMedium,
-                color = AppColors.TextTertiary
-            )
         }
     }
 }

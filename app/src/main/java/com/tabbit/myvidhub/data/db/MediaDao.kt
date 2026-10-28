@@ -102,6 +102,18 @@ interface MediaDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(item: MediaEntity): Long
 
+    /** TVBox 批量入库：一次事务插入，避免逐条 insert */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertAll(items: List<MediaEntity>): List<Long>
+
+    /** TVBox 批量入库：一次事务更新已有行 */
+    @Update
+    suspend fun updateAll(items: List<MediaEntity>)
+
+    /** 批量按 remoteId 取已有行（TVBox 批量入库前一次查完，替代逐条 byRemoteId） */
+    @Query("SELECT * FROM media WHERE remoteId IN (:remoteIds)")
+    suspend fun byRemoteIds(remoteIds: List<String>): List<MediaEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: MediaEntity): Long
 

@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -170,6 +171,12 @@ fun TvHomeScreen(
     val namedSites = siteList.filter { it.key.isNotBlank() }
     val showSiteButton = selectedSource?.kind == SourceKind.TVBOX && namedSites.isNotEmpty()
 
+    // 冷启动时没人调过 selectHomeSource，线路列表一直是空的 → 顶栏「线路」按钮不出现。
+    // 这里主动为当前生效的来源拉一次线路列表（内部有缓存，重复调用不会重复请求）。
+    LaunchedEffect(selectedSource?.id) {
+        selectedSource?.id?.let { vm.ensureHomeSites(it) }
+    }
+
     // 选择器弹窗开关
     var showSourceDialog by remember { mutableStateOf(false) }
     var showSiteDialog by remember { mutableStateOf(false) }
@@ -249,16 +256,17 @@ fun TvHomeScreen(
             } else if (filteredLibrary.isEmpty() && vm.homeCategories.isEmpty()) {
                 item {
                     Box(Modifier.fillMaxWidth().height(360.dp)) {
-                        if (library.isEmpty()) {
+                        val err = vm.homeSitesError
+                        if (library.isEmpty() && err == null && !vm.scanning) {
                             TvEmptyState(
-                                text = if (vm.scanning) "正在同步媒体库…" else "还没有内容",
-                                hint = if (vm.scanning) null else "先在「来源」里添加 Emby 或 TVBox，再同步媒体库"
+                                text = "还没有内容",
+                                hint = "先在「来源」里添加 Emby 或 TVBox，再同步媒体库"
                             )
                         } else {
-                            val err = vm.homeSitesError
                             TvEmptyState(
-                                text = err ?: "当前来源/站点暂无内容",
+                                text = err ?: if (vm.scanning) "正在同步媒体库…" else "当前来源/站点暂无内容",
                                 hint = if (err != null) "点击顶部同步按钮重试，或切换其他来源/线路"
+                                else if (vm.scanning) null
                                 else "切换来源或点击顶部同步按钮拉取该来源的首页内容"
                             )
                         }
@@ -311,12 +319,8 @@ fun TvHomeScreen(
         // ---------- 透明悬浮顶部入口条：SpaceBetween 布局；左来源链 + 右操作组 ----------
         val displaySourceName = selectedSource?.name?.takeIf { it.isNotBlank() } ?: "未选择来源"
         val displaySiteName = if (showSiteButton) {
-            siteList.firstOrNull { it.key == vm.homeSiteKey }?.name
-                ?.substringBeforeLast("（")?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: namedSites.firstOrNull()?.name?.substringBeforeLast("（")?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: namedSites.firstOrNull()?.key?.takeIf { it.isNotBlank() }
+            val picked = siteList.firstOrNull { it.key == vm.homeSiteKey }
+            picked?.name?.substringBeforeLast("（")?.trim()?.takeIf { it.isNotBlank() } ?: "全部"
         } else null
         TvTopBar(
             alphaProvider = alphaProvider,
@@ -625,10 +629,16 @@ private fun TvCategoryPreview(
 ) {
     val items = vm.categoryVods[typeId].orEmpty()
     val loading = vm.categoryPreviewLoading[typeId] ?: false
+    // 首屏只铺一行（10 条），横向滚到尾部再从内存/下一页追加，避免一次渲染 70+ 张海报
+    val visible = vm.categoryVisibleCount[typeId] ?: 10
     when {
         // 加载中 → 和手机端一致的 shimmer 骨架行（不再用转圈）
         loading && items.isEmpty() -> TvShimmerRow()
-        items.isNotEmpty() -> TvPosterRow(items = items.take(TV_LAZY_TAKE), onDetail = onDetail)
+        items.isNotEmpty() -> TvPosterRow(
+            items = items.take(visible),
+            onDetail = onDetail,
+            onNearEnd = { vm.loadMoreCategoryPreview(typeId) }
+        )
     }
 }
 
@@ -661,14 +671,26 @@ private fun TvShimmerRow(count: Int = 6) {
     }
 }
 
-/** 横向海报行：左右滚动，聚焦放大由卡片自身处理 */
+/** 横向海报行：左右滚动，聚焦放大由卡片自身处理；[onNearEnd] 用于滚到尾部追加下一批 */
 @Composable
 private fun TvPosterRow(
     items: List<MediaEntity>,
     onDetail: (Long) -> Unit,
-    cardWidth: androidx.compose.ui.unit.Dp = Prefs.posterSize.tvDp.dp
+    cardWidth: androidx.compose.ui.unit.Dp = Prefs.posterSize.tvDp.dp,
+    onNearEnd: (() -> Unit)? = null
 ) {
+    val rowState = rememberLazyListState()
+    if (onNearEnd != null) {
+        val nearEnd by remember(items.size) {
+            derivedStateOf {
+                val last = rowState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                items.isNotEmpty() && last >= items.size - 3
+            }
+        }
+        LaunchedEffect(nearEnd, items.size) { if (nearEnd) onNearEnd() }
+    }
     LazyRow(
+        state = rowState,
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
