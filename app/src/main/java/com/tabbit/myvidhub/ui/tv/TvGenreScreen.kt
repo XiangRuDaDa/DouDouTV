@@ -177,7 +177,7 @@ fun TvGenreScreen(
             items.isEmpty() -> TvEmptyState("这个分类下还没有内容", "换个题材，或先在来源里同步媒体库")
             else -> LazyVerticalGrid(
                 state = gridState,
-                columns = GridCells.Fixed(6),
+                columns = GridCells.Fixed(tvGridColumns()),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -186,7 +186,8 @@ fun TvGenreScreen(
                 items(items, key = { "tv_g_${it.id}" }) { item ->
                     TvPosterCard(
                         item = item,
-                        onClick = { onDetail(item.id) }
+                        onClick = { onDetail(item.id) },
+                        fillCell = true
                     )
                 }
                 if (loadingMore) {
@@ -300,7 +301,7 @@ fun TvCategoryScreen(
 
         when {
             loading -> LazyVerticalGrid(
-                columns = GridCells.Fixed(6),
+                columns = GridCells.Fixed(tvGridColumns()),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -313,7 +314,7 @@ fun TvCategoryScreen(
 
             else -> LazyVerticalGrid(
                 state = gridState,
-                columns = GridCells.Fixed(6),
+                columns = GridCells.Fixed(tvGridColumns()),
                 contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -323,6 +324,7 @@ fun TvCategoryScreen(
                     TvPosterCard(
                         item = item,
                         onClick = { onDetail(item.id) },
+                        fillCell = true,
                         modifier = Modifier.then(
                             if (item.id == items.first().id) Modifier.focusRequester(firstFocus) else Modifier
                         )

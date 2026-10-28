@@ -70,6 +70,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     var scanning by mutableStateOf(false)
         private set
 
+    /** 正在同步的单个来源 id：卡片按钮只对自己转圈，不再所有卡片一起转 */
+    private val _syncingSourceIds = mutableStateMapOf<Long, Boolean>()
+    val syncingSourceIds: Map<Long, Boolean> get() = _syncingSourceIds
+    fun isSourceSyncing(id: Long): Boolean = _syncingSourceIds[id] == true
+
     var scanMessage by mutableStateOf("")
         private set
 
@@ -642,11 +647,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 for (src in enabled) {
                     scanMessage = "正在同步 ${src.name}…"
+                    _syncingSourceIds[src.id] = true
                     // 单个来源失败不能中断其他来源的同步
                     try {
                         total += runSync(src)
                     } catch (e: Exception) {
                         errors += "${src.name}：${e.message ?: "网络或接口异常"}"
+                    } finally {
+                        _syncingSourceIds.remove(src.id)
                     }
                 }
                 message = when {
@@ -666,12 +674,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         if (scanning) return
         viewModelScope.launch {
             scanning = true
+            _syncingSourceIds[source.id] = true
             try {
                 val added = runSync(source)
                 message = if (added > 0) "${source.name}：$added 个条目" else "${source.name}：无内容"
             } catch (e: Exception) {
                 message = "同步失败：${e.message ?: "未知错误"}"
             } finally {
+                _syncingSourceIds.remove(source.id)
                 scanning = false
                 scanMessage = ""
             }

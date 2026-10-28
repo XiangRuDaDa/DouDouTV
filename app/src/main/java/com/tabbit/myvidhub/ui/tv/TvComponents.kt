@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -232,7 +233,13 @@ fun TvPosterCard(
     item: MediaEntity,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    width: Dp = Prefs.posterSize.tvDp.dp
+    width: Dp = Prefs.posterSize.tvDp.dp,
+    /**
+     * 网格模式：铺满格子宽度并按 2:3 自适应高度。
+     * 固定 [width] 原本只适合首页横排，放进 LazyVerticalGrid 会溢出格子或留白，
+     * 所以网格页（分类/查看全部/搜索）统一用这个模式。
+     */
+    fillCell: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -244,7 +251,7 @@ fun TvPosterCard(
 
     Column(
         modifier
-            .width(width)
+            .then(if (fillCell) Modifier.fillMaxWidth() else Modifier.width(width))
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(10.dp))
             .background(AppColors.Surface)
@@ -256,7 +263,7 @@ fun TvPosterCard(
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(width * 1.5f)
+                .then(if (fillCell) Modifier.aspectRatio(2f / 3f) else Modifier.height(width * 1.5f))
                 .background(AppColors.SurfaceHi)
         ) {
             AsyncImage(
@@ -419,6 +426,16 @@ fun TvBackButton(onBack: () -> Unit) {
             fontWeight = FontWeight.Medium
         )
     }
+}
+
+/**
+ * 电视端网格列数：跟随设置页「缩略图大小」。
+ * 之前网格写死 6 列，设置项只作用于首页横排，切到「查看全部」海报又变回默认大小。
+ */
+fun tvGridColumns(): Int = when (Prefs.posterSize) {
+    Prefs.PosterSize.SMALL -> 8
+    Prefs.PosterSize.MEDIUM -> 6
+    Prefs.PosterSize.LARGE -> 4
 }
 
 /** 竖版海报行之间的统一间距 */

@@ -139,6 +139,11 @@ fun HomeScreen(
     val showLineButton = selectedSource?.kind == SourceKind.TVBOX && namedSites.isNotEmpty()
     val currentSite = namedSites.firstOrNull { it.key == vm.homeSiteKey }
 
+    // 冷启动不会走 selectHomeSource，这里主动拉一次线路列表，否则顶栏「线路」入口一直不出现
+    LaunchedEffect(selectedSource?.id) {
+        selectedSource?.id?.let { vm.ensureHomeSites(it) }
+    }
+
     val listState = rememberLazyListState()
     // 软件名淡出距离：轮播图高度的 ~55%
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
@@ -1239,7 +1244,12 @@ fun TvBoxCategoryScreen(
     onBack: () -> Unit,
     onOpenDetail: (Long) -> Unit
 ) {
-    val columns = 3
+    // 列数跟随设置页「缩略图大小」：小 4 列 / 中 3 列 / 大 2 列
+    val columns = when (Prefs.posterSize) {
+        Prefs.PosterSize.SMALL -> 4
+        Prefs.PosterSize.MEDIUM -> 3
+        Prefs.PosterSize.LARGE -> 2
+    }
     val hSpacing = 9.dp
 
     var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }

@@ -2,7 +2,10 @@ package com.tabbit.myvidhub.ui.tv
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,9 +17,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -32,14 +37,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
@@ -52,6 +65,13 @@ import kotlinx.coroutines.delay
  */
 class TvSearchUiState {
     var keyword by mutableStateOf("")
+
+    /** 输入过程中的联想片名：只展示，不触发真正的搜索 */
+    var suggestions by mutableStateOf<List<String>>(emptyList())
+
+    /** 用户确认要搜的关键字（选中联想 / 点搜索 / 回车才会赋值） */
+    var submittedKeyword by mutableStateOf("")
+
     var results by mutableStateOf<List<MediaEntity>>(emptyList())
     var loading by mutableStateOf(false)
     var searched by mutableStateOf(false)
@@ -59,23 +79,39 @@ class TvSearchUiState {
     /** 已完成搜索的关键字，从详情返回时据此跳过重复搜索 */
     var searchedKeyword by mutableStateOf("")
 
+    /** 热门榜缓存版本，刷新后自增以触发联想重查 */
+    var hotEpoch by mutableStateOf(0)
+
     fun clear() {
         keyword = ""
+        suggestions = emptyList()
+        submittedKeyword = ""
         results = emptyList()
         loading = false
         searched = false
         searchedKeyword = ""
+    }
+
+    /**
+     * 真正发起一次搜索。
+     * @param title 选中联想片名时传入，会回填到输入框
+     */
+    fun submit(title: String? = null) {
+        val kw = (title ?: keyword).trim()
+        if (kw.isEmpty()) return
+        if (title != null) keyword = title
+        suggestions = emptyList()
+        submittedKeyword = kw
     }
 }
 
 /**
  * 电视端搜索页。
  *
- * 遥控器没有键盘，实际输入靠系统弹出软键盘或在搜索框上直接键入拼音/英文，
- * 因此界面重点不是「输入框多漂亮」，而是：
- *   · 搜索框默认获得焦点，一进来就能打字；
- *   · 结果用大号海报网格，聚焦即放大，方便沙发上挑选；
- *   · 空结果给出下一步提示，而不是一片空白。
+ * 交互对齐手机端（但按遥控器重排布局）：
+ *   · 输入框输入 → 下方展示联想到的影片名称，此时**不联网/不查库出结果**；
+ *   · 遥控器选中某条联想、或聚焦「搜索」按钮按 OK、或键盘回车，才真正查询影片；
+ *   · 结果用海报网格，聚焦第一张卡方便直接进详情。
  */
 @Composable
 fun TvSearchScreen(
@@ -85,36 +121,49 @@ fun TvSearchScreen(
     onDetail: (Long) -> Unit
 ) {
     val fieldFocus = remember { FocusRequester() }
+    val firstResultFocus = remember { FocusRequester() }
 
-    suspend fun runSearch() {
-        val kw = state.keyword.trim()
-        if (kw.isEmpty()) {
-            state.results = emptyList()
-            state.searched = false
-            return
+    // 首次进搜索页后台拉一次豆瓣热门榜，补齐联想（24h 内走本地缓存，不联网）
+    LaunchedEffect(Unit) {
+        if (runCatching { vm.refreshHotSuggestions() }.getOrDefault(false)) state.hotEpoch++
+    }
+
+    // 联想：输入停顿 200ms 后查库。中文按标题模糊匹配，字母按拼音首字母前缀匹配
+    LaunchedEffect(state.keyword, state.hotEpoch) {
+        val q = state.keyword.trim()
+        if (q.isEmpty() || state.submittedKeyword.isNotEmpty()) {
+            state.suggestions = emptyList()
+            return@LaunchedEffect
         }
+        delay(200)
+        state.suggestions = runCatching { vm.pinyinSuggest(q.lowercase()) }
+            .getOrDefault(emptyList())
+    }
+
+    // 实际搜索：只有 submittedKeyword 变化（选中联想 / 点搜索 / 回车）才执行；
+    // 从详情返回时关键字没变，直接复用已有结果，不重复查询。
+    LaunchedEffect(state.submittedKeyword) {
+        val q = state.submittedKeyword.trim()
+        if (q.isEmpty() || q == state.searchedKeyword) return@LaunchedEffect
         state.loading = true
-        state.results = runCatching { vm.searchMedia(kw) }.getOrDefault(emptyList())
-        state.searchedKeyword = kw
+        state.results = runCatching { vm.searchMedia(q) }.getOrDefault(emptyList())
+        state.searchedKeyword = q
         state.loading = false
         state.searched = true
     }
 
-    // 输入停顿 350ms 后自动搜索；从详情返回时关键字没变就不重复搜
-    LaunchedEffect(state.keyword) {
-        val kw = state.keyword.trim()
-        if (kw.isEmpty()) {
-            state.results = emptyList()
-            state.searched = false
-            state.searchedKeyword = ""
-            return@LaunchedEffect
+    // 进页自动聚焦输入框；从详情返回（已有搜索结果）时把焦点交给第一张海报
+    LaunchedEffect(Unit) {
+        if (state.submittedKeyword.isEmpty()) runCatching { fieldFocus.requestFocus() }
+    }
+    LaunchedEffect(state.submittedKeyword, state.results.isNotEmpty()) {
+        if (state.submittedKeyword.isNotEmpty() && state.results.isNotEmpty()) {
+            runCatching { firstResultFocus.requestFocus() }
         }
-        if (kw == state.searchedKeyword) return@LaunchedEffect
-        delay(350L)
-        runSearch()
     }
 
-    LaunchedEffect(Unit) { runCatching { fieldFocus.requestFocus() } }
+    val showSuggestions =
+        state.submittedKeyword.isEmpty() && state.keyword.isNotBlank() && state.suggestions.isNotEmpty()
 
     Column(
         Modifier
@@ -131,15 +180,52 @@ fun TvSearchScreen(
             TvSearchField(
                 value = state.keyword,
                 focusRequester = fieldFocus,
-                onValueChange = { state.keyword = it },
-                onSubmit = {
-                    // 回车立即出结果，不等防抖
-                }
+                suggestionsVisible = showSuggestions,
+                modifier = Modifier.weight(1f),
+                onValueChange = {
+                    state.keyword = it
+                    // 改词就清掉上一次的结果，回到「输入 + 联想」状态
+                    if (state.submittedKeyword.isNotEmpty()) {
+                        state.submittedKeyword = ""
+                        state.searchedKeyword = ""
+                        state.results = emptyList()
+                        state.searched = false
+                    }
+                },
+                onSubmit = { state.submit() }
+            )
+            Spacer(Modifier.width(16.dp))
+            TvPillButton(
+                text = "搜索",
+                primary = true,
+                onClick = { state.submit() }
             )
         }
 
         when {
+            showSuggestions -> {
+                Text(
+                    "猜你想看 · 按 OK 直接搜索",
+                    color = AppColors.TextTertiary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(start = 20.dp, bottom = 8.dp)
+                )
+                LazyColumn(
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(state.suggestions.take(8), key = { "tv_sug_$it" }) { title ->
+                        TvSuggestionRow(
+                            title = title,
+                            onClick = { state.submit(title) }
+                        )
+                    }
+                }
+            }
+
             state.loading -> TvEmptyState("搜索中…")
+
             state.results.isNotEmpty() -> {
                 Text(
                     "找到 ${state.results.size} 个结果",
@@ -148,7 +234,7 @@ fun TvSearchScreen(
                     modifier = Modifier.padding(start = 20.dp, bottom = 10.dp)
                 )
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(6),
+                    columns = GridCells.Fixed(tvGridColumns()),
                     contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -157,31 +243,79 @@ fun TvSearchScreen(
                     items(state.results, key = { "tv_s_${it.id}" }) { item ->
                         TvPosterCard(
                             item = item,
-                            onClick = { onDetail(item.id) }
+                            onClick = { onDetail(item.id) },
+                            fillCell = true,
+                            modifier = Modifier.then(
+                                if (item.id == state.results.first().id) Modifier.focusRequester(firstResultFocus)
+                                else Modifier
+                            )
                         )
                     }
                 }
             }
 
-            state.searched -> TvEmptyState("没有找到「${state.keyword}」", "换个关键词，或先在来源里同步媒体库")
-            else -> TvEmptyState("搜索媒体库", "输入片名、演员或题材，按 OK 键确认")
+            state.searched -> TvEmptyState("没有找到「${state.submittedKeyword}」", "换个关键词，或先在来源里同步媒体库")
+            else -> TvEmptyState("搜索媒体库", "输入片名、演员或拼音首字母，选中联想或按「搜索」确认")
         }
     }
 }
 
-/** 电视端搜索输入框：获得焦点时显示白色描边，未聚焦时保持低调 */
+/**
+ * 联想片名行：整行可聚焦，聚焦时翻白底黑字，
+ * 遥控器按 OK 直接以该片名搜索（与手机端点联想 chip 的语义对齐）。
+ */
+@Composable
+private fun TvSuggestionRow(
+    title: String,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (focused) Color.White else AppColors.Surface)
+            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
+            .padding(horizontal = 18.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "🔍",
+            style = MaterialTheme.typography.titleMedium,
+            color = if (focused) Color.Black else AppColors.TextTertiary
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            title,
+            color = if (focused) Color.Black else AppColors.TextPrimary,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+/** 电视端搜索输入框：获得焦点时显示品牌色描边，未聚焦时保持低调 */
 @Composable
 private fun TvSearchField(
     value: String,
     focusRequester: FocusRequester,
+    suggestionsVisible: Boolean,
+    modifier: Modifier = Modifier,
     onValueChange: (String) -> Unit,
     onSubmit: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
 
     Box(
-        Modifier
-            .width(520.dp)
+        modifier
             .height(52.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(AppColors.Surface)
@@ -192,6 +326,15 @@ private fun TvSearchField(
             .onFocusChanged { focused = it.isFocused }
             .focusRequester(focusRequester)
             .focusable()
+            // 输入框内部会把方向键当光标移动吃掉，这里截获「下」把焦点交给联想列表
+            .onPreviewKeyEvent { event ->
+                if (suggestionsVisible && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                    focusManager.moveFocus(FocusDirection.Down)
+                    true
+                } else {
+                    false
+                }
+            }
             .padding(horizontal = 18.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -201,7 +344,7 @@ private fun TvSearchField(
             Box(Modifier.weight(1f)) {
                 if (value.isEmpty()) {
                     Text(
-                        "搜索片名 / 演员 / 题材",
+                        "搜索片名 / 演员 / 拼音首字母",
                         color = AppColors.TextTertiary,
                         style = MaterialTheme.typography.bodyLarge
                     )
