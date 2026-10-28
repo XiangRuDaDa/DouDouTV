@@ -43,8 +43,15 @@ internal sealed interface TvRoute {
 fun TvApp(vm: LibraryViewModel) {
     val context = LocalContext.current
     var navStack by remember { mutableStateOf<List<TvRoute>>(listOf(TvRoute.Home)) }
+    // 搜索页状态放在导航层：进详情再返回时结果不丢，真正退出搜索页才清空
+    val searchState = remember { TvSearchUiState() }
     val push: (TvRoute) -> Unit = { navStack = navStack + it }
-    val pop = { if (navStack.size > 1) navStack = navStack.dropLast(1) }
+    val pop: () -> Unit = {
+        if (navStack.size > 1) {
+            if (navStack.last() is TvRoute.Search) searchState.clear()
+            navStack = navStack.dropLast(1)
+        }
+    }
 
     BackHandler(enabled = navStack.size > 1) { pop() }
 
@@ -70,6 +77,7 @@ fun TvApp(vm: LibraryViewModel) {
 
                 is TvRoute.Search -> TvSearchScreen(
                     vm = vm,
+                    state = searchState,
                     onBack = pop,
                     onDetail = { id -> push(TvRoute.Detail(id)) }
                 )

@@ -3,7 +3,9 @@ package com.tabbit.myvidhub.data
 import android.content.Context
 import com.tabbit.myvidhub.MyVidHubApp
 import com.tabbit.myvidhub.data.db.AppDatabase
+import com.tabbit.myvidhub.data.db.HotTitleEntity
 import com.tabbit.myvidhub.data.db.toPinyinInitials
+import com.tabbit.myvidhub.data.douban.DoubanClient
 import com.tabbit.myvidhub.data.emby.EmbyClient
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
@@ -19,6 +21,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 媒体库仓储。
@@ -33,6 +36,7 @@ class MediaRepository(private val context: Context) {
     private val db: AppDatabase = MyVidHubApp.instance.db
     private val sourceDao = db.sourceDao()
     private val mediaDao = db.mediaDao()
+    private val hotDao = db.hotTitleDao()
 
     fun observeSources(): Flow<List<SourceEntity>> = sourceDao.observeAll()
     fun observeLibrary(): Flow<List<MediaEntity>> = mediaDao.observeLibrary()
@@ -46,27 +50,90 @@ class MediaRepository(private val context: Context) {
     suspend fun pinyinSuggest(input: String): List<String> {
         val q = input.trim().lowercase()
         if (q.isBlank()) return emptyList()
-        return if (q.any { it in 'a'..'z' }) mediaDao.pinyinSuggest("$q%")
-        else mediaDao.search(q, q).map { it.title }.distinct().take(10)
+        if (q.none { it in 'a'..'z' }) return mediaDao.search(q, q).map { it.title }.distinct().take(10)
+        val local = mediaDao.pinyinSuggest("$q%")
+        // 本地库里没有的片（尤其是没同步进媒体库的热门片）用豆瓣热门榜补足
+        val hot = runCatching { hotDao.byPrefix("$q%", 20) }.getOrDefault(emptyList())
+        return (local + hot).distinct().take(10)
+    }
+
+    /**
+     * 刷新豆瓣热门榜联想索引（搜索页进入时调用）。
+     *
+     * 24 小时内直接复用本地缓存不联网；拉取失败时保留旧数据，返回 false。
+     * @return true 表示榜单已更新，UI 需要重新查一次联想
+     */
+    suspend fun refreshHotSuggestions(force: Boolean = false): Boolean = withContext(Dispatchers.IO) {
+        val last = runCatching { hotDao.lastUpdated() }.getOrNull() ?: 0L
+        val fresh = last > 0L && System.currentTimeMillis() - last < HOT_SUGGEST_TTL_MS
+        if (!force && fresh) return@withContext false
+
+        val hot = runCatching { DoubanClient().hotTitles() }.getOrDefault(emptyList())
+        if (hot.isEmpty()) return@withContext false
+
+        val now = System.currentTimeMillis()
+        runCatching {
+            hotDao.replaceAll(
+                hot.distinctBy { it.title }.mapIndexed { index, item ->
+                    HotTitleEntity(
+                        title = item.title,
+                        pinyinInitials = item.title.toPinyinInitials(),
+                        kind = item.kind,
+                        rank = index,
+                        updatedAt = now
+                    )
+                }
+            )
+        }.isSuccess
+    }
+
+    /**
+     * 一次性重建拼音索引。
+     *
+     * 老版本首字母是 Unicode 区间估算出来的（「兰」被算成 b），
+     * 换成 TinyPinyin 后要把库里已有片名重算一遍，否则老数据仍然搜不到。
+     * 用 Prefs.pinyinVersion 记录，只跑一次。
+     */
+    suspend fun reindexPinyinIfNeeded() = withContext(Dispatchers.IO) {
+        if (Prefs.pinyinVersion >= PINYIN_VERSION) return@withContext
+        runCatching {
+            mediaDao.distinctTitles().forEach { title ->
+                mediaDao.updatePinyinByTitle(title, title.toPinyinInitials())
+            }
+            hotDao.distinctTitles().forEach { title ->
+                hotDao.updatePinyinByTitle(title, title.toPinyinInitials())
+            }
+            Prefs.pinyinVersion = PINYIN_VERSION
+        }
     }
 
     /**
      * TVBox 远程搜索：遍历所有已启用的 TVBox 源，每个源下再遍历它的全部线路站点，
-     * 并发调 Guard.searchContent()。返回的 Vod 不入库，直接转临时 MediaEntity 展示。
+     * 并发调 Guard.searchContent()。返回的 Vod 不入库，直接转临时 MediaEntity 展示；
+     * 命中会缓存在内存里，用户点进详情时再落库换成真实 id。
+     * 再过滤一遍 —— 标题必须包含整串关键词（或拼音首字母包含），而不是按单字命中。
      */
     suspend fun tvBoxRemoteSearch(keyword: String): List<MediaEntity> = withContext(Dispatchers.IO) {
+        val kw = keyword.trim()
+        if (kw.isBlank()) return@withContext emptyList()
+        remoteHits.clear()
+
         val tvboxSources = enabledSources().filter { it.kind == SourceKind.TVBOX }
         if (tvboxSources.isEmpty()) return@withContext emptyList()
 
-        // 所有 (source, site) 对并发搜索
+        // 所有 (source, site) 对并发搜索（type=1 CMS 直接 HTTP、type=3 Guard 仅 spider 已加载时尝试）
+        // 单站只取前 REMOTE_RESULT_LIMIT 条 + quick 搜索，避免为了一次键入把整站结果全拉回来
         val jobs = tvboxSources.flatMap { source ->
             runCatching {
                 val client = TvBoxClient(source.location, context)
-                client.availableSites().filter { it.type == 3 }.map { site ->
+                client.availableSites().map { site ->
                     async {
-                        runCatching { client.search(site, keyword) }
-                            .getOrDefault(emptyList())
-                            .map { it to source.name }
+                        withTimeoutOrNull(SEARCH_TIMEOUT_MS) {
+                            runCatching { client.search(site, kw, quick = true) }
+                                .getOrDefault(emptyList())
+                                .take(REMOTE_RESULT_LIMIT)
+                                .map { it to source }
+                        } ?: emptyList()
                     }
                 }
             }.getOrDefault(emptyList())
@@ -76,24 +143,52 @@ class MediaRepository(private val context: Context) {
         // 去重（同一影片可能被多个线路搜到）
         val dedup = flat.distinctBy { (vod, _) -> vod.vodId + vod.siteKey }
 
-        dedup.mapIndexed { index, (vod, srcName) ->
+        // 完整关键词过滤：标题必须包含整串片名，避免「兰香如故」混进「如故」
+        val lower = kw.lowercase()
+        val matched = dedup.filter { (vod, _) ->
+            vod.name.lowercase().contains(lower) || vod.name.toPinyinInitials().contains(lower)
+        }
+
+        matched.take(REMOTE_RESULT_LIMIT).mapIndexed { index, (vod, source) ->
+            val id = -(index + 1).toLong()  // 负数 id = 远程临时结果
+            remoteHits[id] = RemoteHit(source, vod)
             MediaEntity(
-                id = -(index + 1).toLong(),  // 负数 id = 远程临时结果
+                id = id,
                 sourceId = 0L,
                 uri = "",
-                remoteId = "remote:${vod.siteKey}:${vod.vodId}",
+                remoteId = "remote:${source.id}:${vod.siteKey}:${vod.vodId}",
                 title = vod.name,
                 kind = MediaKind.MOVIE,
                 year = vod.year,
                 posterUrl = vod.pic,
                 genres = vod.typeName,
                 overview = vod.content,
-                sourceName = srcName,
+                sourceName = source.name,
                 // 远程结果也计算拼音（方便再搜）
                 pinyinInitials = vod.name.toPinyinInitials()
             )
         }
     }
+    /**
+     * 把远程临时结果落库，返回真实 DB id。
+     *
+     * 搜索结果的负 id 只是内存里的临时标识，直接拿它进详情会查不到 →「条目不存在」。
+     * 用户点开某一条时先按所属 TVBox 源入库（复用首页同步的入库路径），
+     * 详情页就能正常加载分集、播放。
+     */
+    suspend fun materializeRemote(mediaId: Long): Long? = withContext(Dispatchers.IO) {
+        val hit = remoteHits[mediaId] ?: return@withContext null
+        runCatching { saveTvBoxVods(hit.source, listOf(hit.vod)) {} }
+            .getOrDefault(emptyList())
+            .firstOrNull()?.id
+            ?.takeIf { it > 0 }
+    }
+
+    private data class RemoteHit(val source: SourceEntity, val vod: TvBoxClient.Vod)
+
+    /** 远程临时结果缓存：负 id → 原始站点 + Vod，点进详情时据此落库 */
+    private val remoteHits = java.util.concurrent.ConcurrentHashMap<Long, RemoteHit>()
+
     suspend fun setFavorite(id: Long, favorite: Boolean) = mediaDao.setFavorite(id, favorite)
 
     /** 从头播放：把进度归零，播放器读取后就从 0s 开始 */
@@ -571,5 +666,19 @@ class MediaRepository(private val context: Context) {
 
     suspend fun fillDuration(mediaId: Long, durationMs: Long) {
         mediaDao.fillDuration(mediaId, durationMs)
+    }
+
+    private companion object {
+        /** 热门榜联想缓存有效期：24 小时 */
+        const val HOT_SUGGEST_TTL_MS = 24 * 60 * 60 * 1000L
+
+        /** 拼音算法版本：TinyPinyin 为 1，改动算法时 +1 触发一次性重建 */
+        const val PINYIN_VERSION = 1
+
+        /** 远程搜索总条数上限：搜索结果只看前 20 条，拉全部既慢又刷屏 */
+        const val REMOTE_RESULT_LIMIT = 20
+
+        /** 单站搜索超时（毫秒）：慢线路直接放弃，别拖住整次搜索 */
+        const val SEARCH_TIMEOUT_MS = 4000L
     }
 }

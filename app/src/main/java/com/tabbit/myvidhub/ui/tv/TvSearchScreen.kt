@@ -47,6 +47,28 @@ import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.delay
 
 /**
+ * 电视端搜索页状态：由导航层（TvApp）持有，
+ * 进详情再返回时搜索词与结果保留，真正退出搜索页才清空。
+ */
+class TvSearchUiState {
+    var keyword by mutableStateOf("")
+    var results by mutableStateOf<List<MediaEntity>>(emptyList())
+    var loading by mutableStateOf(false)
+    var searched by mutableStateOf(false)
+
+    /** 已完成搜索的关键字，从详情返回时据此跳过重复搜索 */
+    var searchedKeyword by mutableStateOf("")
+
+    fun clear() {
+        keyword = ""
+        results = emptyList()
+        loading = false
+        searched = false
+        searchedKeyword = ""
+    }
+}
+
+/**
  * 电视端搜索页。
  *
  * 遥控器没有键盘，实际输入靠系统弹出软键盘或在搜索框上直接键入拼音/英文，
@@ -58,33 +80,36 @@ import kotlinx.coroutines.delay
 @Composable
 fun TvSearchScreen(
     vm: LibraryViewModel,
+    state: TvSearchUiState,
     onBack: () -> Unit,
     onDetail: (Long) -> Unit
 ) {
-    var keyword by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    var searched by remember { mutableStateOf(false) }
-
     val fieldFocus = remember { FocusRequester() }
 
     suspend fun runSearch() {
-        if (keyword.isBlank()) {
-            results = emptyList()
-            searched = false
+        val kw = state.keyword.trim()
+        if (kw.isEmpty()) {
+            state.results = emptyList()
+            state.searched = false
             return
         }
-        loading = true
-        results = runCatching { vm.searchMedia(keyword.trim()) }.getOrDefault(emptyList())
-        loading = false
-        searched = true
+        state.loading = true
+        state.results = runCatching { vm.searchMedia(kw) }.getOrDefault(emptyList())
+        state.searchedKeyword = kw
+        state.loading = false
+        state.searched = true
     }
 
-    // 输入停顿 350ms 后自动搜索，避免每敲一个字都查库
-    LaunchedEffect(keyword) {
-        if (keyword.isBlank()) {
-            results = emptyList(); searched = false; return@LaunchedEffect
+    // 输入停顿 350ms 后自动搜索；从详情返回时关键字没变就不重复搜
+    LaunchedEffect(state.keyword) {
+        val kw = state.keyword.trim()
+        if (kw.isEmpty()) {
+            state.results = emptyList()
+            state.searched = false
+            state.searchedKeyword = ""
+            return@LaunchedEffect
         }
+        if (kw == state.searchedKeyword) return@LaunchedEffect
         delay(350L)
         runSearch()
     }
@@ -104,9 +129,9 @@ fun TvSearchScreen(
         ) {
             // 遥控器 Back 键统一由 TvApp.BackHandler 处理，不再放页面内返回按钮
             TvSearchField(
-                value = keyword,
+                value = state.keyword,
                 focusRequester = fieldFocus,
-                onValueChange = { keyword = it },
+                onValueChange = { state.keyword = it },
                 onSubmit = {
                     // 回车立即出结果，不等防抖
                 }
@@ -114,10 +139,10 @@ fun TvSearchScreen(
         }
 
         when {
-            loading -> TvEmptyState("搜索中…")
-            results.isNotEmpty() -> {
+            state.loading -> TvEmptyState("搜索中…")
+            state.results.isNotEmpty() -> {
                 Text(
-                    "找到 ${results.size} 个结果",
+                    "找到 ${state.results.size} 个结果",
                     color = AppColors.TextTertiary,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(start = 20.dp, bottom = 10.dp)
@@ -129,7 +154,7 @@ fun TvSearchScreen(
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(results, key = { "tv_s_${it.id}" }) { item ->
+                    items(state.results, key = { "tv_s_${it.id}" }) { item ->
                         TvPosterCard(
                             item = item,
                             onClick = { onDetail(item.id) }
@@ -138,7 +163,7 @@ fun TvSearchScreen(
                 }
             }
 
-            searched -> TvEmptyState("没有找到「$keyword」", "换个关键词，或先在来源里同步媒体库")
+            state.searched -> TvEmptyState("没有找到「${state.keyword}」", "换个关键词，或先在来源里同步媒体库")
             else -> TvEmptyState("搜索媒体库", "输入片名、演员或题材，按 OK 键确认")
         }
     }

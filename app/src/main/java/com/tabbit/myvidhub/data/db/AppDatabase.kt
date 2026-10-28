@@ -11,8 +11,8 @@ import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.SourceEntity
 
 @Database(
-    entities = [SourceEntity::class, MediaEntity::class],
-    version = 8,
+    entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class],
+    version = 9,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -20,6 +20,7 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun sourceDao(): SourceDao
     abstract fun mediaDao(): MediaDao
+    abstract fun hotTitleDao(): HotTitleDao
 
     companion object {
         /**
@@ -63,6 +64,28 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 → v9：新增 hot_titles（豆瓣热门榜片名索引）。
+         * 只给搜索联想补数据，不参与媒体库与播放流程。
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `hot_titles` (" +
+                        "`title` TEXT NOT NULL, " +
+                        "`pinyinInitials` TEXT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, " +
+                        "`rank` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`title`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_hot_titles_pinyinInitials` " +
+                        "ON `hot_titles` (`pinyinInitials`)"
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -73,7 +96,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "myvidhub.db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

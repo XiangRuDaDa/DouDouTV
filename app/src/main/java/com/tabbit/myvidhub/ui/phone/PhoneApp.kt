@@ -44,6 +44,7 @@ import com.tabbit.myvidhub.ui.home.GenreScreen
 import com.tabbit.myvidhub.ui.home.HomeScreen
 import com.tabbit.myvidhub.ui.home.TvBoxCategoryScreen
 import com.tabbit.myvidhub.ui.home.SearchScreen
+import com.tabbit.myvidhub.ui.home.SearchUiState
 import com.tabbit.myvidhub.ui.player.phone.PhonePlayerActivity
 import com.tabbit.myvidhub.ui.settings.SettingsScreen
 import com.tabbit.myvidhub.ui.sources.SourcesScreen
@@ -82,6 +83,8 @@ fun PhoneApp(vm: LibraryViewModel) {
     val context = LocalContext.current
     // 导航栈：初始在 Home；底栏切换会重置栈，详情/搜索/分类会入栈
     var navStack by remember { mutableStateOf<List<PhoneRoute>>(listOf(PhoneRoute.Home)) }
+    // 搜索页状态放在导航层：进详情再返回时结果不丢，真正退出搜索页才清空
+    val searchState = remember { SearchUiState() }
     val snackbarHost = remember { SnackbarHostState() }
 
     LaunchedEffect(vm.message) {
@@ -93,11 +96,19 @@ fun PhoneApp(vm: LibraryViewModel) {
     }
 
     // 弹出栈顶 = 返回上一个页面；已经在根时系统会自己拦截
-    val goBack = {
-        if (navStack.size > 1) navStack = navStack.dropLast(1)
+    val goBack: () -> Unit = {
+        if (navStack.size > 1) {
+            // 真正离开搜索页才清空搜索状态（详情 → 搜索属于栈内返回，不清）
+            if (navStack.last() is PhoneRoute.Search) searchState.clear()
+            navStack = navStack.dropLast(1)
+        }
     }
     val push: (PhoneRoute) -> Unit = { r -> navStack = navStack + r }
-    val resetTo: (PhoneRoute) -> Unit = { r -> navStack = listOf(r) }
+    val resetTo: (PhoneRoute) -> Unit = { r ->
+        // 切底栏 = 离开当前页面栈，搜索状态一并清空
+        searchState.clear()
+        navStack = listOf(r)
+    }
 
     BackHandler(enabled = navStack.size > 1) { goBack() }
 
@@ -202,6 +213,7 @@ fun PhoneApp(vm: LibraryViewModel) {
                     is PhoneRoute.Search -> SearchScreen(
                         vm = vm,
                         isTv = false,
+                        state = searchState,
                         onBack = goBack,
                         onOpenDetail = { id -> push(PhoneRoute.Detail(id)) }
                     )

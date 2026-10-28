@@ -65,6 +65,14 @@ interface MediaDao {
     @Query("SELECT * FROM media WHERE id = :id")
     suspend fun get(id: Long): MediaEntity?
 
+    /** 拼音索引重建用：所有出现过的片名 */
+    @Query("SELECT DISTINCT title FROM media")
+    suspend fun distinctTitles(): List<String>
+
+    /** 拼音索引重建用：按片名批量改写首字母 */
+    @Query("UPDATE media SET pinyinInitials = :initials WHERE title = :title")
+    suspend fun updatePinyinByTitle(title: String, initials: String)
+
     @Query("SELECT * FROM media WHERE remoteId = :remoteId LIMIT 1")
     suspend fun byRemoteId(remoteId: String): MediaEntity?
 

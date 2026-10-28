@@ -116,6 +116,14 @@ object SpiderLoader {
         return parts.firstOrNull().orEmpty() to parts.getOrNull(2).orEmpty()
     }
 
+    /** 只查缓存：返回 spiderRaw 对应的 loader key（已加载过）；从未加载返回 null。
+     *  不会触发 ensureLoaded，不会下载 JAR，不会起 Go 代理。供远程搜索等轻量场景用。 */
+    fun cachedLoaderKeyOrNull(spiderRaw: String): String? {
+        val (url, md5) = parseSpider(spiderRaw)
+        val key = md5.ifBlank { md5Hex(url) }
+        return if (loaders.containsKey(key)) key else null
+    }
+
     suspend fun ensureLoaded(spiderRaw: String): String = withContext(Dispatchers.IO) {
         val (url, md5) = parseSpider(spiderRaw)
         check(url.isNotBlank()) { "配置里没有 spider 字段（此类配置需要 spider 包才能解析）" }

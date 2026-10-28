@@ -277,6 +277,32 @@ fun TvHomeScreen(
                 }
             }
 
+            // ---------- TVBox 动态分类预览 sections（跟手机端一致） ----------
+            // 每个分类首次进入 composition 时懒加载前 12 条；已展开为 activeCategory 的不再重复展示
+            homeCategories.take(7).forEach { cat ->
+                val catItems = vm.categoryVods[cat.typeId].orEmpty()
+                val isLoading = vm.categoryPreviewLoading[cat.typeId] ?: false
+                val isActive = cat.typeId == vm.activeCategoryId
+                if (isActive) return@forEach  // 已在上面完整展示过
+
+                item(key = "cat_ensure_${cat.typeId}") {
+                    LaunchedEffect(cat.typeId) { vm.ensureCategoryPreview(cat.typeId) }
+                }
+                item(key = "cat_title_${cat.typeId}") {
+                    TvSectionTitle(cat.typeName) {}
+                }
+                item(key = "cat_row_${cat.typeId}") {
+                    when {
+                        isLoading && catItems.isEmpty() -> {
+                            Box(Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
+                            }
+                        }
+                        catItems.isNotEmpty() -> TvPosterRow(items = catItems.take(TV_LAZY_TAKE), onDetail = onDetail)
+                    }
+                }
+            }
+
             // ---------- 动态分区：根据 filteredLibrary 实际存在的 kind 渲染 ----------
             DynamicTvGallerySections(
                 library = filteredLibrary,

@@ -18,6 +18,8 @@ object Prefs {
     private const val KEY_HOME_SOURCE_ID = "home_source_id"
     private const val KEY_HOME_SITE_KEY = "home_site_key"
     private const val KEY_SOURCE_LAST_SYNC = "source_last_sync_"
+    private const val KEY_SEARCH_HISTORY = "search_history_list"
+    private const val KEY_PINYIN_VERSION = "pinyin_version"
 
     /** 缩略图尺寸三档 */
     enum class PosterSize(val mobileDp: Int, val tvDp: Int) {
@@ -120,4 +122,37 @@ object Prefs {
         set(value) {
             sp.edit().putString(KEY_HOME_SITE_KEY, value).apply()
         }
+
+    /**
+     * 搜索历史：最多 10 条，新的排最前。
+     *
+     * 用换行分隔的字符串存（而非 StringSet）——Set 不保证顺序，
+     * 无法判断哪条是「最后一个」（最旧），也就无法在超出 10 条时正确淘汰。
+     */
+    fun getSearchHistory(): List<String> =
+        sp.getString(KEY_SEARCH_HISTORY, null).orEmpty()
+            .split('\n')
+            .filter { it.isNotBlank() }
+
+    fun addSearchHistory(keyword: String) {
+        val kw = keyword.trim()
+        if (kw.isBlank()) return
+        val list = getSearchHistory().filter { it != kw }.toMutableList()
+        list.add(0, kw)
+        // 超出 10 条自动清掉最旧的一条（即末尾那条）
+        sp.edit().putString(KEY_SEARCH_HISTORY, list.take(10).joinToString("\n")).apply()
+    }
+
+    /**
+     * 拼音索引版本。
+     * 0 = 老版本用 Unicode 区间估算的首字母（大量错误），1 = TinyPinyin 重建。
+     * 每次换拼音算法都 +1，启动时会据此把库里已有片名重算一遍。
+     */
+    var pinyinVersion: Int
+        get() = sp.getInt(KEY_PINYIN_VERSION, 0)
+        set(value) {
+            sp.edit().putInt(KEY_PINYIN_VERSION, value).apply()
+        }
+
+    fun clearSearchHistory() = sp.edit().remove(KEY_SEARCH_HISTORY).apply()
 }

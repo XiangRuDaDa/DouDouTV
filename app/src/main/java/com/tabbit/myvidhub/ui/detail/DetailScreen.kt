@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -117,6 +118,9 @@ fun DetailScreen(
     var playSources by remember { mutableStateOf<List<String>>(emptyList()) }
     var selectedPlaySource by remember { mutableStateOf<String>("") }
 
+    /** 播放源 chips 的滚动状态：切换线路时把当前选中项滚进可见区域 */
+    val playSourceListState = rememberLazyListState()
+
     val scope = rememberCoroutineScope()
 
     /** Emby 刮削信息（导演/演员/分级/工作室） */
@@ -159,7 +163,17 @@ fun DetailScreen(
         loading = true
         scraped = null
         tmdb = null
-        val m = vm.mediaOf(mediaId)
+        // 远程搜索结果是负 id 的临时条目：先按所属 TVBox 源落库换成真实 id，
+        // 否则 mediaOf() 查不到会显示「条目不存在」
+        var id = mediaId
+        var m = vm.mediaOf(id)
+        if (m == null && id < 0) {
+            val realId = runCatching { vm.materializeRemote(id) }.getOrNull()
+            if (realId != null && realId > 0) {
+                id = realId
+                m = vm.mediaOf(id)
+            }
+        }
         media = m
 
         if (m != null) {
@@ -183,7 +197,7 @@ fun DetailScreen(
                 if (!(fresh && localReady)) {
                     // mediaId 传下去：命中网络结果后会回填数据库并打上 scrapedAt
                     runCatching {
-                        vm.tmdbScrape(m.title, m.year, m.kind, mediaId)
+                        vm.tmdbScrape(m.title, m.year, m.kind, id)
                     }.getOrNull()?.let { tmdb = it }
                 }
             }
@@ -197,11 +211,11 @@ fun DetailScreen(
                     when (src?.kind) {
                         SourceKind.TVBOX -> {
                             vm.loadTvBoxDetail(m.sourceId, m.remoteId)
-                            media = vm.mediaOf(mediaId) ?: m
+                            media = vm.mediaOf(id) ?: m
                         }
                         SourceKind.EMBY -> {
                             if (vm.loadEmbyEpisodes(m.sourceId, m.remoteId)) {
-                                media = vm.mediaOf(mediaId) ?: m
+                                media = vm.mediaOf(id) ?: m
                             }
                         }
                         null -> Unit
@@ -680,7 +694,13 @@ fun DetailScreen(
                     // 同一部剧有多条云盘时，展示为横向可选 chips；默认第一条，点击切换该源的分集。
                     if (playSources.size > 1) {
                         item {
+                            // 切换线路后把当前选中的 chip 滚进可见区域（放在 item 内：行已组合时才滚动）
+                            LaunchedEffect(selectedPlaySource, playSources) {
+                                val idx = playSources.indexOf(selectedPlaySource)
+                                if (idx > 0) playSourceListState.animateScrollToItem(idx)
+                            }
                             LazyRow(
+                                state = playSourceListState,
                                 contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {

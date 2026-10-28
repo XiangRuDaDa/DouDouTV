@@ -2,6 +2,7 @@ package com.tabbit.myvidhub.ui.home
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -22,11 +24,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AltRoute
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Source
@@ -42,6 +47,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,14 +56,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -79,8 +92,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * 首页（VidHub 形态）：
- *   精选大图轮播 → 继续观看 → 收藏 → [动态分区]
+ * 首页精选大图轮播 → 继续观看 → 收藏 → [动态分区]
  *
  * 懒加载策略：每个分类只展示最新 10 条（横向滑动画廊，条数由 ViewModel 控制），
  * 点「更多」进入分类浏览页再按类型/题材分页加载整库，
@@ -334,7 +346,7 @@ fun HomeScreen(
             }
             if (vm.scanning) {
                 CircularProgressIndicator(
-                    modifier = Modifier.padding(8.dp).width(20.dp),
+                    modifier = Modifier.padding(5.dp).width(20.dp),
                     strokeWidth = 2.dp,
                     color = Color.White
                 )
@@ -551,13 +563,31 @@ private fun HomeLineSelector(
     onSelect: (String?, TvBoxSite?) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
+    // 菜单内是等高的 DropdownMenuItem（48dp），按「下标 × 行高」滚动即可定位到当前线路
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current
+    // 选中线路在列表中的下标（0 = 「全部站点」，其余 +1）
+    val selectedIndex = remember(sites, selectedKey) {
+        if (selectedKey == null) 0
+        else sites.indexOfFirst { it.key == selectedKey }.let { if (it < 0) 0 else it + 1 }
+    }
+    // 打开菜单时自动定位到当前线路，线路有几十条时不用手动翻找
+    LaunchedEffect(expanded) {
+        if (!expanded) return@LaunchedEffect
+        // 弹窗内容完成首帧布局后 maxValue 才是真实可滚动距离
+        repeat(3) { withFrameNanos { } }
+        val itemPx = with(density) { 48.dp.roundToPx() }
+        val target = (selectedIndex * itemPx - itemPx).coerceIn(0, scrollState.maxValue)
+        scrollState.scrollTo(target)
+    }
     Box {
         IconButton(onClick = { expanded = true }) {
             Icon(Icons.Filled.AltRoute, contentDescription = "选择线路", tint = Color.White)
         }
         HomePickerMenu(
             expanded = expanded,
-            onDismiss = { expanded = false }
+            onDismiss = { expanded = false },
+            scrollState = scrollState
         ) {
             DropdownMenuItem(
                 text = {
@@ -602,11 +632,15 @@ private fun HomeLineSelector(
 /**
  * 选择弹窗容器：固定最大高度 + 纵向滚动，来源/站点再多也不会重叠或超出屏幕。
  * 内容由调用方以纵向排列的 DropdownMenuItem 提供。
+ *
+ * 注意：这里不能用 LazyColumn —— DropdownMenu 会向内容请求 intrinsic 高度，
+ * 而 LazyColumn 基于 SubcomposeLayout 不支持 intrinsic 测量，会直接崩溃。
  */
 @Composable
 private fun HomePickerMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
+    scrollState: ScrollState = rememberScrollState(),
     content: @Composable () -> Unit
 ) {
     DropdownMenu(
@@ -618,7 +652,7 @@ private fun HomePickerMenu(
                 .background(AppColors.SurfaceHi, RoundedCornerShape(14.dp))
                 .padding(vertical = 6.dp)
                 .heightIn(max = 240.dp)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
         ) {
             content()
         }
@@ -850,55 +884,146 @@ fun GenreScreen(
 }
 
 /**
- * 全局搜索：在已同步的电影/剧集中按标题模糊匹配。
+ * 搜索页状态。
  *
- * 输入防抖 300ms，避免每敲一个字都打一次库。
+ * 提升到导航层（PhoneApp）持有，而不是页面内部的 remember：
+ * 进详情页会把搜索页踢出组合树，内部 remember 会全部丢，
+ * 返回时就出现「搜索结果被清空」。状态放在导航层后，
+ * 只有真正退出搜索页（返回上一级 / 切底栏）才 [clear]。
+ */
+class SearchUiState {
+    var query by mutableStateOf("")
+    var results by mutableStateOf<List<MediaEntity>>(emptyList())
+    var grouped by mutableStateOf<Map<String, List<MediaEntity>>>(emptyMap())
+    var searching by mutableStateOf(false)
+    var suggestions by mutableStateOf<List<String>>(emptyList())
+    var submittedKeyword by mutableStateOf("")
+
+    /** 已完成搜索的关键字：从详情返回时据此复用结果，不重复联网搜索 */
+    var searchedKeyword by mutableStateOf("")
+
+    /** 热门榜缓存版本，刷新后自增以触发联想重查 */
+    var hotEpoch by mutableStateOf(0)
+
+    fun clear() {
+        query = ""
+        results = emptyList()
+        grouped = emptyMap()
+        searching = false
+        suggestions = emptyList()
+        submittedKeyword = ""
+        searchedKeyword = ""
+    }
+}
+
+/**
+ * 两行流式布局：子项从左到右排布，超出第一行换行，最多排两行，
+ * 放不下的子项不再参与布局（当前 Compose 版本的 FlowRow 还没有 maxLines 参数）。
+ */
+@Composable
+private fun TwoLineFlowRow(
+    horizontalSpacing: Dp,
+    verticalSpacing: Dp,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Layout(content = content, modifier = modifier) { measurables, constraints ->
+        val hGap = horizontalSpacing.roundToPx()
+        val vGap = verticalSpacing.roundToPx()
+        val maxWidth = constraints.maxWidth
+        val placeables = measurables.map { it.measure(Constraints(maxWidth = maxWidth)) }
+
+        data class Placed(val placeable: androidx.compose.ui.layout.Placeable, val x: Int, val y: Int)
+        val placed = mutableListOf<Placed>()
+        var x = 0
+        var y = 0
+        var rowHeight = 0
+        var line = 1
+        for (p in placeables) {
+            if (x > 0 && x + hGap + p.width > maxWidth) {
+                if (line == 2) break
+                line++
+                y += rowHeight + vGap
+                x = 0
+                rowHeight = 0
+            }
+            placed += Placed(p, x, y)
+            x += if (x == 0) p.width else hGap + p.width
+            rowHeight = maxOf(rowHeight, p.height)
+        }
+
+        val width = (placed.maxOfOrNull { it.x + it.placeable.width } ?: 0)
+            .coerceIn(constraints.minWidth, constraints.maxWidth)
+        val height = (placed.maxOfOrNull { it.y + it.placeable.height } ?: 0)
+            .coerceIn(constraints.minHeight, constraints.maxHeight)
+        layout(width, height) {
+            placed.forEach { it.placeable.placeRelative(it.x, it.y) }
+        }
+    }
+}
+
+/**
+ * 全局搜索：本地媒体库 + TVBox 远程搜索，标题模糊匹配 / 拼音首字母前缀联想。
+ *
+ * 输入防抖 200ms，避免每敲一个字都打一次库；状态由导航层持有，从详情返回不丢。
  */
 @Composable
 fun SearchScreen(
     vm: LibraryViewModel,
     isTv: Boolean,
+    state: SearchUiState,
     onBack: () -> Unit,
     onOpenDetail: (Long) -> Unit
 ) {
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
-    var grouped by remember { mutableStateOf<Map<String, List<MediaEntity>>>(emptyMap()) }
-    var searching by remember { mutableStateOf(false) }
-    var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
-    var searched by remember { mutableStateOf(false) }
+    var history by remember { mutableStateOf<List<String>>(Prefs.getSearchHistory()) }
+    val inputFocus = remember { FocusRequester() }
+
+    // 首次进搜索页后台拉一次豆瓣热门榜，补齐联想（24h 内走本地缓存，不联网）
+    LaunchedEffect(Unit) {
+        if (runCatching { vm.refreshHotSuggestions() }.getOrDefault(false)) state.hotEpoch++
+    }
 
     // 联想：输入停顿 200ms 后查库，只有用户输入是字母（拼音首字母）时才做联想
-    LaunchedEffect(query) {
-        val q = query.trim()
+    LaunchedEffect(state.query, state.hotEpoch) {
+        val q = state.query.trim()
         if (q.isEmpty()) {
-            suggestions = emptyList()
+            state.suggestions = emptyList()
             return@LaunchedEffect
         }
+        if (state.submittedKeyword.isNotEmpty()) return@LaunchedEffect
         if (q.any { it in 'a'..'z' || it in 'A'..'Z' }) {
             delay(200)
-            suggestions = runCatching { vm.pinyinSuggest(q.lowercase()) }.getOrDefault(emptyList())
+            state.suggestions = runCatching { vm.pinyinSuggest(q.lowercase()) }.getOrDefault(emptyList())
         } else {
-            suggestions = emptyList()
+            state.suggestions = emptyList()
         }
     }
 
-    // 实际搜索：停顿 300ms 后，本地 DB + TVBox Guard 远程并发
-    LaunchedEffect(query) {
-        val q = query.trim()
-        if (q.isEmpty()) {
-            results = emptyList(); grouped = emptyMap(); searched = false; return@LaunchedEffect
-        }
-        searching = true
-        delay(300)
-        results = runCatching { vm.searchMerged(q) }.getOrDefault(emptyList())
-        grouped = results.groupBy { it.sourceName.ifBlank { "未知来源" } }
-        searching = false
-        searched = true
+    // 实际搜索：只有 submittedKeyword 变化（回车/点按钮触发）才执行；
+    // 从详情返回时关键字没变，直接复用已有结果，不重复搜索
+    LaunchedEffect(state.submittedKeyword) {
+        val q = state.submittedKeyword.trim()
+        if (q.isEmpty() || q == state.searchedKeyword) return@LaunchedEffect
+        state.searching = true
+        state.results = runCatching { vm.searchMerged(q) }.getOrDefault(emptyList())
+        state.grouped = state.results.groupBy { it.sourceName.ifBlank { "未知来源" } }
+        state.searchedKeyword = q
+        state.searching = false
     }
 
-    val columns = if (isTv) 6 else 3
+    // 进页自动聚焦输入框
+    LaunchedEffect(Unit) { runCatching { inputFocus.requestFocus() } }
+
     val hSpacing = if (isTv) 14.dp else 9.dp
+
+    /** 提交搜索：存历史 + 触发搜索 */
+    fun submitSearch() {
+        val kw = state.query.trim()
+        if (kw.isEmpty()) return
+        Prefs.addSearchHistory(kw)
+        history = Prefs.getSearchHistory()
+        state.submittedKeyword = kw
+    }
 
     Column(Modifier.fillMaxSize()) {
         // 搜索框 + 返回
@@ -916,8 +1041,17 @@ fun SearchScreen(
                 )
             }
             OutlinedTextField(
-                value = query,
-                onValueChange = { query = it },
+                value = state.query,
+                onValueChange = {
+                    state.query = it
+                    // 输入变化时清除上次的搜索结果（让用户看到"正在输入"状态）
+                    if (state.submittedKeyword.isNotEmpty()) {
+                        state.submittedKeyword = ""
+                        state.searchedKeyword = ""
+                        state.results = emptyList()
+                        state.grouped = emptyMap()
+                    }
+                },
                 placeholder = {
                     Text(
                         if (isTv) "搜索片名 / 演员 / 拼音首字母" else "搜索片名 / 拼音首字母 (如 tthr)",
@@ -925,43 +1059,104 @@ fun SearchScreen(
                     )
                 },
                 singleLine = true,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f).focusRequester(inputFocus),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { submitSearch() }),
+                trailingIcon = {
+                    IconButton(onClick = { submitSearch() }) {
+                        Icon(Icons.Filled.Search, contentDescription = "搜索", tint = AppColors.Brand)
+                    }
+                }
             )
         }
 
-        // 联想下拉（只有 TV 端和手机端都显示）
-        if (suggestions.isNotEmpty() && query.isNotBlank() && !searched) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                suggestions.take(if (isTv) 6 else 5).forEach { title ->
-                    FilterChip(
-                        selected = false,
-                        onClick = { query = title },
-                        label = { Text(title, maxLines = 1) },
-                        modifier = Modifier.height(36.dp)
-                    )
+        // 搜索框下方：历史（空输入/有搜索结果时显示）或联想（有输入且未搜索时显示），两者互斥
+        when {
+            // 有输入但还没真正搜索 → 显示联想
+            state.query.isNotBlank() && state.submittedKeyword.isEmpty() && state.suggestions.isNotEmpty() -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    state.suggestions.take(if (isTv) 8 else 6).forEach { title ->
+                        FilterChip(
+                            selected = false,
+                            onClick = { state.query = title },  // 只填不搜
+                            label = { Text(title, maxLines = 1) },
+                            modifier = Modifier.height(36.dp)
+                        )
+                    }
+                }
+            }
+            // 空输入或已搜索过 → 显示历史（换行展示，最多 2 行 10 条，末尾带清空按钮）
+            history.isNotEmpty() -> {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    TwoLineFlowRow(
+                        modifier = Modifier.weight(1f),
+                        horizontalSpacing = 8.dp,
+                        verticalSpacing = 6.dp
+                    ) {
+                        history.take(10).forEach { kw ->
+                            FilterChip(
+                                selected = false,
+                                onClick = {
+                                    state.query = kw
+                                    submitSearch()  // 点历史直接搜
+                                },
+                                label = { Text(kw, maxLines = 1) },
+                                modifier = Modifier.height(36.dp)
+                            )
+                        }
+                    }
+                    // 清空按钮固定在历史区末尾，一次清掉全部历史（不受两行裁剪影响）
+                    TextButton(
+                        onClick = {
+                            Prefs.clearSearchHistory()
+                            history = emptyList()
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Clear,
+                            contentDescription = null,
+                            tint = AppColors.TextTertiary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "清空",
+                            maxLines = 1,
+                            color = AppColors.TextTertiary,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
                 }
             }
         }
 
         when {
-            query.isBlank() -> HintText("输入关键字或拼音首字母（如 tthr = 偷天换日）")
+            state.submittedKeyword.isEmpty() && state.query.isBlank() ->
+                HintText("输入关键字或拼音首字母（如 tthr = 偷天换日），然后回车或点搜索")
 
-            searching && results.isEmpty() -> Box(
+            state.searching && state.results.isEmpty() -> Box(
                 Modifier.fillMaxWidth().padding(40.dp),
                 contentAlignment = Alignment.Center
             ) { CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand) }
 
-            results.isEmpty() -> HintText("没有找到「${query.trim()}」相关内容")
+            state.submittedKeyword.isNotEmpty() && state.results.isEmpty() ->
+                HintText("没有找到「${state.submittedKeyword}」相关内容")
 
             // 有结果：按来源分组展示
             else -> LazyColumn(contentPadding = PaddingValues(bottom = 28.dp)) {
-                item { SectionTitle("搜索结果 ${results.size} 条 · ${grouped.size} 个来源") }
-                grouped.forEach { (srcName, itemsOfSource) ->
+                item { SectionTitle("搜索结果 ${state.results.size} 条 · ${state.grouped.size} 个来源") }
+                state.grouped.forEach { (srcName, itemsOfSource) ->
                     item {
                         SectionTitle(
                             srcName,

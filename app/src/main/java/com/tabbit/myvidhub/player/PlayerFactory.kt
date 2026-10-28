@@ -63,6 +63,9 @@ object PlayerFactory {
     /** 卡顿后恢复门槛：3 秒，兼顾恢复速度与稳定性 */
     private const val BUFFER_AFTER_REBUFFER_MS = 3_000
 
+    /** 开区间 Range 头（bytes=X-）：只有这种请求才需要补一个结尾，防止一路读到 EOF */
+    private val OPEN_RANGE_REGEX = Regex("bytes=(\\d+)-$")
+
     @Volatile
     private var cache: SimpleCache? = null
 
@@ -110,24 +113,15 @@ object PlayerFactory {
         val connectTimeout = if (isTv) 15_000 else 10_000
         val readTimeout = if (isTv) 60_000 else 45_000
 
-        // Range 请求改写逻辑（通用方案，支持所有视频格式）：
-        // ExoPlayer 的 Extractor（MKV/MP4/AVI/FLV/MOV...）对 HTTP 流的典型请求模式是：
-        //   a) 第一次：先发普通 GET（无 Range），想拿 Content-Length 确定总大小，
-        //      同时读文件头 magic number 识别容器格式；
-        //   b) 后续：根据容器结构 seek（如 Matroska 读尾部 SeekHead、MP4 读 moov atom），
-        //      发精准 Range 请求。
-        // 问题：如果 CDN 返回 200 OK 完整 body（动辄 2~5GB），OkHttpDataSource 必须读完
-        // 整个 body 才能 close 并释放连接池，导致后续 seek 卡死。
-        // 所以我们拦截所有请求，按以下策略改写：
-        // 1) 普通 GET（无 Range）→ 改成 "bytes=0-32767"（32KB 探测）
-        //    目的：让 CDN 返回 206 + Content-Range 包含总大小；body 只给前 32KB，
-        //    足够所有 extractor 识别容器格式（MKV 4B、MP4 ftyp 20B、AVI RIFF 4B...），
-        //    瞬间读完 close，连接池立刻释放给后续 seek 用。
-        // 2) 有 start 无 end（"bytes=X-"）→ 改成 "bytes=X-X+chunkSize-1"（固定 8MB 块）
-        //    否则 CDN 返回到 EOF 的完整剩余 body，又会卡死 OkHttp。
-        //    8MB 比 2MB 好：减少 Range 请求次数，降低 RTT 开销。
-        // 3) 已有完整 end（"bytes=X-Y"）→ 原样透传。
-        val probeSize = 32 * 1024L
+        // Range 请求改写逻辑：
+        // ExoPlayer 的进度式播放（MP4/MKV/AVI...）在 seek 后会发开区间 Range（"bytes=X-"），
+        // 如果原样透传，CDN 会一直返回到文件 EOF（动辄几个 GB），OkHttp 连接被长时间占用，
+        // 后续 seek 抢不到连接就卡住。所以只对这种「开区间 Range」限制结尾（8MB 一块）。
+        //
+        // 关键：请求里本来就没有 Range 头时绝对不能再加！
+        // HLS/DASH 的媒体分片（.ts / .m4s）请求就是不带 Range 的，强行改写成
+        // "bytes=0-32767" 会把几 MB 的分片截成 32KB，分片数据不完整 → 解析失败 / 丢帧，
+        // 表现为播放器每 0.2~0.3 秒就「缓冲→就绪→播放→暂停」循环、进度条一顿一顿往前跳。
         val chunkSize = 8L * 1024 * 1024
         val client = OkHttpClient.Builder()
             .connectTimeout(connectTimeout.toLong(), TimeUnit.MILLISECONDS)
@@ -139,19 +133,14 @@ object PlayerFactory {
             .addInterceptor(Interceptor { chain ->
                 val original = chain.request()
                 val rangeHeader = original.header("Range")
-                val request = when {
-                    rangeHeader == null -> {
-                        // 情况 1：无 Range 头 → 32KB 探测（足够识别 MKV/MP4/AVI/FLV/MOV 所有格式）
-                        original.newBuilder().header("Range", "bytes=0-${probeSize - 1}").build()
-                    }
-                    Regex("bytes=(\\d+)-$").containsMatchIn(rangeHeader) -> {
-                        // 情况 2：有 start 无 end → 2MB 固定块
-                        val m = Regex("bytes=(\\d+)-$").find(rangeHeader)!!
-                        val start = m.groupValues[1].toLong()
-                        val end = start + chunkSize - 1
-                        original.newBuilder().header("Range", "bytes=$start-$end").build()
-                    }
-                    else -> original // 情况 3：已有完整 end → 原样透传
+                val openEnded = rangeHeader != null && OPEN_RANGE_REGEX.containsMatchIn(rangeHeader)
+                val request = if (openEnded) {
+                    // 有 start 无 end（"bytes=X-"）→ 8MB 固定块，避免读到 EOF 拖住连接
+                    val start = OPEN_RANGE_REGEX.find(rangeHeader!!)!!.groupValues[1].toLong()
+                    original.newBuilder().header("Range", "bytes=$start-${start + chunkSize - 1}").build()
+                } else {
+                    // 无 Range（HLS/DASH 分片、清单）或已带完整 end → 原样透传
+                    original
                 }
                 Log.d("PlayerHttp", ">>> ${request.method} ${request.url}")
                 val range = request.header("Range")
@@ -221,11 +210,9 @@ object PlayerFactory {
             .setLoadErrorHandlingPolicy(errorPolicy)
 
         // 自定义 RenderersFactory：过滤掉 ImageRenderer。
-        // 原因：我们的 Range 拦截器会把所有 "bytes=X-" 请求改写成 2MB 块（或首次 32KB 探测），
-        // 这对视频/音频数据完全没问题（ExoPlayer 需要多少就发多少 Range），
-        // 但 MKV/MP4 内嵌的 poster 图片 attachment 轨道也会被截断，
-        // ImageRenderer 拿到残缺数据 → BitmapFactory 解码失败 → ParserException → 播放器崩掉。
-        // 作为视频播放器我们完全不需要渲染内嵌图片，直接把 ImageRenderer 从 renderers 列表里移除。
+        // 原因：Range 拦截器会改写 "bytes=X-" 开区间请求，MKV/MP4 内嵌的 poster 图片
+        // attachment 轨道数据可能不完整，ImageRenderer 拿到残缺数据 → BitmapFactory 解码失败
+        // → ParserException → 播放器崩掉。作为视频播放器我们不需要渲染内嵌图片，直接移除。
         val defaultFactory = DefaultRenderersFactory(context)
         val renderersFactory = RenderersFactory { handler, videoRendererEventListener, audioRendererEventListener, textRendererOutput, metadataRendererOutput ->
             defaultFactory.createRenderers(

@@ -167,6 +167,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
         // 启动时汇总各来源已入库条目数（来源页「N 个条目」展示用）
         viewModelScope.launch { refreshSourceCounts() }
+        // 拼音算法升级后，把库里已有片名重算一遍首字母（只跑一次）
+        viewModelScope.launch { repo.reindexPinyinIfNeeded() }
         // 恢复上次选中的来源时，预取该 TVBox 来源的站点（线路）列表
         viewModelScope.launch {
             homeSourceId?.let { loadHomeSites(it) }
@@ -496,6 +498,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     /** 拼音联想（debounce 在 UI 层做，这里直接跑） */
     suspend fun pinyinSuggest(input: String): List<String> = repo.pinyinSuggest(input)
 
+    /** 刷新豆瓣热门榜联想缓存；返回 true 表示榜单有更新，UI 需重新查联想 */
+    suspend fun refreshHotSuggestions(): Boolean = repo.refreshHotSuggestions()
+
     /**
      * 按来源分组的搜索结果：返回 Map<来源名称, List<MediaEntity>>。
      * 同一部剧可能从 TVBox 多个云盘线路入库，按 sourceName 分组后 UI 直接分组展示。
@@ -633,6 +638,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         repo.episodesBySource(seriesKey, playSource)
     suspend fun mediaOf(id: Long): MediaEntity? = repo.getMedia(id)
     suspend fun sourceOf(id: Long): SourceEntity? = repo.getSource(id)
+
+    /** 远程搜索结果（负 id）落库并返回真实 id；失败返回 null */
+    suspend fun materializeRemote(id: Long): Long? = repo.materializeRemote(id)
 
     fun saveProgress(mediaId: Long, positionMs: Long) {
         viewModelScope.launch { repo.saveProgress(mediaId, positionMs) }

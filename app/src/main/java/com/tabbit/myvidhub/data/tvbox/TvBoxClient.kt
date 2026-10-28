@@ -393,18 +393,36 @@ class TvBoxClient(
      */
     suspend fun search(site: TvBoxSite, keyword: String, quick: Boolean = false): List<Vod> =
         withContext(Dispatchers.IO) {
-            if (site.type != 3) return@withContext emptyList()
-            val loader = spiderLoader ?: return@withContext emptyList()
-            if (configSpiderUrl.isBlank()) {
-                configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+            val kw = keyword.trim()
+            if (kw.isBlank()) return@withContext emptyList()
+            // type 1 CMS 站点：直接 ac=videolist&wd= 搜索，不走 spider，不触发 Go 代理初始化
+            if (site.type == 1) {
+                val json = runCatching {
+                    requestJson(
+                        site.api.ifBlank { base },
+                        mapOf("ac" to "videolist", "wd" to kw)
+                    )
+                }.getOrNull() ?: return@withContext emptyList()
+                return@withContext parseList(responseList(json), site.key, site.name)
             }
-            if (configSpiderUrl.isBlank()) return@withContext emptyList()
-            val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull()
-                ?: return@withContext emptyList()
-            val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: return@withContext emptyList()
-            val json = proxy.searchContent(keyword.trim(), quick)
-                ?: return@withContext emptyList()
-            CatVodResultParser.parseVodList(json, site.key, site.name)
+            // type 3 Guard 站点：只有 spider 已加载过（loaders 缓存命中）才尝试，
+            // 避免为了一次搜索触发完整的 Go 代理初始化（"正在初始化本地代理"弹窗）
+            if (site.type == 3) {
+                val loader = spiderLoader ?: return@withContext emptyList()
+                if (configSpiderUrl.isBlank()) {
+                    configSpiderUrl = runCatching { requestRaw(base) }.getOrNull()?.optString("spider").orEmpty()
+                }
+                if (configSpiderUrl.isBlank()) return@withContext emptyList()
+                // 关键：只查缓存，不调 ensureLoaded（那会触发 Go 代理初始化）
+                val loaderKey = loader.cachedLoaderKeyOrNull(configSpiderUrl)
+                    ?: return@withContext emptyList()
+                val proxy = loader.getSpider(loaderKey, site.api, site.ext)
+                    ?: return@withContext emptyList()
+                val json = runCatching { proxy.searchContent(kw, quick) }.getOrNull()
+                    ?: return@withContext emptyList()
+                return@withContext CatVodResultParser.parseVodList(json, site.key, site.name)
+            }
+            emptyList()
         }
 
     /** 不带参数的原始请求，用来判断 URL 类型（CMS 还是 TVBox 配置） */
