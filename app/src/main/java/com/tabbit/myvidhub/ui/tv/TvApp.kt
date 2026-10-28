@@ -35,6 +35,7 @@ internal sealed interface TvRoute {
     data object Search : TvRoute
     data class Detail(val mediaId: Long) : TvRoute
     data class Genre(val kind: String?, val genre: String?) : TvRoute
+    data class Category(val typeId: String, val typeName: String) : TvRoute
     data object Sources : TvRoute
     data object Settings : TvRoute
 }
@@ -68,6 +69,7 @@ fun TvApp(vm: LibraryViewModel) {
                     onSearch = { push(TvRoute.Search) },
                     onDetail = { id -> push(TvRoute.Detail(id)) },
                     onGenre = { kind, genre -> push(TvRoute.Genre(kind, genre)) },
+                    onCategory = { typeId, typeName -> push(TvRoute.Category(typeId, typeName)) },
                     onPlay = { item: MediaEntity ->
                         context.startActivity(TvPlayerActivity.intent(context, item.id))
                     },
@@ -86,6 +88,14 @@ fun TvApp(vm: LibraryViewModel) {
                     vm = vm,
                     initialKind = target.kind,
                     initialGenre = target.genre,
+                    onBack = pop,
+                    onDetail = { id -> push(TvRoute.Detail(id)) }
+                )
+
+                is TvRoute.Category -> TvCategoryScreen(
+                    vm = vm,
+                    typeId = target.typeId,
+                    typeName = target.typeName,
                     onBack = pop,
                     onDetail = { id -> push(TvRoute.Detail(id)) }
                 )

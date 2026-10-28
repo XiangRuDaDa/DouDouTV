@@ -66,7 +66,11 @@ fun TvPillButton(
     compact: Boolean = false,
     onClick: () -> Unit
 ) {
-    var focused by remember { mutableStateOf(false) }
+    // 焦点态统一由 interactionSource 驱动：clickable 与 focusable 共用同一个 source。
+    // 之前用 Modifier.onFocusChanged 里的 isFocused 判断，在「遥控器跨子树跳焦点」
+    // （Hero 播放键 → 顶栏同步键）时会出现逻辑焦点已移走、画面高亮却停在原按钮上的错位。
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "pill")
 
     Box(
@@ -82,13 +86,12 @@ fun TvPillButton(
                 }
             )
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
             .clickable(
-                interactionSource = remember { MutableInteractionSource() },
+                interactionSource = interaction,
                 indication = null,
                 onClick = onClick
             )
-            .focusable()
+            .focusable(interactionSource = interaction)
             .padding(
                 horizontal = if (compact) 18.dp else 26.dp,
                 vertical = if (compact) 8.dp else 12.dp

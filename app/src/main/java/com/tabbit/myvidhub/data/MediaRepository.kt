@@ -18,8 +18,9 @@ import com.tabbit.myvidhub.data.tmdb.TmdbClient
 import com.tabbit.myvidhub.core.Prefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -112,44 +113,118 @@ class MediaRepository(private val context: Context) {
      * 并发调 Guard.searchContent()。返回的 Vod 不入库，直接转临时 MediaEntity 展示；
      * 命中会缓存在内存里，用户点进详情时再落库换成真实 id。
      * 再过滤一遍 —— 标题必须包含整串关键词（或拼音首字母包含），而不是按单字命中。
+     *
+     * 流式返回：哪个站点先搜完，[onPartial] 就先把当前已命中结果抛给 UI 上屏，
+     * 不等慢站；所有站点共用一个 [SEARCH_DEADLINE_MS] 截止时间。
      */
-    suspend fun tvBoxRemoteSearch(keyword: String): List<MediaEntity> = withContext(Dispatchers.IO) {
+    suspend fun tvBoxRemoteSearch(
+        keyword: String,
+        onPartial: (suspend (List<MediaEntity>) -> Unit)? = null
+    ): List<MediaEntity> = withContext(Dispatchers.IO) {
         val kw = keyword.trim()
         if (kw.isBlank()) return@withContext emptyList()
         remoteHits.clear()
 
+        // 同一关键词的结果直接走内存缓存（重复搜索、从详情返回再搜都不再打网络）
+        val cacheKey = kw.lowercase()
+        val cached = synchronized(searchCache) { searchCache[cacheKey] }
+        if (cached != null) return@withContext toRemoteEntities(cached)
+
         val tvboxSources = enabledSources().filter { it.kind == SourceKind.TVBOX }
         if (tvboxSources.isEmpty()) return@withContext emptyList()
 
-        // 所有 (source, site) 对并发搜索（type=1 CMS 直接 HTTP、type=3 Guard 仅 spider 已加载时尝试）
-        // 单站只取前 REMOTE_RESULT_LIMIT 条 + quick 搜索，避免为了一次键入把整站结果全拉回来
+        val lower = kw.lowercase()
+        // 同一条命中在同一轮搜索里始终用同一个负 id，流式追加时 UI 的 key 不会跳变
+        val idByKey = HashMap<String, Long>()
+        val collected = LinkedHashMap<String, Pair<TvBoxClient.Vod, SourceEntity>>()
+
+        // 完整关键词过滤 + 相关性排序，生成当前已命中集合的快照
+        fun snapshot(): List<MediaEntity> = collected.values
+            .filter { (vod, _) ->
+                vod.name.lowercase().contains(lower) || vod.name.toPinyinInitials().contains(lower)
+            }
+            .sortedByDescending { (vod, _) -> searchScore(vod.name, lower) }
+            .take(REMOTE_RESULT_LIMIT)
+            .map { (vod, source) ->
+                val key = "${source.id}:${vod.siteKey}:${vod.vodId}"
+                val id = idByKey.getOrPut(key) { -(idByKey.size + 1).toLong() }
+                remoteHits[id] = RemoteHit(source, vod)
+                MediaEntity(
+                    id = id,
+                    sourceId = 0L,
+                    uri = "",
+                    remoteId = "remote:${source.id}:${vod.siteKey}:${vod.vodId}",
+                    title = vod.name,
+                    kind = MediaKind.MOVIE,
+                    year = vod.year,
+                    posterUrl = vod.pic,
+                    genres = vod.typeName,
+                    overview = vod.content,
+                    sourceName = source.name,
+                    // 远程结果也计算拼音（方便再搜）
+                    pinyinInitials = vod.name.toPinyinInitials()
+                )
+            }
+
+        // 每个 (source, site) 一个子协程，谁先搜完谁先投递到 Channel：
+        // 快的站点几百毫秒就能出结果，不再被慢站点拖住。
+        val batches = Channel<List<Pair<TvBoxClient.Vod, SourceEntity>>>(Channel.UNLIMITED)
         val jobs = tvboxSources.flatMap { source ->
             runCatching {
                 val client = TvBoxClient(source.location, context)
                 client.availableSites().map { site ->
-                    async {
-                        withTimeoutOrNull(SEARCH_TIMEOUT_MS) {
-                            runCatching { client.search(site, kw, quick = true) }
-                                .getOrDefault(emptyList())
-                                .take(REMOTE_RESULT_LIMIT)
-                                .map { it to source }
-                        } ?: emptyList()
+                    launch {
+                        val hits = runCatching { client.search(site, kw, quick = true) }
+                            .getOrDefault(emptyList())
+                            .take(REMOTE_RESULT_LIMIT)
+                            .map { it to source }
+                        runCatching { batches.send(hits) }
                     }
                 }
             }.getOrDefault(emptyList())
         }
-        val flat = jobs.awaitAll().flatten()
 
-        // 去重（同一影片可能被多个线路搜到）
-        val dedup = flat.distinctBy { (vod, _) -> vod.vodId + vod.siteKey }
-
-        // 完整关键词过滤：标题必须包含整串片名，避免「兰香如故」混进「如故」
-        val lower = kw.lowercase()
-        val matched = dedup.filter { (vod, _) ->
-            vod.name.lowercase().contains(lower) || vod.name.toPinyinInitials().contains(lower)
+        val deadline = System.currentTimeMillis() + SEARCH_DEADLINE_MS
+        while (true) {
+            val remain = deadline - System.currentTimeMillis()
+            if (remain <= 0) break
+            val batch = withTimeoutOrNull(remain) { batches.receive() } ?: break
+            var added = false
+            for ((vod, source) in batch) {
+                val key = "${source.id}:${vod.siteKey}:${vod.vodId}"
+                if (!collected.containsKey(key)) {
+                    collected[key] = vod to source
+                    added = true
+                }
+            }
+            if (added) {
+                val partial = snapshot()
+                if (partial.isNotEmpty()) onPartial?.invoke(partial)
+            }
         }
+        // 截止后仍在跑的站点要显式取消 —— withContext 返回前会等所有子协程结束
+        jobs.forEach { if (it.isActive) it.cancel() }
+        batches.close()
 
-        matched.take(REMOTE_RESULT_LIMIT).mapIndexed { index, (vod, source) ->
+        val matched = collected.values.toList()
+        synchronized(searchCache) { searchCache[cacheKey] = matched }
+        snapshot()
+    }
+
+    /** 相关性打分：标题完全一致 3 分、包含关键词 2 分、拼音首字母包含 1 分、其他 0 分 */
+    private fun searchScore(title: String, lowerKeyword: String): Int {
+        val lower = title.lowercase()
+        return when {
+            lower == lowerKeyword -> 3
+            lower.contains(lowerKeyword) -> 2
+            title.toPinyinInitials().contains(lowerKeyword) -> 1
+            else -> 0
+        }
+    }
+
+    /** 原始命中 → 临时 MediaEntity（负 id），并登记到 remoteHits 供详情页落库 */
+    private fun toRemoteEntities(hits: List<Pair<TvBoxClient.Vod, SourceEntity>>): List<MediaEntity> =
+        hits.mapIndexed { index, (vod, source) ->
             val id = -(index + 1).toLong()  // 负数 id = 远程临时结果
             remoteHits[id] = RemoteHit(source, vod)
             MediaEntity(
@@ -168,7 +243,6 @@ class MediaRepository(private val context: Context) {
                 pinyinInitials = vod.name.toPinyinInitials()
             )
         }
-    }
     /**
      * 把远程临时结果落库，返回真实 DB id。
      *
@@ -188,6 +262,17 @@ class MediaRepository(private val context: Context) {
 
     /** 远程临时结果缓存：负 id → 原始站点 + Vod，点进详情时据此落库 */
     private val remoteHits = java.util.concurrent.ConcurrentHashMap<Long, RemoteHit>()
+
+    /**
+     * 远程搜索结果缓存：关键词（小写归一）→ 原始命中，LRU 最多 16 个关键词。
+     * 命中缓存时直接重建临时结果，不再发起一轮网络请求。
+     */
+    private val searchCache = object :
+        java.util.LinkedHashMap<String, List<Pair<TvBoxClient.Vod, SourceEntity>>>(16, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, List<Pair<TvBoxClient.Vod, SourceEntity>>>
+        ) = size > 16
+    }
 
     suspend fun setFavorite(id: Long, favorite: Boolean) = mediaDao.setFavorite(id, favorite)
 
@@ -678,7 +763,7 @@ class MediaRepository(private val context: Context) {
         /** 远程搜索总条数上限：搜索结果只看前 20 条，拉全部既慢又刷屏 */
         const val REMOTE_RESULT_LIMIT = 20
 
-        /** 单站搜索超时（毫秒）：慢线路直接放弃，别拖住整次搜索 */
-        const val SEARCH_TIMEOUT_MS = 4000L
+        /** 远程搜索整批截止时间（毫秒）：所有站点并发搜索，最多总共等这么久 */
+        const val SEARCH_DEADLINE_MS = 5000L
     }
 }

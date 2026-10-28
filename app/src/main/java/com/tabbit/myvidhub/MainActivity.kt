@@ -1,6 +1,7 @@
 package com.tabbit.myvidhub
 
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.remember
@@ -39,5 +40,37 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 诊断日志：偶发「点搜索结果后直接回到桌面」时，用来确认是谁主动结束了本 Activity。
+     * 正常业务里没有任何地方调用 finish()，如果真的被调用，这里的堆栈能直接指出调用方。
+     */
+    override fun finish() {
+        Log.e("MyVidHubNav", "MainActivity.finish() 被调用\n" + Log.getStackTraceString(Throwable()))
+        super.finish()
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        Log.d("MyVidHubNav", "onUserLeaveHint（用户按了 Home / 切换了应用）")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        Log.d("MyVidHubNav", "onPause isFinishing=$isFinishing")
+    }
+
+    override fun onStop() {
+        super.onStop()
+        Log.d("MyVidHubNav", "onStop isFinishing=$isFinishing")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Log.d(
+            "MyVidHubNav",
+            "onDestroy isFinishing=$isFinishing isChangingConfigurations=$isChangingConfigurations"
+        )
     }
 }

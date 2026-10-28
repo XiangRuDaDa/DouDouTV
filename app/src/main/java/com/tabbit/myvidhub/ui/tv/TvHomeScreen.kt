@@ -44,10 +44,13 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.focusRequester
@@ -60,6 +63,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -73,8 +78,10 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 电视端首页（Netflix 式横版结构，针对遥控器与十英尺观看距离设计）。
@@ -96,6 +103,7 @@ fun TvHomeScreen(
     onSearch: () -> Unit,
     onDetail: (Long) -> Unit,
     onGenre: (kind: String?, genre: String?) -> Unit,
+    onCategory: (typeId: String, typeName: String) -> Unit,
     onPlay: (MediaEntity) -> Unit,
     onSources: () -> Unit,
     onSettings: () -> Unit
@@ -135,14 +143,25 @@ fun TvHomeScreen(
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
 
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     // 滚动距离驱动顶栏透明度 —— 注意：**不要用 animateFloatAsState + 直接读 listState**（那会让 LazyColumn 每次
     // scroll 都触发整个 Box 重组）。把计算延后到 TvTopBar 内部 graphicsLayer 的 draw phase 执行：
     val configuration = LocalConfiguration.current
-    val heroCollapseDistPx = (configuration.screenHeightDp * 0.40f).toInt().coerceAtLeast(1)
+    val density = LocalDensity.current
+    // 顶栏淡出所需滚动距离 ≈ 屏幕高度的 16%（dp → px 换算后再比较）
+    val heroCollapseDistPx = with(density) {
+        (configuration.screenHeightDp * 0.16f).dp.roundToPx()
+    }.coerceAtLeast(1)
+    // 顶栏只在首屏（Hero 仍可见）时出现：一旦往下滚就完全淡出，不占独立一行、也不常驻。
     val alphaProvider: () -> Float = {
-        val offset = listState.firstVisibleItemScrollOffset.toFloat()
-        (1f - offset / heroCollapseDistPx).coerceIn(0.45f, 1f)  // 最小 0.45f 保底可点击
+        if (listState.firstVisibleItemIndex > 0) 0f
+        else (1f - listState.firstVisibleItemScrollOffset.toFloat() / heroCollapseDistPx).coerceIn(0f, 1f)
     }
+
+    // 动态分区（kind + 题材）是纯 CPU 计算：按 library 缓存一次，
+    // 避免每次重组（轮播换图、焦点变化）都把几千条条目重新分组拆题材 —— 电视上这是掉帧的主要来源之一。
+    val gallerySections = remember(filteredLibrary) { buildTvGallerySections(filteredLibrary) }
 
     // 来源/站点（线路）选择器数据
     // 当前生效的来源：手动选择的来源（已删除则回退），未选择时默认第一个配置的来源
@@ -162,6 +181,14 @@ fun TvHomeScreen(
     var heroFocused by remember { mutableStateOf(false) }
     var topBarFocused by remember { mutableStateOf(false) }
 
+    // 顶栏不再常驻：滚出首屏后会完全淡出。一旦焦点落到顶栏（遥控器按上键），
+    // 把列表回滚到顶部，让顶栏边淡入边进入视野，避免「焦点在看不见的按钮上」。
+    val revealTopBar: () -> Unit = {
+        if (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 8) {
+            scope.launch { listState.animateScrollToItem(0) }
+        }
+    }
+
     LaunchedEffect(Unit) { runCatching { heroPlayFocus.requestFocus() } }
 
     // 最外层统一焦点导航：
@@ -175,7 +202,20 @@ fun TvHomeScreen(
                 if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val keyCode = event.nativeKeyEvent.keyCode
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP && heroFocused) {
-                    syncButtonFocus.requestFocus()
+                    revealTopBar()
+                    // 顶栏与 Hero 不在同一个焦点子树里，这里显式把焦点交给「同步」按钮。
+                    // 请求后校验一帧：若焦点并没有真的进顶栏（requester 暂时不可用、同步中按钮被隐藏等），
+                    // 退回默认的几何焦点搜索，保证画面高亮一定跟着焦点走，不会卡在播放键上。
+                    scope.launch {
+                        val handedOver = runCatching {
+                            syncButtonFocus.requestFocus()
+                            true
+                        }.getOrDefault(false)
+                        withFrameNanos { }
+                        if (!handedOver || !topBarFocused) {
+                            runCatching { focusManager.moveFocus(FocusDirection.Up) }
+                        }
+                    }
                     true
                 } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && topBarFocused) {
                     // 只有 Hero 还可见（未滚出视口）才跳 Hero；否则让 LazyColumn 默认处理
@@ -189,9 +229,9 @@ fun TvHomeScreen(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            // top=64dp 避让悬浮 TvTopBar（padding top 18dp + 按钮 44dp），
-            // 让 Hero item 从 y=64dp 开始，图片顶部不被遮挡，播放按钮有正常呼吸空间
-            contentPadding = PaddingValues(top = 64.dp, bottom = 32.dp)
+            // 不再给顶栏预留 64dp：Hero 从屏幕最顶端开始铺满，
+            // 顶栏透明地悬浮在画面上，不会出现「顶栏单独占一行、海报被挤下去」的黑条。
+            contentPadding = PaddingValues(bottom = 32.dp)
         ) {
             // ---------- 主视觉（置顶，TvTopBar 悬浮其上） ----------
             if (hero != null) {
@@ -233,82 +273,39 @@ fun TvHomeScreen(
                 item { TvContinueRow(items = continueItems, onDetail = onDetail, onPlay = onPlay) }
             }
 
-            // ---------- 站点分类（动态分区入口）：TVBox 线路 homeContent 返回的 class ----------
+            // ---------- TVBox 动态分类预览 sections ----------
+            // 电视端去掉了「分类 chip 横条」（单独占一行、把海报往下挤），
+            // 分类内容直接以海报行呈现，遥控器上下就是换分类。
             val homeCategories = vm.homeCategories
-            if (homeCategories.isNotEmpty()) {
-                item {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(homeCategories, key = { it.typeId }) { cat ->
-                            TvCategoryChip(
-                                name = cat.typeName,
-                                selected = vm.activeCategoryId == cat.typeId,
-                                onClick = { vm.selectHomeCategory(cat.typeId) }
-                            )
-                        }
-                    }
-                }
-            }
-
-            // ---------- 展开的站点分类分区：点分类后展示该分类内容（categoryContent） ----------
-            val activeCategory = homeCategories.firstOrNull { it.typeId == vm.activeCategoryId }
-            if (activeCategory != null) {
-                val catItems = vm.categoryVods[activeCategory.typeId].orEmpty()
-                if (vm.categoryLoading && catItems.isEmpty()) {
-                    item {
-                        Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
-                        }
-                    }
-                } else if (catItems.isNotEmpty()) {
-                    item { TvSectionTitle(activeCategory.typeName) {} }
-                    item { TvPosterRow(items = catItems, onDetail = onDetail) }
-                } else if (vm.categoryError != null) {
-                    item {
-                        Text(
-                            vm.categoryError.orEmpty(),
-                            color = AppColors.TextTertiary,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp)
-                        )
-                    }
-                }
-            }
-
-            // ---------- TVBox 动态分类预览 sections（跟手机端一致） ----------
-            // 每个分类首次进入 composition 时懒加载前 12 条；已展开为 activeCategory 的不再重复展示
             homeCategories.take(7).forEach { cat ->
-                val catItems = vm.categoryVods[cat.typeId].orEmpty()
-                val isLoading = vm.categoryPreviewLoading[cat.typeId] ?: false
-                val isActive = cat.typeId == vm.activeCategoryId
-                if (isActive) return@forEach  // 已在上面完整展示过
-
                 item(key = "cat_ensure_${cat.typeId}") {
                     LaunchedEffect(cat.typeId) { vm.ensureCategoryPreview(cat.typeId) }
                 }
                 item(key = "cat_title_${cat.typeId}") {
-                    TvSectionTitle(cat.typeName) {}
+                    // 「查看全部」挂在标题右侧，和手机端 MoreLink 一致（有内容时才出现）
+                    TvCategoryTitle(
+                        typeId = cat.typeId,
+                        typeName = cat.typeName,
+                        vm = vm,
+                        onCategory = onCategory
+                    )
                 }
                 item(key = "cat_row_${cat.typeId}") {
-                    when {
-                        isLoading && catItems.isEmpty() -> {
-                            Box(Modifier.fillMaxWidth().height(140.dp), contentAlignment = Alignment.Center) {
-                                CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
-                            }
-                        }
-                        catItems.isNotEmpty() -> TvPosterRow(items = catItems.take(TV_LAZY_TAKE), onDetail = onDetail)
-                    }
+                    // 分类数据（categoryVods / loading）在这个子组合里读取：
+                    // 某个分类加载完成只重组它自己那一行，不会把整个首页的 item 列表重建一遍。
+                    TvCategoryPreview(typeId = cat.typeId, vm = vm, onDetail = onDetail)
                 }
             }
 
             // ---------- 动态分区：根据 filteredLibrary 实际存在的 kind 渲染 ----------
-            DynamicTvGallerySections(
-                library = filteredLibrary,
-                onMore = onGenre,
-                onDetail = onDetail
-            )
+            gallerySections.forEach { section ->
+                item(key = "sec_${section.title}") {
+                    TvSectionTitle(section.title) { TvMoreButton { onGenre(section.kind, section.genre) } }
+                }
+                item(key = "sec_row_${section.title}") {
+                    TvPosterRow(items = section.items, onDetail = onDetail)
+                }
+            }
         }
 
         // ---------- 透明悬浮顶部入口条：SpaceBetween 布局；左来源链 + 右操作组 ----------
@@ -328,7 +325,10 @@ fun TvHomeScreen(
             siteName = displaySiteName,
             scanning = vm.scanning,
             syncFocusRequester = syncButtonFocus,
-            onAnyButtonFocusChanged = { topBarFocused = it },
+            onAnyButtonFocusChanged = { focused ->
+                topBarFocused = focused
+                if (focused) revealTopBar()
+            },
             onSearch = onSearch,
             onHomeSource = { showSourceDialog = true },
             onHomeSite = if (showSiteButton) ({ showSiteDialog = true }) else null,
@@ -431,17 +431,17 @@ private fun TvTopBar(
                 Text("同步中…", color = AppColors.TextSecondary, style = MaterialTheme.typography.labelMedium)
             } else {
                 TvPillButton(
-                    "↻ 同步", primary = false, compact = true, onClick = onRefresh,
+                    "同步", primary = false, compact = true, onClick = onRefresh,
                     modifier = Modifier
                         .focusRequester(syncFocusRequester)
                         .onFocusChanged(markTopBarFocus)
                 )
             }
-            TvPillButton("🔍 搜索", primary = false, compact = true, onClick = onSearch,
+            TvPillButton("搜索", primary = false, compact = true, onClick = onSearch,
                 modifier = Modifier.onFocusChanged(markTopBarFocus))
-            TvPillButton("📺 来源", primary = false, compact = true, onClick = onSources,
+            TvPillButton("来源", primary = false, compact = true, onClick = onSources,
                 modifier = Modifier.onFocusChanged(markTopBarFocus))
-            TvPillButton("⚙ 设置", primary = false, compact = true, onClick = onSettings,
+            TvPillButton("设置", primary = false, compact = true, onClick = onSettings,
                 modifier = Modifier.onFocusChanged(markTopBarFocus))
         }
     }
@@ -504,53 +504,8 @@ private fun TvSourceChainPill(
     }
 }
 
-/** 电视端分类 chip（站点动态分区入口）：聚焦放大 + 白边，遥控器左右切换 */
-@Composable
-private fun TvCategoryChip(
-    name: String,
-    selected: Boolean,
-    onClick: () -> Unit
-) {
-    var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "tv_cat")
-    Box(
-        Modifier
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(10.dp))
-            .background(
-                when {
-                    focused -> Color.White
-                    selected -> AppColors.Brand
-                    else -> AppColors.SurfaceHi
-                }
-            )
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .focusable()
-            .padding(horizontal = 18.dp, vertical = 12.dp)
-    ) {
-        Text(
-            name,
-            color = when {
-                focused -> Color.Black
-                selected -> Color.White
-                else -> AppColors.TextSecondary
-            },
-            style = MaterialTheme.typography.bodyLarge,
-            fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
 /** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下。
- *  顶部 64dp padding 避让悬浮 TvTopBar，防止 Hero 播放按钮被遮盖。 */
+ *  Hero 从屏幕最顶端开始铺满，顶栏透明悬浮其上。 */
 @Composable
 private fun TvHero(
     item: MediaEntity,
@@ -657,6 +612,51 @@ private fun TvHero(
                     )
                 }
             }
+        }
+    }
+}
+
+/** 单个 TVBox 分类的海报行（含加载态）。数据在这里读取，避免首页整体跟着重组。 */
+@Composable
+private fun TvCategoryPreview(
+    typeId: String,
+    vm: LibraryViewModel,
+    onDetail: (Long) -> Unit
+) {
+    val items = vm.categoryVods[typeId].orEmpty()
+    val loading = vm.categoryPreviewLoading[typeId] ?: false
+    when {
+        // 加载中 → 和手机端一致的 shimmer 骨架行（不再用转圈）
+        loading && items.isEmpty() -> TvShimmerRow()
+        items.isNotEmpty() -> TvPosterRow(items = items.take(TV_LAZY_TAKE), onDetail = onDetail)
+    }
+}
+
+/** 分类标题 +「查看全部」；条目还没回来时先不挂按钮，避免点进空列表 */
+@Composable
+private fun TvCategoryTitle(
+    typeId: String,
+    typeName: String,
+    vm: LibraryViewModel,
+    onCategory: (String, String) -> Unit
+) {
+    val hasItems = vm.categoryVods[typeId]?.isNotEmpty() == true
+    TvSectionTitle(typeName) {
+        if (hasItems) TvMoreButton { onCategory(typeId, typeName) }
+    }
+}
+
+/** 骨架占位行：宽度与电视海报卡一致，横向铺 6 张 */
+@Composable
+private fun TvShimmerRow(count: Int = 6) {
+    val w = Prefs.posterSize.tvDp.dp
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(18.dp)
+    ) {
+        items(count) {
+            Box(Modifier.width(w)) { ShimmerCard() }
         }
     }
 }
@@ -772,12 +772,17 @@ private const val TV_LAZY_TAKE = 12
 private const val TV_MIN_GENRE_ITEMS = 2
 private const val TV_MAX_GENRE_SECTIONS = 4
 
-private fun LazyListScope.DynamicTvGallerySections(
-    library: List<MediaEntity>,
-    onMore: (kind: String?, genre: String?) -> Unit,
-    onDetail: (Long) -> Unit
-) {
-    if (library.isEmpty()) return
+/** 首页动态分区：标题 + 条目 + 「查看全部」跳转参数（kind 或 genre 二选一） */
+internal data class TvGallerySection(
+    val title: String,
+    val items: List<MediaEntity>,
+    val kind: String? = null,
+    val genre: String? = null
+)
+
+private fun buildTvGallerySections(library: List<MediaEntity>): List<TvGallerySection> {
+    if (library.isEmpty()) return emptyList()
+    val result = mutableListOf<TvGallerySection>()
 
     // kind 基础分区
     val kindBlocks = library
@@ -814,13 +819,12 @@ private fun LazyListScope.DynamicTvGallerySections(
             MediaKind.SERIES -> "剧集"
             else -> kind
         }
-        item { TvSectionTitle(title) { TvMoreButton { onMore(kind, null) } } }
-        item { TvPosterRow(items = items.take(TV_LAZY_TAKE), onDetail = onDetail) }
+        result += TvGallerySection(title, items.take(TV_LAZY_TAKE), kind = kind)
     }
     for ((genre, items) in genreBlocks) {
-        item { TvSectionTitle(genre) { TvMoreButton { onMore(null, genre) } } }
-        item { TvPosterRow(items = items.take(TV_LAZY_TAKE), onDetail = onDetail) }
+        result += TvGallerySection(genre, items.take(TV_LAZY_TAKE), genre = genre)
     }
+    return result
 }
 
 /** 电视端弹窗选项行：可聚焦，聚焦/选中态高亮，供遥控器操作 */

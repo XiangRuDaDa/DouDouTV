@@ -17,6 +17,21 @@ class MyVidHubApp : Application(), ImageLoaderFactory {
         instance = this
         Prefs.init(this)
 
+        // 记录未捕获异常：MIUI 有时会吞掉 crash 缓冲区日志，
+        // 这里额外写一份到应用私有目录，方便排查"闪退但没有崩溃日志"的问题。
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            runCatching {
+                Log.e("MyVidHubCrash", "uncaught on ${thread.name}", error)
+                val file = java.io.File(filesDir, "crash_last.txt")
+                file.writeText(
+                    "time=${System.currentTimeMillis()}\nthread=${thread.name}\n" +
+                        Log.getStackTraceString(error)
+                )
+            }
+            previous?.uncaughtException(thread, error)
+        }
+
         // 启动时判定刮削方案：总开关开启且令牌非空才走 TMDB，否则沿用原有方案。
         // 这里只做本地判断，不发网络请求，所以不会拖慢冷启动。
         val engine = ScrapeStrategy.refresh()

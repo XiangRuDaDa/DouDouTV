@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -509,17 +510,20 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         searchMedia(keyword).groupBy { it.sourceName.ifBlank { "未知来源" } }
 
     /**
-     * 合并搜索：本地 DB + TVBox 远程（并发执行）。
-     * 远程结果 id 为负数，点进去时走 TVBox 详情页；本地结果 id 正数，走已有详情页。
+     * 远程搜索：TVBox 各站点并发搜索，谁先搜完先把结果回调给 UI（[onPartial]），
+     * 全部站点共用一个 5 秒截止时间，命中关键词缓存时立即返回。
+     * 结果 id 为负数，点进去时走 TVBox 详情页；本地结果 id 正数，走已有详情页。
      */
-    suspend fun searchMerged(keyword: String): List<MediaEntity> {
-        val local = searchMedia(keyword)
-        val remote = runCatching { repo.tvBoxRemoteSearch(keyword) }.getOrDefault(emptyList())
-        // 远程结果不要跟本地重复（同一个 vodId 可能本地也有了）
-        val localRemoteIds = local.map { it.remoteId }.toSet()
-        val dedupRemote = remote.filter { it.remoteId !in localRemoteIds }
-        return local + dedupRemote
-    }
+    suspend fun searchRemote(
+        keyword: String,
+        onPartial: (List<MediaEntity>) -> Unit = {}
+    ): List<MediaEntity> =
+        runCatching {
+            repo.tvBoxRemoteSearch(keyword) { partial ->
+                // 回调来自 IO 线程，切回主线程再改 Compose 状态
+                withContext(Dispatchers.Main.immediate) { onPartial(partial) }
+            }
+        }.getOrDefault(emptyList())
 
     /** 分类浏览页：按类型/题材分页查询 */
     suspend fun browseGenre(kind: String?, genre: String?, limit: Int, offset: Int): List<MediaEntity> =

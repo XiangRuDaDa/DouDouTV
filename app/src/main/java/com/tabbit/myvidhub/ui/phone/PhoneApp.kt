@@ -97,20 +97,28 @@ fun PhoneApp(vm: LibraryViewModel) {
 
     // 弹出栈顶 = 返回上一个页面；已经在根时系统会自己拦截
     val goBack: () -> Unit = {
+        android.util.Log.d("MyVidHubNav", "goBack stack=${navStack.size} top=${navStack.last()}")
         if (navStack.size > 1) {
             // 真正离开搜索页才清空搜索状态（详情 → 搜索属于栈内返回，不清）
             if (navStack.last() is PhoneRoute.Search) searchState.clear()
             navStack = navStack.dropLast(1)
         }
     }
-    val push: (PhoneRoute) -> Unit = { r -> navStack = navStack + r }
+    val push: (PhoneRoute) -> Unit = { r ->
+        android.util.Log.d("MyVidHubNav", "push $r stack=${navStack.size + 1}")
+        navStack = navStack + r
+    }
     val resetTo: (PhoneRoute) -> Unit = { r ->
         // 切底栏 = 离开当前页面栈，搜索状态一并清空
+        android.util.Log.d("MyVidHubNav", "resetTo $r")
         searchState.clear()
         navStack = listOf(r)
     }
 
-    BackHandler(enabled = navStack.size > 1) { goBack() }
+    BackHandler(enabled = navStack.size > 1) {
+        android.util.Log.d("MyVidHubNav", "system back handled, stack=${navStack.size}")
+        goBack()
+    }
 
     val currentTab = when (navStack.last()) {
         is PhoneRoute.Home, is PhoneRoute.Detail, is PhoneRoute.Search, is PhoneRoute.Genre, is PhoneRoute.Category -> PhoneTab.HOME

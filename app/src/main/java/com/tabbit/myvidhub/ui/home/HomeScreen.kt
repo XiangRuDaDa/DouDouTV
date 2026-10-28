@@ -1000,14 +1000,35 @@ fun SearchScreen(
     }
 
     // 实际搜索：只有 submittedKeyword 变化（回车/点按钮触发）才执行；
-    // 从详情返回时关键字没变，直接复用已有结果，不重复搜索
+    // 从详情返回时关键字没变，直接复用已有结果，不重复搜索。
+    // 本地结果先上屏（Room，几十毫秒），远程 TVBox 结果按站点流式追加：
+    // 哪个站点先搜完就先把它的命中追加到列表，不再整批等到最后。
     LaunchedEffect(state.submittedKeyword) {
         val q = state.submittedKeyword.trim()
         if (q.isEmpty() || q == state.searchedKeyword) return@LaunchedEffect
         state.searching = true
-        state.results = runCatching { vm.searchMerged(q) }.getOrDefault(emptyList())
-        state.grouped = state.results.groupBy { it.sourceName.ifBlank { "未知来源" } }
+        val local = runCatching { vm.searchMedia(q) }.getOrDefault(emptyList())
+        state.results = local
+        state.grouped = local.groupBy { it.sourceName.ifBlank { "未知来源" } }
         state.searchedKeyword = q
+
+        /** 把一批远程结果并进当前列表（按 remoteId 去重） */
+        fun appendRemote(batch: List<MediaEntity>) {
+            val seen = state.results.map { it.remoteId }.toSet()
+            val merged = state.results + batch.filter { it.remoteId !in seen }
+            state.results = merged
+            state.grouped = merged.groupBy { it.sourceName.ifBlank { "未知来源" } }
+        }
+
+        val remote = vm.searchRemote(q) { partial ->
+            // 远程返回前用户可能已经发起了下一次搜索，旧结果不能覆盖当前列表
+            if (state.submittedKeyword != q) return@searchRemote
+            appendRemote(partial)
+            // 首批结果已经上屏，就不再让用户对着「搜索中」干等
+            state.searching = false
+        }
+        if (state.submittedKeyword != q) return@LaunchedEffect
+        appendRemote(remote)
         state.searching = false
     }
 
@@ -1171,7 +1192,16 @@ fun SearchScreen(
                             items(itemsOfSource, key = { "srch_${it.id}" }) { item ->
                                 val cardW = cardWidthOf(isTv)
                                 Box(Modifier.width(cardW)) {
-                                    PosterCard(item = item, onClick = { onOpenDetail(item.id) })
+                                    PosterCard(
+                                        item = item,
+                                        onClick = {
+                                            android.util.Log.d(
+                                                "MyVidHubNav",
+                                                "search result click id=${item.id} title=${item.title} remoteId=${item.remoteId}"
+                                            )
+                                            onOpenDetail(item.id)
+                                        }
+                                    )
                                 }
                             }
                         }

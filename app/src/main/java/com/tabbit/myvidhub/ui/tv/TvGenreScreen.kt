@@ -25,18 +25,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.launch
 
@@ -201,6 +205,139 @@ fun TvGenreScreen(
                             )
                             Spacer(Modifier.width(12.dp))
                             Text("加载更多…", color = AppColors.TextTertiary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 电视端 TVBox 分类页（首页分类行右上角「查看全部」进入）。
+ *
+ * 和手机端 TvBoxCategoryScreen 的分页语义一致：page 从 1 开始，
+ * 滚到底部自动取下一页，返回空页即视为到底。
+ * 差异只有排版：6 列大卡网格 + 首屏 shimmer 骨架（电视上不用转圈，避免整屏空转）。
+ */
+@Composable
+fun TvCategoryScreen(
+    vm: LibraryViewModel,
+    typeId: String,
+    typeName: String,
+    onBack: () -> Unit,
+    onDetail: (Long) -> Unit
+) {
+    var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+    var page by remember { mutableIntStateOf(1) }
+    var loading by remember { mutableStateOf(true) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var exhausted by remember { mutableStateOf(false) }
+
+    val gridState = rememberLazyGridState()
+    val firstFocus = remember { FocusRequester() }
+
+    LaunchedEffect(typeId) {
+        loading = true
+        page = 1
+        exhausted = false
+        items = runCatching { vm.tvBoxCategoryPage(typeId, page) }.getOrDefault(emptyList())
+        page = 2
+        loading = false
+    }
+
+    // 首屏数据到位后把焦点交给第一张卡片，遥控器立刻可用
+    LaunchedEffect(items.isNotEmpty()) {
+        if (items.isNotEmpty()) runCatching { firstFocus.requestFocus() }
+    }
+
+    // 接近底部自动翻页
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val total = gridState.layoutInfo.totalItemsCount
+            total > 0 && last >= total - 12
+        }
+    }
+    LaunchedEffect(shouldLoadMore, loading, loadingMore, exhausted) {
+        if (!shouldLoadMore || loading || loadingMore || exhausted) return@LaunchedEffect
+        loadingMore = true
+        val more = runCatching { vm.tvBoxCategoryPage(typeId, page) }.getOrDefault(emptyList())
+        if (more.isEmpty()) {
+            exhausted = true
+        } else {
+            items = items + more.filterNot { next -> items.any { it.id == next.id } }
+            page += 1
+        }
+        loadingMore = false
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(AppColors.Bg)
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 20.dp, top = 20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                typeName,
+                color = AppColors.TextPrimary,
+                style = MaterialTheme.typography.headlineMedium
+            )
+            Spacer(Modifier.width(16.dp))
+            if (!loading) {
+                Text(
+                    "${items.size} 个条目",
+                    color = AppColors.TextTertiary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+
+        when {
+            loading -> LazyVerticalGrid(
+                columns = GridCells.Fixed(6),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(18) { ShimmerCard() }
+            }
+
+            items.isEmpty() -> TvEmptyState("这个分类下还没有内容", "换个线路，或先在来源里同步媒体库")
+
+            else -> LazyVerticalGrid(
+                state = gridState,
+                columns = GridCells.Fixed(6),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                items(items, key = { "tv_cat_${it.id}" }) { item ->
+                    TvPosterCard(
+                        item = item,
+                        onClick = { onDetail(item.id) },
+                        modifier = Modifier.then(
+                            if (item.id == items.first().id) Modifier.focusRequester(firstFocus) else Modifier
+                        )
+                    )
+                }
+                if (loadingMore) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(56.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("正在加载更多…", color = AppColors.TextTertiary)
                         }
                     }
                 }
