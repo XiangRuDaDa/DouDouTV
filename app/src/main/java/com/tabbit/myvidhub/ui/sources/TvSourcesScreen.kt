@@ -50,11 +50,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
@@ -869,21 +871,16 @@ private fun TvSourceFormPanel(
                             keyboardType = KeyboardType.Uri,
                             onValueChange = { location = it }
                         )
-                        if (kind == SourceKind.EMBY) {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = "支持 HTTPS 反向代理；局域网可用 http://192.168.x.x:8920",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TvText.Meta
-                            )
-                        } else {
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = "需填 TVBox 配置 JSON 地址（含 spider 与 type=3 站点）",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TvText.Meta
-                            )
-                        }
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            text = if (kind == SourceKind.EMBY) {
+                                "支持 HTTPS 反向代理；局域网可用 http://192.168.x.x:8920"
+                            } else {
+                                "需填 TVBox 配置 JSON 地址（含 spider 与 type=3 站点）"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TvText.Meta
+                        )
                     }
 
                     // Emby 账号 + 密码
@@ -928,26 +925,38 @@ private fun TvSourceFormPanel(
                     }
                 }
 
-                // 按钮区
+                // 按钮区：只留一条顶部弱分隔线。
+                // 之前这里画的是整圈 1dp 直角矩形（还比卡片多缩了 48/28dp），
+                // 胶囊自己聚焦时又有一圈 2dp 白边，两套边框叠在一起就是「按钮外面又套一个框」；
+                // 而且那个矩形 0 圆角和卡片 20dp 圆角本来也对不齐。
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 48.dp, vertical = 28.dp)
-                        .background(AppColors.Surface)
-                        .border(1.dp, AppColors.SurfaceHi, RoundedCornerShape(0.dp))
-                        .padding(top = 20.dp),
+                        .drawBehind {
+                            val inset = 36.dp.toPx()
+                            drawLine(
+                                color = TvText.Hairline,
+                                start = Offset(inset, 0f),
+                                end = Offset(size.width - inset, 0f),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+                        // 横向内边距跟表单区（contentPadding 36dp）取同一个值，按钮右边缘才对得上输入框
+                        .padding(horizontal = 36.dp, vertical = 20.dp),
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TvPillButton(
                         text = "取消",
                         primary = false,
+                        size = TvButtonSize.Lg,
                         onClick = onDismiss
                     )
                     Spacer(Modifier.width(16.dp))
                     TvPillButton(
                         text = if (initial == null) "添加来源" else "保存",
                         primary = true,
+                        size = TvButtonSize.Lg,
                         onClick = {
                             val trimmedName = name.trim()
                             val trimmedLoc = location.trim()
@@ -1117,19 +1126,27 @@ private fun TvDeleteConfirmDialog(
                     }
                 }
 
-                // 按钮区
+                // 按钮区：和表单弹窗一样，只留一条顶部弱分隔线，不再给胶囊套一圈直角框
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 28.dp, vertical = 24.dp)
-                        .border(1.dp, AppColors.SurfaceHi, RoundedCornerShape(0.dp))
-                        .padding(top = 20.dp),
+                        .drawBehind {
+                            val inset = 28.dp.toPx()
+                            drawLine(
+                                color = TvText.Hairline,
+                                start = Offset(inset, 0f),
+                                end = Offset(size.width - inset, 0f),
+                                strokeWidth = 1.dp.toPx()
+                            )
+                        }
+                        .padding(horizontal = 28.dp, vertical = 20.dp),
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TvPillButton(
                         text = "取消",
                         primary = false,
+                        size = TvButtonSize.Lg,
                         modifier = Modifier.focusRequester(cancelRequester),
                         onClick = onDismiss
                     )
@@ -1158,7 +1175,8 @@ private fun TvDeleteConfirmDialog(
                                 indication = null,
                                 onClick = onConfirm
                             )
-                            .padding(horizontal = 32.dp, vertical = 14.dp)
+                            // 与左边「取消」那颗 TvButtonSize.Lg 同一套内边距，两颗按钮等高
+                            .padding(horizontal = 26.dp, vertical = 13.dp)
                     ) {
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
