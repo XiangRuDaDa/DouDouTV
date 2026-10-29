@@ -208,7 +208,8 @@ fun HomeScreen(
                     val isLoading = vm.categoryPreviewLoading[cat.typeId] ?: false
                     // 首次进入 composition 时懒加载前 LAZY_TAKE=10 条（不阻塞）
                     item(key = "cat_ensure_${cat.typeId}") {
-                        LaunchedEffect(cat.typeId) { vm.ensureCategoryPreview(cat.typeId) }
+                        // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行会一直是旧缓存
+                        LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
                     }
                     item {
                         SectionTitle(
@@ -355,8 +356,8 @@ fun HomeScreen(
                     color = Color.White
                 )
             } else {
-                IconButton(onClick = { vm.scanAll() }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "同步", tint = Color.White)
+                IconButton(onClick = { vm.refreshHome() }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "刷新当前来源", tint = Color.White)
                 }
             }
         }

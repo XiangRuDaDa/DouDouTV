@@ -289,7 +289,8 @@ fun TvHomeScreen(
             val homeCategories = vm.homeCategories
             homeCategories.take(7).forEach { cat ->
                 item(key = "cat_ensure_${cat.typeId}") {
-                    LaunchedEffect(cat.typeId) { vm.ensureCategoryPreview(cat.typeId) }
+                    // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行仍是旧缓存
+                    LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
                 }
                 item(key = "cat_title_${cat.typeId}") {
                     // 「查看全部」挂在标题右侧，和手机端 MoreLink 一致（有内容时才出现）
@@ -341,7 +342,7 @@ fun TvHomeScreen(
             onHomeSite = if (showSiteButton) ({ showSiteDialog = true }) else null,
             onSources = onSources,
             onSettings = onSettings,
-            onRefresh = { vm.scanAll() }
+            onRefresh = { vm.refreshHome() }
         )
 
         // ---------- 首页来源 / 线路（站点）选择弹窗 ----------
@@ -437,10 +438,10 @@ private fun TvTopBar(
             if (scanning) {
                 CircularProgressIndicator(color = AppColors.Brand, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("同步中…", color = AppColors.TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Text("刷新中…", color = AppColors.TextSecondary, style = MaterialTheme.typography.labelMedium)
             } else {
                 TvPillButton(
-                    "同步", primary = false, compact = true, onClick = onRefresh,
+                    "刷新", primary = false, compact = true, onClick = onRefresh,
                     modifier = Modifier
                         .focusRequester(syncFocusRequester)
                         .onFocusChanged(markTopBarFocus)

@@ -1,8 +1,9 @@
 # DouDouTV —— 安卓手机 + TV 双端视频播放器 v2.3
 
 自研的安卓个人影音客户端，**只对接两类来源：Emby 与 TVBox**。
-界面与交互形态参照 VidHub、Netflix 的成熟做法（沉浸式大图首页、海报墙、聚焦色背景、十英尺遥控器 UI），
-但代码为完全原创实现，基于公开的开源组件，不含任何对第三方商业应用的逆向或反编译产物。
+界面与交互形态参照 VidHub、Netflix 的成熟做法（沉浸式大图首页、海报墙、聚焦色背景、十英尺遥控器 UI）。
+代码为本项目原创实现，不含任何对第三方商业应用的逆向或反编译产物；TVBox 侧仅参考公开协议与
+开源项目（CatVod / TVBox 配置规范、FongMi/TV）的行为约定，未复制其源码，详见「十、参考项目与许可」。
 
 ---
 
@@ -417,8 +418,24 @@ spider 的首页列表（`homeContent`）**不含播放地址**，只有 `detail
 
 ---
 
-## 十、许可与合规
+## 十、参考项目与许可
+
+### 1. 协议与行为参考（只参考公开协议与行为，未复制源码）
+
+| 参考对象 | 参考内容 |
+|---|---|
+| CatVod / TVBox 配置规范 | `type=3` spider 站点、配置级 `spider` 包、`flags`、`searchable` / `quickSearch`，以及 `homeContent` / `categoryContent` / `searchContent` / `detailContent` / `playerContent` 的方法语义与返回 JSON（`list` / `class` / `parse` / `jx` / `header`） |
+| [FongMi/TV](https://github.com/FongMi/TV)（GPL-3.0） | 仅参考其 TVBox 侧的行为约定：直链也先走 `playerContent`、配置 `flags` 作为 `vipFlags`、`parse=1` 视为需要网页解析、远程搜索按 `searchable` / `quickSearch` 过滤。**未复制其代码**，本项目与其不存在源码派生关系 |
+| VidHub / Netflix | 交互与视觉形态参考（沉浸式大图首页、海报墙、继续观看、聚焦色背景、十英尺遥控器 UI），不涉及实现代码 |
+
+### 2. 开源依赖
+
+- AndroidX / Compose、Media3 / ExoPlayer、Room、Coil、Palette、Kotlin Coroutines（Apache-2.0）
+- OkHttp、Gson、Fastjson（Apache-2.0）
+- jsoup（MIT）、jpinyin（Apache-2.0）
+
+### 3. 其他
 
 - 本项目代码可自由使用、修改、分发
-- 依赖：Media3 (Apache-2.0)、OkHttp (Apache-2.0)、Room (Apache-2.0)、Coil (Apache-2.0)、Compose (Apache-2.0)、Palette (Apache-2.0)
+- spider 包由使用者自己的 TVBox 配置提供，本项目不内置任何片源
 - 请仅用于播放你拥有合法权利的内容；第三方接口的可用性与合法性由使用者自行判断

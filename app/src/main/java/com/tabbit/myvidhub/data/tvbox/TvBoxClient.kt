@@ -2,11 +2,18 @@ package com.tabbit.myvidhub.data.tvbox
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
@@ -76,7 +83,11 @@ class TvBoxClient(
         val key: String,
         val name: String,
         val api: String = "",
-        val ext: Any? = null
+        val ext: Any? = null,
+        /** 配置 searchable：1 参与搜索（缺省），0/2 不参与 */
+        val searchable: Boolean = true,
+        /** 配置 quickSearch：1 支持快速搜索（缺省），0 不支持 */
+        val quickSearch: Boolean = true
     )
 
     /**
@@ -90,7 +101,14 @@ class TvBoxClient(
         val categories: List<CatVodResultParser.ClassItem> = emptyList()
     )
 
-    private data class SpiderSite(val key: String, val name: String, val api: String, val ext: Any?)
+    private data class SpiderSite(
+        val key: String,
+        val name: String,
+        val api: String,
+        val ext: Any?,
+        val searchable: Boolean = true,
+        val quickSearch: Boolean = true
+    )
 
     companion object {
         /** 默认 UA：部分采集站按 UA 区分线路/限速 */
@@ -110,6 +128,22 @@ class TvBoxClient(
         private val configCache = java.util.concurrent.ConcurrentHashMap<String, ConfigEntry>()
         private val siteListCache = java.util.concurrent.ConcurrentHashMap<String, List<TvBoxSite>>()
 
+        /**
+         * 配置地址 → spider 包地址（进程级）。
+         * 播放页每次都是 new TvBoxClient，实例里没有配置信息；有了这张表，
+         * 冷启动播放直链时不用先下载整份配置就能判断 spider 是否已加载。
+         */
+        private val spiderUrlByBase = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+        /** 直链解析超时：超过就回退原地址，不让慢 spider 拖住本来就能播的直链 */
+        private const val DIRECT_RESOLVE_TIMEOUT_MS = 8_000L
+
+        /** 首页 homeContent 为空时的一次短暂重试间隔：壳 Init 已完成，不需要 2s/4s/8s 三轮等待 */
+        private const val HOME_RETRY_DELAY_MS = 1_500L
+
+        /** 直链解析的独立协程作用域：超时后可以不等待阻塞中的反射调用直接返回 */
+        private val directCallScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
         /** 地址归一化：补协议 + 中文域名转 punycode */
         internal fun normalizeEndpoint(raw: String): String =
             toPunycode(
@@ -123,6 +157,7 @@ class TvBoxClient(
             val key = normalizeEndpoint(endpoint)
             configCache.remove(key)
             siteListCache.remove(key)
+            spiderUrlByBase.remove(key)
         }
 
         /**
@@ -252,7 +287,7 @@ class TvBoxClient(
         val spSites = parseSpiderSites(configRoot)
         if (spSites.isEmpty()) return@withContext emptyList()
 
-        configSpiderUrl = configRoot.optString("spider")
+        rememberSpiderUrl(configRoot.optString("spider"))
         if (configSpiderUrl.isBlank()) {
             throw IllegalStateException("TVBox 配置缺少 spider 字段，无法加载爬虫")
         }
@@ -260,7 +295,7 @@ class TvBoxClient(
         if (spiderLoader == null) return@withContext emptyList()
 
         val merged = LinkedHashMap<String, Vod>()
-        loadSpiderHome(spSites, merged, limit)
+        loadSpiderHome(spSites, merged)
         merged.values.take(limit).toList()
     }
 
@@ -273,7 +308,9 @@ class TvBoxClient(
         siteListCache[base]?.let { cachedSites = it; return@withContext it }
         val raw = baseConfig()
             ?: throw IllegalStateException("无法下载 TVBox 配置，请检查地址与网络")
-        val sites = parseSpiderSites(raw).map { TvBoxSite(it.key, it.name, it.api, it.ext) }
+        val sites = parseSpiderSites(raw).map {
+            TvBoxSite(it.key, it.name, it.api, it.ext, it.searchable, it.quickSearch)
+        }
         if (sites.isEmpty()) {
             throw IllegalStateException("配置里没有可用的 spider 站点（需要 spider 字段与 type=3 站点）")
         }
@@ -289,14 +326,17 @@ class TvBoxClient(
      */
     suspend fun siteHome(site: TvBoxSite, limit: Int = 100): SiteHomeResult = withContext(Dispatchers.IO) {
         if (configSpiderUrl.isBlank()) {
-            configSpiderUrl = baseConfig()?.optString("spider").orEmpty()
+            rememberSpiderUrl(baseConfig()?.optString("spider").orEmpty())
         }
         if (configSpiderUrl.isBlank()) {
             throw IllegalStateException("TVBox 配置缺少 spider 字段，无法加载爬虫")
         }
         val merged = LinkedHashMap<String, Vod>()
         val categories = try {
-            loadSpiderHome(listOf(SpiderSite(site.key, site.name, site.api, site.ext)), merged, limit)
+            loadSpiderHome(
+                listOf(SpiderSite(site.key, site.name, site.api, site.ext, site.searchable, site.quickSearch)),
+                merged
+            )
         } catch (e: Exception) {
             // 不再吞异常：把壳初始化/爬虫调用的真实原因透出到 UI（否则切线路静默失败、内容不变）
             throw IllegalStateException("站点「${site.name}」爬取失败：${e.message ?: e.javaClass.simpleName}")
@@ -311,7 +351,7 @@ class TvBoxClient(
         withContext(Dispatchers.IO) {
             val loader = spiderLoader ?: return@withContext emptyList()
             if (configSpiderUrl.isBlank()) {
-                configSpiderUrl = baseConfig()?.optString("spider").orEmpty()
+                rememberSpiderUrl(baseConfig()?.optString("spider").orEmpty())
             }
             if (configSpiderUrl.isBlank()) return@withContext emptyList()
             val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull()
@@ -336,7 +376,7 @@ class TvBoxClient(
             if (kw.isBlank()) return@withContext emptyList()
             val loader = spiderLoader ?: return@withContext emptyList()
             if (configSpiderUrl.isBlank()) {
-                configSpiderUrl = baseConfig()?.optString("spider").orEmpty()
+                rememberSpiderUrl(baseConfig()?.optString("spider").orEmpty())
             }
             if (configSpiderUrl.isBlank()) return@withContext emptyList()
             // 关键：只查缓存，不调 ensureLoaded（那会触发 Go 代理初始化）
@@ -352,8 +392,7 @@ class TvBoxClient(
     /** type 3 spider 站点首页聚合；返回各站点 homeContent 的 class（分类）数组 */
     private suspend fun loadSpiderHome(
         sites: List<SpiderSite>,
-        merged: LinkedHashMap<String, Vod>,
-        limit: Int
+        merged: LinkedHashMap<String, Vod>
     ): List<CatVodResultParser.ClassItem> = withContext(Dispatchers.IO) {
         val loader = spiderLoader ?: throw IllegalStateException("缺少 Android Context，无法加载爬虫")
         val loaderKey = try {
@@ -362,31 +401,50 @@ class TvBoxClient(
             throw IllegalStateException("加载 spider 包失败：${e.message ?: e.javaClass.simpleName}")
         }
 
+        // 先串行取实例：首次会触发壳内 Guard 初始化，并发创建实例没有收益，还容易压垮 JSVM
         val reasons = ArrayList<String>()
-        val categories = ArrayList<CatVodResultParser.ClassItem>()
+        val proxies = ArrayList<Pair<SpiderSite, SpiderProxy>>()
         for (site in sites.take(4)) {
-            if (merged.size >= limit) break
             val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: run {
                 reasons += "${site.name}: ${loader.lastError}"
                 null
             } ?: continue
-            // 壳本地代理冷启动需要时间，首次 homeContent 失败/为空后按 2s/4s/8s 递增重试
-            var json: String? = proxy.homeContent(filter = true)
-            var retries = 0
-            while (json.isNullOrEmpty() && retries < 3) {
-                retries++
-                delay(2000L * retries)
-                json = proxy.homeContent(filter = true)
+            proxies += site to proxy
+        }
+        if (proxies.isEmpty()) {
+            throw IllegalStateException(
+                if (reasons.isEmpty()) "该配置的爬虫站点没有返回任何影片"
+                else "爬虫站点均无数据：${reasons.take(3).joinToString("；")}"
+            )
+        }
+
+        // 站点之间并发请求：原来是串行 + 每站最多 2s/4s/8s 递增重试，
+        // 4 个站点最坏要等近一分钟；并发后总耗时约等于最慢的那个站点。
+        // 单个站点异常只影响它自己，不取消其他站点的请求。
+        val results = coroutineScope {
+            proxies.map { (site, proxy) ->
+                async {
+                    runCatching { fetchSiteHome(site, proxy) }.getOrElse { e ->
+                        Log.w("SpiderProxy", "${site.name} homeContent 异常：${e.message}")
+                        SiteHomeFetch(site, null)
+                    }
+                }
+            }.awaitAll()
+        }
+
+        val categories = ArrayList<CatVodResultParser.ClassItem>()
+        for (result in results) {
+            val json = result.json
+            if (json.isNullOrEmpty()) {
+                reasons += "${result.site.name}: homeContent 返回空"
+                continue
             }
-            json ?: run {
-                reasons += "${site.name}: homeContent 返回空"
-                null
-            } ?: continue
             // 分类（class）：即使 list 为空、只有分类，站点也「有数据」，UI 可按分类分区浏览
-            categories += CatVodResultParser.parseClasses(json!!)
-            val list = CatVodResultParser.parseVodList(json!!, site.key, site.name)
-            if (list.isEmpty() && categories.isEmpty()) reasons += "${site.name}: homeContent 无影片"
-            list.forEach { merged["${site.key}:${it.vodId}"] = it }
+            val siteCategories = CatVodResultParser.parseClasses(json)
+            categories += siteCategories
+            val list = CatVodResultParser.parseVodList(json, result.site.key, result.site.name)
+            if (list.isEmpty() && siteCategories.isEmpty()) reasons += "${result.site.name}: homeContent 无影片"
+            list.forEach { merged["${result.site.key}:${it.vodId}"] = it }
         }
 
         // 只有 list 和 class 都为空才判失败；有分类就足够支撑 UI 展示了
@@ -399,6 +457,22 @@ class TvBoxClient(
         categories
     }
 
+    private data class SiteHomeFetch(val site: SpiderSite, val json: String?)
+
+    /**
+     * 单个站点的 homeContent（为空时重试一次）。
+     * 壳 Init/LocalServer 已在 [loadSpiderHome] 里就绪，这里只留 1.5s 缓冲，
+     * 不再用 2s/4s/8s 三轮递增重试 —— 那是首页刷新慢的主要来源。
+     */
+    private suspend fun fetchSiteHome(site: SpiderSite, proxy: SpiderProxy): SiteHomeFetch {
+        var json = proxy.homeContent(filter = true)
+        if (json.isNullOrEmpty()) {
+            delay(HOME_RETRY_DELAY_MS)
+            json = proxy.homeContent(filter = true)
+        }
+        return SiteHomeFetch(site, json)
+    }
+
     /**
      * 取详情：拿回播放地址列表（这是实际能播的关键）。
      * @param siteKey 来自 TVBox 配置的站点 key；空表示在所有 spider 站点里逐个尝试
@@ -409,7 +483,7 @@ class TvBoxClient(
         val spSites = root?.let { parseSpiderSites(it) } ?: spiderSites
         if (spSites.isEmpty()) return@withContext null
         if (configSpiderUrl.isBlank() && root != null) {
-            configSpiderUrl = root.optString("spider")
+            rememberSpiderUrl(root.optString("spider"))
         }
 
         // 优先按 siteKey 精确匹配，其余站点作为兜底
@@ -441,31 +515,85 @@ class TvBoxClient(
     }
 
     /** playerContent 解析结果：视频直链 + 所需 HTTP 请求头 */
-    data class ResolvedPlayUrl(val url: String, val headers: Map<String, String> = emptyMap())
+    data class ResolvedPlayUrl(
+        val url: String,
+        val headers: Map<String, String> = emptyMap(),
+        /** playerContent 返回的 parse 标记：0 = 可直接播放，1 = 需要网页解析 */
+        val parse: Int = 0,
+        /** 需要网页解析（parse/jx = 1，或返回地址本身是网页）：当前版本不支持 */
+        val needsWebParse: Boolean = false
+    )
 
     /**
-     * 解析云盘播放地址。
+     * 解析播放地址（对应 CatVod 的 playerContent）。
      *
-     * 云盘 scheme 地址（quark://、aliyundrive://、uc:// 等）不是视频直链，
-     * 必须调用 spider 的 playerContent(flag, id, vipFlags) 才能拿到真实可播放的 URL。
-     * 返回结果同时包含 URL 和所需 HTTP 请求头（如 Cookie、Referer 等）。
+     * 与 FongMi 等成熟实现一致：**直链与网盘地址统一先问 spider**。
+     * spider 能补上 Cookie/Referer 等请求头，也能识别出需要网页解析的线路。
+     *
+     * 为不影响现有可播链路，额外做三点保护：
+     *  1. 直链 + 本进程从未加载过 spider（如「继续观看」冷启动）→ 直接返回原地址，
+     *     不为一个本来就能播的链接去下载/解密 JAR、起本地代理；
+     *  2. 直链解析超时（[DIRECT_RESOLVE_TIMEOUT_MS]）、异常或返回空 → 回退原地址；
+     *  3. 网盘 scheme（quark:// 等）必须解析成功，失败时保留原始错误（原地址播不了）。
      *
      * @param siteKey    站点 key（用于定位 spider 站点）
      * @param playSource 播放源名称（即 vod_play_from，如「夸克网盘」），作为 playerContent 的 flag
-     * @param cloudUrl   云盘原始地址（作为 playerContent 的 id）
-     * @param vipFlags   全部播放源名称列表（playerContent 的 vipFlags）
-     * @return 解析结果（URL + headers）；解析失败抛异常
+     * @param rawUrl     线路原始地址（云盘 scheme 或 http(s) 直链），作为 playerContent 的 id
+     * @param vipFlags   调用方给出的播放源名称列表；配置根级 flags 非空时以其为准
+     * @return 解析结果（URL + headers + parse 标记）；云盘解析失败或需要网页解析时抛异常
      */
     suspend fun resolvePlayUrl(
         siteKey: String,
         playSource: String,
-        cloudUrl: String,
+        rawUrl: String,
         vipFlags: List<String>
     ): ResolvedPlayUrl = withContext(Dispatchers.IO) {
+        val isDirect = rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
+
+        // 冷启动保护：spider 从未加载过时，直链不需要（也不值得）走解析
+        if (isDirect) {
+            val loadedKey = knownSpiderUrl().takeIf { it.isNotBlank() }
+                ?.let { spiderLoader?.cachedLoaderKeyOrNull(it) }
+            if (spiderLoader == null || loadedKey == null) {
+                return@withContext ResolvedPlayUrl(rawUrl)
+            }
+        }
+
+        val resolved = if (isDirect) {
+            runCatching { doResolvePlayUrl(siteKey, playSource, rawUrl, vipFlags, direct = true) }
+                .getOrElse {
+                    Log.w("SpiderProxy", "playerContent($playSource) 直链解析失败，回退原地址：${it.message}")
+                    return@withContext ResolvedPlayUrl(rawUrl)
+                }
+        } else {
+            doResolvePlayUrl(siteKey, playSource, rawUrl, vipFlags, direct = false)
+        }
+
+        when {
+            // 直链场景：只有原地址本身就是网页时才拒绝，避免误伤被 spider 误标 parse=1 的可播直链
+            resolved.needsWebParse && isDirect && !isWebPageUrl(rawUrl) -> {
+                Log.w("SpiderProxy", "playerContent($playSource) 标记需要网页解析，但原地址像直链，回退原地址")
+                ResolvedPlayUrl(rawUrl)
+            }
+            resolved.needsWebParse -> throw IllegalStateException(
+                "该线路需要网页解析（spider 标记 parse/jx=1 或地址是网页），当前版本不支持，请切换其他线路"
+            )
+            else -> resolved
+        }
+    }
+
+    /** 真正调用 playerContent：取站点 → 加载 spider → 解析返回 JSON */
+    private suspend fun doResolvePlayUrl(
+        siteKey: String,
+        playSource: String,
+        rawUrl: String,
+        vipFlags: List<String>,
+        direct: Boolean
+    ): ResolvedPlayUrl {
         val root = baseConfig()
         val spSites = root?.let { parseSpiderSites(it) } ?: spiderSites
         if (configSpiderUrl.isBlank()) {
-            configSpiderUrl = root?.optString("spider").orEmpty()
+            rememberSpiderUrl(root?.optString("spider").orEmpty())
         }
         if (configSpiderUrl.isBlank()) throw IllegalStateException("spider 配置缺失")
 
@@ -481,20 +609,81 @@ class TvBoxClient(
         val proxy = loader.getSpider(loaderKey, site.api, site.ext)
             ?: throw IllegalStateException("spider 实例创建失败：${site.api}")
 
-        val json = proxy.playerContent(playSource, cloudUrl, vipFlags)
+        // CatVod 约定 vipFlags 传配置根级 flags（全部播放源名），spider 据此判断
+        // 哪条线路可直出、哪条需要 VIP 解析。配置没写才退回调用方给的播放源列表。
+        val flags = configFlags(root).ifEmpty { vipFlags }
+
+        val json = (if (direct) playerContentWithTimeout(proxy, playSource, rawUrl, flags)
+        else proxy.playerContent(playSource, rawUrl, flags))
             ?: throw IllegalStateException("playerContent 返回空")
 
         val resolved = parsePlayerContentResult(json)
         // 分两行打，避免 logcat 单行截断看不到 URL
         Log.d("SpiderProxy", "playerContent($playSource) → url=${resolved.url}")
-        Log.d("SpiderProxy", "playerContent($playSource) → headers=${resolved.headers.keys}")
-        resolved
+        Log.d(
+            "SpiderProxy",
+            "playerContent($playSource) → headers=${resolved.headers.keys} parse=${resolved.parse}"
+        )
+        return resolved
     }
 
     /**
-     * 解析 playerContent 返回的 JSON，提取真实视频 URL 及请求头。
+     * 直链场景的 playerContent 带超时调用。
+     *
+     * SpiderProxy.playerContent 内部是阻塞反射调用（自身最多等 30s），协程超时打断不了它，
+     * 所以放到独立作用域里 await：到点就放弃等待、回退原地址，慢 spider 不会拖住本来就能播的直链。
+     */
+    private suspend fun playerContentWithTimeout(
+        proxy: SpiderProxy,
+        flag: String,
+        id: String,
+        flags: List<String>
+    ): String? {
+        val call = directCallScope.async { proxy.playerContent(flag, id, flags) }
+        val json = withTimeoutOrNull(DIRECT_RESOLVE_TIMEOUT_MS) { call.await() }
+        if (json == null) {
+            call.cancel()
+            Log.w("SpiderProxy", "playerContent($flag) 直链解析超过 ${DIRECT_RESOLVE_TIMEOUT_MS}ms，回退原地址")
+        }
+        return json
+    }
+
+    /** 记录配置里的 spider 地址（同时写进程级表，供其他 TvBoxClient 实例快速判断 spider 是否已加载） */
+    private fun rememberSpiderUrl(raw: String) {
+        if (raw.isBlank()) return
+        configSpiderUrl = raw
+        spiderUrlByBase[base] = raw
+    }
+
+    /** 当前配置的 spider 地址：本实例没读过配置时回落到进程级缓存，可能为空 */
+    private fun knownSpiderUrl(): String = configSpiderUrl.ifBlank { spiderUrlByBase[base].orEmpty() }
+
+    /**
+     * 配置根级 flags（playerContent 的 vipFlags）。
+     * 兼容数组写法 ["youku","qq"] 与逗号分隔字符串写法 "youku,qq"。
+     */
+    private fun configFlags(root: JSONObject?): List<String> {
+        return when (val raw = root?.opt("flags")) {
+            is JSONArray -> (0 until raw.length())
+                .map { raw.optString(it).trim() }
+                .filter { it.isNotBlank() }
+            is String -> raw.split(',').map { it.trim() }.filter { it.isNotBlank() }
+            else -> emptyList()
+        }
+    }
+
+    /** 粗判网页地址：去掉 query/fragment 后以网页后缀结尾（真实视频直链不会这样） */
+    private fun isWebPageUrl(url: String): Boolean {
+        val path = url.substringBefore('?').substringBefore('#').lowercase()
+        return path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".shtml")
+    }
+
+    /**
+     * 解析 playerContent 返回的 JSON，提取真实视频 URL、请求头与解析标记。
      *
      * 标准格式：{"parse":0,"url":"https://...","header":"{\"Cookie\":\"...\"}"}
+     * parse=1 或 jx=1 表示 url 只是网页/待解析地址，需要再走网页解析（parse API / jx API）
+     * 才能拿到视频直链；本 App 未集成解析服务，由调用方给出明确提示。
      * header 可能是 JSON 对象，也可能是 JSON 字符串（需二次解析）。
      * 错误格式：{"list":[],"msg":"[quark](auth) 还没有配置夸克 Cookie...","parse":0}
      *
@@ -507,6 +696,8 @@ class TvBoxClient(
      */
     private fun parsePlayerContentResult(json: String): ResolvedPlayUrl {
         val obj = JSONObject(json)
+        val parse = obj.optInt("parse", 0)
+        val jx = obj.optInt("jx", 0)
         val rawUrl = obj.optString("url").takeIf { it.isNotBlank() }
         if (rawUrl == null) {
             val msg = obj.optString("msg").takeIf { it.isNotBlank() }
@@ -516,7 +707,8 @@ class TvBoxClient(
         }
         val headers = parseHeaders(obj.opt("header"))
         val url = unwrapLocalProxyUrl(rawUrl)
-        return ResolvedPlayUrl(url, headers)
+        val needsWebParse = parse == 1 || jx == 1 || isWebPageUrl(url)
+        return ResolvedPlayUrl(url, headers, parse, needsWebParse)
     }
 
     /**
@@ -570,9 +762,28 @@ class TvBoxClient(
             val rawKey = o.optString("key").ifBlank { o.optString("name") }.ifBlank { "spider$i" }
             val name = o.optString("name").ifBlank { rawKey }
             val ext = o.opt("ext")
-            out += SpiderSite(rawKey.replace(":", ""), name, api, ext)
+            out += SpiderSite(
+                key = rawKey.replace(":", ""),
+                name = name,
+                api = api,
+                ext = ext,
+                searchable = optFlag(o, "searchable"),
+                quickSearch = optFlag(o, "quickSearch")
+            )
         }
         return out.distinctBy { it.key }
+    }
+
+    /**
+     * 解析站点的布尔开关（searchable / quickSearch）。
+     * 兼容 1/0、true/false、"1"/"0" 三种写法；缺省与 CatVod 一致按开启处理。
+     */
+    private fun optFlag(o: JSONObject, name: String): Boolean = when (val v = o.opt(name)) {
+        null, JSONObject.NULL -> true
+        is Boolean -> v
+        is Number -> v.toInt() == 1
+        is String -> v.trim().let { it == "1" || it.equals("true", ignoreCase = true) }
+        else -> true
     }
 }
 

@@ -76,6 +76,9 @@ class TvSearchUiState {
     var loading by mutableStateOf(false)
     var searched by mutableStateOf(false)
 
+    /** 远程站点搜索进行中：本地库只有首页入库的少量条目，绝大多数片名要靠各站点远程命中 */
+    var remoteSearching by mutableStateOf(false)
+
     /** 已完成搜索的关键字，从详情返回时据此跳过重复搜索 */
     var searchedKeyword by mutableStateOf("")
 
@@ -90,6 +93,7 @@ class TvSearchUiState {
         loading = false
         searched = false
         searchedKeyword = ""
+        remoteSearching = false
     }
 
     /**
@@ -142,14 +146,37 @@ fun TvSearchScreen(
 
     // 实际搜索：只有 submittedKeyword 变化（选中联想 / 点搜索 / 回车）才执行；
     // 从详情返回时关键字没变，直接复用已有结果，不重复查询。
+    // 与手机端一致：本地库先上屏，随后并发搜 TVBox 各站点，谁先搜完先追加谁的结果。
+    // 只查本地库时，TV 端会因为库里只有首页那批条目而「搜不到」，远程这一步是主要补齐来源。
     LaunchedEffect(state.submittedKeyword) {
         val q = state.submittedKeyword.trim()
         if (q.isEmpty() || q == state.searchedKeyword) return@LaunchedEffect
         state.loading = true
-        state.results = runCatching { vm.searchMedia(q) }.getOrDefault(emptyList())
         state.searchedKeyword = q
-        state.loading = false
-        state.searched = true
+
+        val local = runCatching { vm.searchMedia(q) }.getOrDefault(emptyList())
+        if (state.submittedKeyword == q) {
+            state.results = local
+            state.loading = false
+            state.searched = true
+        }
+
+        /** 把一批远程结果并进当前列表（按 remoteId 去重） */
+        fun appendRemote(batch: List<MediaEntity>) {
+            val seen = state.results.map { it.remoteId }.toSet()
+            state.results = state.results + batch.filter { it.remoteId !in seen }
+        }
+
+        state.remoteSearching = true
+        val remote = vm.searchRemote(q) { partial ->
+            // 远程返回前用户可能已经改词重新搜索，旧结果不能覆盖当前列表
+            if (state.submittedKeyword != q) return@searchRemote
+            appendRemote(partial)
+        }
+        if (state.submittedKeyword == q) {
+            appendRemote(remote)
+            state.remoteSearching = false
+        }
     }
 
     // 进页自动聚焦输入框；从详情返回（已有搜索结果）时把焦点交给第一张海报
@@ -190,6 +217,8 @@ fun TvSearchScreen(
                         state.searchedKeyword = ""
                         state.results = emptyList()
                         state.searched = false
+                        state.loading = false
+                        state.remoteSearching = false
                     }
                 },
                 onSubmit = { state.submit() }
@@ -226,9 +255,14 @@ fun TvSearchScreen(
 
             state.loading -> TvEmptyState("搜索中…")
 
+            // 本地已查完但远程站点还在并发返回：先上屏本地结果，顶部提示仍在补
             state.results.isNotEmpty() -> {
                 Text(
-                    "找到 ${state.results.size} 个结果",
+                    if (state.remoteSearching) {
+                        "已找到 ${state.results.size} 个结果，远程站点搜索中…"
+                    } else {
+                        "找到 ${state.results.size} 个结果"
+                    },
                     color = AppColors.TextTertiary,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(start = 20.dp, bottom = 10.dp)
@@ -254,7 +288,10 @@ fun TvSearchScreen(
                 }
             }
 
-            state.searched -> TvEmptyState("没有找到「${state.submittedKeyword}」", "换个关键词，或先在来源里同步媒体库")
+            // 远程还没回来时不要急着判「没找到」，否则用户看到的是搜索中的空屏
+            state.remoteSearching -> TvEmptyState("正在搜索各站点…", "本地库没有命中，正在向 TVBox 各站点查询")
+
+            state.searched -> TvEmptyState("没有找到「${state.submittedKeyword}」", "换个关键词试试")
             else -> TvEmptyState("搜索媒体库", "输入片名、演员或拼音首字母，选中联想或按「搜索」确认")
         }
     }

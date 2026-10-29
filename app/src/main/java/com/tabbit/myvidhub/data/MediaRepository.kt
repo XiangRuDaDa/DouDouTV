@@ -172,15 +172,19 @@ class MediaRepository(private val context: Context) {
         val jobs = tvboxSources.flatMap { source ->
             runCatching {
                 val client = TvBoxClient(source.location, context)
-                client.availableSites().map { site ->
-                    launch {
-                        val hits = runCatching { client.search(site, kw, quick = true) }
-                            .getOrDefault(emptyList())
-                            .take(REMOTE_RESULT_LIMIT)
-                            .map { it to source }
-                        runCatching { batches.send(hits) }
+                // searchable/quickSearch 是配置给站点的开关：不参与搜索、或明确不支持
+                // 快速搜索（本次搜索用的就是 quick=true）的站点直接跳过，省掉一轮无用请求。
+                client.availableSites()
+                    .filter { it.searchable && it.quickSearch }
+                    .map { site ->
+                        launch {
+                            val hits = runCatching { client.search(site, kw, quick = true) }
+                                .getOrDefault(emptyList())
+                                .take(REMOTE_RESULT_LIMIT)
+                                .map { it to source }
+                            runCatching { batches.send(hits) }
+                        }
                     }
-                }
             }.getOrDefault(emptyList())
         }
 
@@ -314,31 +318,26 @@ class MediaRepository(private val context: Context) {
     suspend fun countBySource(sourceId: Long): Int = mediaDao.countBySource(sourceId)
 
     /**
-     * 解析 TVBox 云盘播放地址。
+     * 解析 TVBox 播放地址。
      *
-     * 云盘 scheme 地址（quark://、aliyundrive:// 等）不是视频直链，
-     * 播放器启动前需调用 spider 的 playerContent 解析出真实 URL 及请求头。
+     * 云盘 scheme 地址（quark://、aliyundrive:// 等）不是视频直链，必须走 spider 解析；
+     * http(s) 直链同样交给 spider 处理（可能补 Cookie/Referer，也可能识别出需要网页解析）。
+     * 直链解析失败/超时会由 [TvBoxClient.resolvePlayUrl] 内部回退原地址，不影响可播性。
      *
      * @param episode 分集实体（需包含 sourceId、seriesKey、playSource、uri）
-     * @return 解析结果（URL + headers）；非云盘地址返回 uri 且 headers 为空
+     * @return 解析结果（URL + headers）；非 TVBox 来源原样返回 uri
      */
     suspend fun resolveTvBoxPlayUrl(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl = withContext(Dispatchers.IO) {
         val source = sourceDao.get(episode.sourceId)
             ?: return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
         if (source.kind != SourceKind.TVBOX) return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
 
-        // 云盘 scheme（非 http/https）才需要解析
-        val uri = episode.uri
-        if (uri.startsWith("http://") || uri.startsWith("https://")) {
-            return@withContext TvBoxClient.ResolvedPlayUrl(uri)
-        }
-
         // episode.seriesKey = tvbox:sourceId:siteKey:vodId
         val (siteKey, _) = parseTvBoxKey(episode.sourceId, episode.seriesKey)
         val vipFlags = mediaDao.playSourcesOf(episode.seriesKey)
 
         val client = TvBoxClient(source.location, context)
-        client.resolvePlayUrl(siteKey, episode.playSource, uri, vipFlags)
+        client.resolvePlayUrl(siteKey, episode.playSource, episode.uri, vipFlags)
     }
 
     // ---------------- 首页分类 / 浏览页 ----------------
@@ -783,27 +782,31 @@ class MediaRepository(private val context: Context) {
         // loadTvBoxDetail 只在分集为空时触发，这里通常删不到东西；仅为重入时去重。
         mediaDao.deleteEpisodesBySeriesKey(seriesKey)
 
-        detail.playSources.forEachIndexed { sourceIndex, src ->
-            src.episodes.forEachIndexed { epIndex, ep ->
-                saveMedia(
-                    MediaEntity(
-                        sourceId = source.id,
-                        uri = ep.url,
-                        // remoteId 带上源下标，保证不同云盘的同一集不冲突
-                        remoteId = "$remoteId:$sourceIndex:$epIndex",
-                        seriesKey = seriesKey,
-                        title = ep.name,
-                        kind = MediaKind.EPISODE,
-                        season = 1,
-                        episode = epIndex + 1,
-                        overview = detail.content,
-                        posterUrl = detail.pic,
-                        backdropUrl = detail.pic,
-                        playSource = src.name
-                    )
+        // 批量入库：原来每集走一次 saveMedia（查来源 + 查重复 + 单条写），
+        // 3 条源 × 40 集就是 360 次 DB 往返，电视盒子上详情页会明显卡顿。
+        val incoming = detail.playSources.flatMapIndexed { sourceIndex, src ->
+            src.episodes.mapIndexed { epIndex, ep ->
+                MediaEntity(
+                    sourceId = source.id,
+                    uri = ep.url,
+                    // remoteId 带上源下标，保证不同云盘的同一集不冲突
+                    remoteId = "$remoteId:$sourceIndex:$epIndex",
+                    seriesKey = seriesKey,
+                    title = ep.name,
+                    kind = MediaKind.EPISODE,
+                    season = 1,
+                    episode = epIndex + 1,
+                    overview = detail.content,
+                    posterUrl = detail.pic,
+                    backdropUrl = detail.pic,
+                    playSource = src.name,
+                    pinyinInitials = ep.name.toPinyinInitials(),
+                    sourceName = source.name
                 )
             }
         }
+        // 上面已按 seriesKey 清空旧分集，这里不会有重复行，一次批量写入即可
+        if (incoming.isNotEmpty()) mediaDao.insertAll(incoming)
 
         detail.playSources
     }

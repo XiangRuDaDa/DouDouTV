@@ -162,6 +162,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     var categoryLoading by mutableStateOf(false)
         private set
 
+    /**
+     * 首页刷新轮次：每次「刷新当前来源/线路」自增。
+     * 分类行的懒加载是 `LaunchedEffect(cat.typeId)`，typeId 不变就不会重跑，
+     * 光清缓存会让行永久空白，所以 UI 侧把这个轮次一起放进 key。
+     */
+    var homeRefreshEpoch by mutableStateOf(0)
+        private set
+
     var categoryError by mutableStateOf<String?>(null)
         private set
 
@@ -207,6 +215,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 首页来源 / 站点（线路）选择 ----------
 
+    /** 清空分类行的内存缓存并自增刷新轮次（切来源 / 切线路 / 首页刷新共用） */
+    private fun clearCategoryState() {
+        _categoryVods.clear()
+        _categoryPreviewLoading.clear()
+        _categoryVisibleCount.clear()
+        _categoryLoadedPage.clear()
+        _categoryEnded.clear()
+        categoryError = null
+        homeRefreshEpoch++
+    }
+
     fun selectHomeSource(sourceId: Long?) {
         if (homeSourceId == sourceId) {
             // 重复点同一个来源不算切换，但把线路列表（重新）拉一次，避免之前失败留下空列表
@@ -218,12 +237,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         homeSitesError = null
         homeCategories = emptyList()
         activeCategoryId = null
-        _categoryVods.clear()
-        _categoryPreviewLoading.clear()
-        _categoryVisibleCount.clear()
-        _categoryLoadedPage.clear()
-        _categoryEnded.clear()
-        categoryError = null
+        clearCategoryState()
         activeSite = null
         Prefs.homeSourceId = sourceId ?: -1L
         Prefs.homeSiteKey = ""
@@ -237,12 +251,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         // 切线路后重置分类状态
         homeCategories = emptyList()
         activeCategoryId = null
-        _categoryVods.clear()
-        _categoryPreviewLoading.clear()
-        _categoryVisibleCount.clear()
-        _categoryLoadedPage.clear()
-        _categoryEnded.clear()
-        categoryError = null
+        clearCategoryState()
         activeSite = site
         val sourceId = homeSourceId ?: return
         val s = site ?: return
@@ -635,6 +644,51 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 界面顶栏「全部同步」入口，语义等同 scanAll，命名更贴合按钮文案 */
     fun syncAll() = scanAll()
+
+    /**
+     * 首页刷新按钮：只刷当前生效的首页来源，不动其他来源。
+     *   · TVBox 且已选中线路 → 只拉该线路的 homeContent（并刷新它的分类）
+     *   · TVBox 聚合视图 / Emby → 只同步这一个来源
+     * 全量刷新（所有来源）保留在来源页的「全部同步」。
+     */
+    fun refreshHome() {
+        if (scanning) return
+        val sourceId = effectiveHomeSourceId()
+        if (sourceId == null) {
+            message = "还没有可用的来源，请先在「来源」里添加"
+            return
+        }
+        viewModelScope.launch {
+            scanning = true
+            try {
+                val src = repo.getSource(sourceId)
+                if (src == null) {
+                    message = "首页来源已不存在，请重新选择"
+                    return@launch
+                }
+                // 只有 TVBox 且当前有选中线路时才单刷线路；聚合视图仍要聚合该来源的前几个站点
+                val site = if (src.kind == SourceKind.TVBOX && homeSiteKey != null) activeSite else null
+                val added = if (site != null) {
+                    scanMessage = "正在刷新「${site.name}」…"
+                    val result = repo.syncTvBoxSite(src, site)
+                    // 分类行内容不落库，刷新时要连带重拉：先清缓存再自增轮次触发 UI 重新 ensure
+                    clearCategoryState()
+                    homeCategories = result.categories
+                    result.vods.size
+                } else {
+                    scanMessage = "正在刷新 ${src.name}…"
+                    runSync(src)
+                }
+                val scopeName = site?.name ?: src.name
+                message = "已刷新「$scopeName」：$added 个条目"
+            } catch (e: Exception) {
+                message = "刷新失败：${e.message ?: "网络或接口异常"}"
+            } finally {
+                scanning = false
+                scanMessage = ""
+            }
+        }
+    }
 
     fun scanAll() {
         if (scanning) return

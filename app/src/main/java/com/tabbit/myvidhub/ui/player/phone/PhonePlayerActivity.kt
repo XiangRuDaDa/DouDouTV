@@ -519,14 +519,11 @@ class PhonePlayerActivity : ComponentActivity() {
     }
 
     /**
-     * 解析播放地址：http(s) 直链原样返回，云盘 scheme 地址调用 spider 的 playerContent 解析。
+     * 解析播放地址：云盘 scheme 与 http(s) 直链统一交给 [MediaRepository.resolveTvBoxPlayUrl]
+     * （直链也会先问 spider，失败/超时自动回退原地址）；非 TVBox 来源原样返回。
      * @return 解析结果（URL + headers）；解析失败返回 null，错误信息写入 [toastState]
      */
     private suspend fun resolvePlayUrl(item: MediaEntity): TvBoxClient.ResolvedPlayUrl? {
-        val uri = item.uri
-        if (uri.startsWith("http://") || uri.startsWith("https://")) {
-            return TvBoxClient.ResolvedPlayUrl(uri)
-        }
         return runCatching {
             MediaRepository(this@PhonePlayerActivity).resolveTvBoxPlayUrl(item)
         }.fold(
