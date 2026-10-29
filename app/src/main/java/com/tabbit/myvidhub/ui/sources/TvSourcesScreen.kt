@@ -74,6 +74,7 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.TvText
 import com.tabbit.myvidhub.ui.tv.TvFilterChip
 import com.tabbit.myvidhub.ui.tv.TvIconButton
 import com.tabbit.myvidhub.ui.tv.TvPillButton
@@ -127,13 +128,13 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                         Text(
                             text = "视频来源",
                             style = MaterialTheme.typography.headlineMedium,
-                            color = AppColors.TextPrimary,
+                            color = TvText.Title,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
                             text = "支持 Emby 媒体服务器与 TVBox 接口 · 共 ${sources.size} 个来源",
                             style = MaterialTheme.typography.labelSmall,
-                            color = AppColors.TextTertiary
+                            color = TvText.Meta
                         )
                     }
                 }
@@ -148,7 +149,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                         Text(
                             text = "同步中…",
                             style = MaterialTheme.typography.labelMedium,
-                            color = AppColors.TextSecondary
+                            color = TvText.Body
                         )
                     } else {
                         TvPillButton(
@@ -300,13 +301,13 @@ private fun TvGroupHeader(title: String, count: Int) {
         Text(
             text = title,
             style = MaterialTheme.typography.headlineSmall,
-            color = AppColors.TextPrimary,
+            color = TvText.Title,
             fontWeight = FontWeight.SemiBold
         )
         Text(
             text = "$count 个已配置",
             style = MaterialTheme.typography.labelSmall,
-            color = AppColors.TextTertiary
+            color = TvText.Meta
         )
     }
 }
@@ -324,14 +325,14 @@ private fun TvEmptySourcesHint() {
         Text(
             text = "还没有添加来源",
             style = MaterialTheme.typography.headlineSmall,
-            color = AppColors.TextPrimary,
+            color = TvText.Title,
             fontWeight = FontWeight.SemiBold
         )
         Text(
             text = "· Emby：填服务器地址与账号密码，自动登录换 Token\n" +
                 "· TVBox：填 TVBox 配置 JSON 地址（需包含 spider 与 type=3 站点）",
             style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.TextTertiary
+            color = TvText.Meta
         )
     }
 }
@@ -415,7 +416,7 @@ private fun TvSourceCard(
                 Text(
                     text = source.name,
                     style = MaterialTheme.typography.titleLarge,
-                    color = AppColors.TextPrimary,
+                    color = TvText.Title,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -452,7 +453,7 @@ private fun TvSourceCard(
                             Text(
                                 text = "已停用",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = AppColors.TextTertiary,
+                                color = TvText.Meta,
                                 fontWeight = FontWeight.Medium
                             )
                         }
@@ -465,7 +466,7 @@ private fun TvSourceCard(
                 Text(
                     text = source.location,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = AppColors.TextTertiary,
+                    color = TvText.Meta,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -487,7 +488,7 @@ private fun TvSourceCard(
                             Text(
                                 text = "🎬 $it 部",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = AppColors.TextSecondary
+                                color = TvText.Body
                             )
                         }
                         if (source.kind == SourceKind.EMBY) {
@@ -501,7 +502,7 @@ private fun TvSourceCard(
                                 Text(
                                     text = "👤 ${source.username.ifBlank { "—" }}",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = AppColors.TextSecondary
+                                    color = TvText.Body
                                 )
                             }
                         }
@@ -509,7 +510,7 @@ private fun TvSourceCard(
                     Text(
                         text = tvRelativeTime(lastSync),
                         style = MaterialTheme.typography.labelSmall,
-                        color = AppColors.TextTertiary
+                        color = TvText.Meta
                     )
                 }
             }
@@ -534,7 +535,7 @@ private fun TvSourceCard(
    ======================================================== */
 @Composable
 private fun TvSourceIcon(kind: SourceKind) {
-    val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.2f) else Color(0xFFFFC107).copy(alpha = 0.14f)
+    val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.2f) else AppColors.Rating.copy(alpha = 0.14f)
     val fg = if (kind == SourceKind.EMBY) AppColors.Brand else AppColors.Rating
     Box(
         Modifier
@@ -558,7 +559,7 @@ private fun TvSourceIcon(kind: SourceKind) {
 @Composable
 private fun TvKindBadge(kind: SourceKind) {
     val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.16f) else AppColors.SurfaceHi
-    val fg = if (kind == SourceKind.EMBY) AppColors.Brand else AppColors.TextSecondary
+    val fg = if (kind == SourceKind.EMBY) AppColors.Brand else TvText.Body
     Box(
         Modifier.background(bg, RoundedCornerShape(4.dp)).padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
@@ -622,7 +623,7 @@ private fun TvSourceActionDialog(
                     Text(
                         text = source.name,
                         style = MaterialTheme.typography.headlineSmall,
-                        color = AppColors.TextPrimary,
+                        color = TvText.Title,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -636,7 +637,7 @@ private fun TvSourceActionDialog(
                             if (isActiveHome) append(" · 使用中")
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        color = AppColors.TextTertiary
+                        color = TvText.Meta
                     )
                 }
                 Spacer(Modifier.height(18.dp))
@@ -709,7 +710,7 @@ private fun TvMenuRow(
                     focused && danger -> Color(0xFFE5484D)
                     focused -> Color.Black
                     danger -> Color(0xFFFF8A65)
-                    else -> AppColors.TextPrimary
+                    else -> TvText.Title
                 },
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.Medium
@@ -718,7 +719,7 @@ private fun TvMenuRow(
                 Text(
                     text = hint,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (focused) Color.Black.copy(alpha = 0.6f) else AppColors.TextTertiary
+                    color = if (focused) Color.Black.copy(alpha = 0.6f) else TvText.Meta
                 )
             }
         }
@@ -806,7 +807,7 @@ private fun TvSourceFormPanel(
                         Text(
                             text = if (initial == null) "添加视频来源" else "编辑视频来源",
                             style = MaterialTheme.typography.headlineSmall,
-                            color = AppColors.TextPrimary,
+                            color = TvText.Title,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -829,7 +830,7 @@ private fun TvSourceFormPanel(
                             Text(
                                 text = "来源类型",
                                 style = MaterialTheme.typography.labelMedium,
-                                color = AppColors.TextSecondary
+                                color = TvText.Body
                             )
                             Spacer(Modifier.width(4.dp))
                             TvFilterChip(
@@ -872,14 +873,14 @@ private fun TvSourceFormPanel(
                             Text(
                                 text = "支持 HTTPS 反向代理；局域网可用 http://192.168.x.x:8920",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = AppColors.TextTertiary
+                                color = TvText.Meta
                             )
                         } else {
                             Spacer(Modifier.height(6.dp))
                             Text(
                                 text = "需填 TVBox 配置 JSON 地址（含 spider 与 type=3 站点）",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = AppColors.TextTertiary
+                                color = TvText.Meta
                             )
                         }
                     }
@@ -920,7 +921,7 @@ private fun TvSourceFormPanel(
                             Text(
                                 text = "添加时会自动登录并保存会话，下次启动无需重新输入密码",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = AppColors.TextTertiary
+                                color = TvText.Meta
                             )
                         }
                     }
@@ -982,7 +983,7 @@ private fun TvFormField(
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelMedium,
-                color = AppColors.TextSecondary
+                color = TvText.Body
             )
             if (required) {
                 Box(Modifier.size(6.dp).background(Color(0xFFE5484D), CircleShape))
@@ -992,7 +993,7 @@ private fun TvFormField(
             value = value,
             onValueChange = onValueChange,
             placeholder = {
-                Text(text = placeholder, color = AppColors.TextTertiary)
+                Text(text = placeholder, color = TvText.Meta)
             },
             singleLine = true,
             modifier = Modifier
@@ -1004,19 +1005,16 @@ private fun TvFormField(
                 keyboardType = keyboardType,
                 imeAction = ImeAction.Next
             ),
-            textStyle = androidx.compose.ui.text.TextStyle(
-                fontSize = 17.sp,
-                color = AppColors.TextPrimary
-            ),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = TvText.Title),
             shape = RoundedCornerShape(10.dp),
             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                unfocusedContainerColor = Color(0xFF0B0D12),
-                focusedContainerColor = Color(0xFF0B0D12),
+                unfocusedContainerColor = AppColors.Bg,
+                focusedContainerColor = AppColors.Bg,
                 unfocusedBorderColor = AppColors.SurfaceHi,
                 focusedBorderColor = AppColors.Brand,
                 cursorColor = AppColors.Brand,
-                focusedTextColor = AppColors.TextPrimary,
-                unfocusedTextColor = AppColors.TextPrimary
+                focusedTextColor = TvText.Title,
+                unfocusedTextColor = TvText.Title
             )
         )
     }
@@ -1070,14 +1068,14 @@ private fun TvDeleteConfirmDialog(
                         Text(
                             text = "删除来源？",
                             style = MaterialTheme.typography.headlineSmall,
-                            color = AppColors.TextPrimary,
+                            color = TvText.Title,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
                             text = "将移除「${source.name}」以及它已同步的全部内容。",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = AppColors.TextSecondary
+                            color = TvText.Body
                         )
                     }
                 }

@@ -42,6 +42,7 @@ import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.launch
 
 private const val TV_PAGE_SIZE = 60
@@ -129,13 +130,13 @@ fun TvGenreScreen(
             // 遥控器 Back 键统一由 TvApp.BackHandler 处理
             Text(
                 chips.firstOrNull { it.second == kind && it.third == genre }?.first ?: "全部",
-                color = AppColors.TextPrimary,
+                color = TvText.Title,
                 style = MaterialTheme.typography.headlineMedium
             )
             Spacer(Modifier.width(16.dp))
             Text(
                 "${items.size} 个条目",
-                color = AppColors.TextTertiary,
+                color = TvText.Meta,
                 style = MaterialTheme.typography.bodyMedium
             )
         }
@@ -205,7 +206,7 @@ fun TvGenreScreen(
                                 modifier = Modifier.width(22.dp)
                             )
                             Spacer(Modifier.width(12.dp))
-                            Text("加载更多…", color = AppColors.TextTertiary)
+                            Text("加载更多…", color = TvText.Meta)
                         }
                     }
                 }
@@ -286,14 +287,14 @@ fun TvCategoryScreen(
         ) {
             Text(
                 typeName,
-                color = AppColors.TextPrimary,
+                color = TvText.Title,
                 style = MaterialTheme.typography.headlineMedium
             )
             Spacer(Modifier.width(16.dp))
             if (!loading) {
                 Text(
                     "${items.size} 个条目",
-                    color = AppColors.TextTertiary,
+                    color = TvText.Meta,
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
@@ -339,7 +340,7 @@ fun TvCategoryScreen(
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("正在加载更多…", color = AppColors.TextTertiary)
+                            Text("正在加载更多…", color = TvText.Meta)
                         }
                     }
                 }

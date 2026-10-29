@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -57,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.delay
 
 /**
@@ -235,7 +237,7 @@ fun TvSearchScreen(
             showSuggestions -> {
                 Text(
                     "猜你想看 · 按 OK 直接搜索",
-                    color = AppColors.TextTertiary,
+                    color = TvText.Meta,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(start = 20.dp, bottom = 8.dp)
                 )
@@ -257,13 +259,18 @@ fun TvSearchScreen(
 
             // 本地已查完但远程站点还在并发返回：先上屏本地结果，顶部提示仍在补
             state.results.isNotEmpty() -> {
+                // 与手机端一致：按来源（sourceName）分组，组标题占整行，组内仍是海报网格。
+                // groupBy 保留插入顺序，所以本地库的组在前、远程陆续命中的组往后追加。
+                val grouped = remember(state.results) {
+                    state.results.groupBy { it.sourceName.ifBlank { "未知来源" } }
+                }
                 Text(
                     if (state.remoteSearching) {
-                        "已找到 ${state.results.size} 个结果，远程站点搜索中…"
+                        "搜索结果 ${state.results.size} 条 · ${grouped.size} 个来源，远程站点搜索中…"
                     } else {
-                        "找到 ${state.results.size} 个结果"
+                        "搜索结果 ${state.results.size} 条 · ${grouped.size} 个来源"
                     },
-                    color = AppColors.TextTertiary,
+                    color = TvText.Meta,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.padding(start = 20.dp, bottom = 10.dp)
                 )
@@ -274,16 +281,34 @@ fun TvSearchScreen(
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(state.results, key = { "tv_s_${it.id}" }) { item ->
-                        TvPosterCard(
-                            item = item,
-                            onClick = { onDetail(item.id) },
-                            fillCell = true,
-                            modifier = Modifier.then(
-                                if (item.id == state.results.first().id) Modifier.focusRequester(firstResultFocus)
-                                else Modifier
+                    grouped.forEach { (sourceName, itemsOfSource) ->
+                        item(
+                            key = "tv_s_grp_$sourceName",
+                            span = { GridItemSpan(maxLineSpan) }
+                        ) {
+                            TvSectionTitle(
+                                sourceName,
+                                contentPadding = PaddingValues(start = 0.dp, end = 0.dp, top = 8.dp, bottom = 0.dp),
+                                trailing = {
+                                    Text(
+                                        "${itemsOfSource.size} 条",
+                                        color = TvText.Meta,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
                             )
-                        )
+                        }
+                        items(itemsOfSource, key = { "tv_s_${it.id}" }) { item ->
+                            TvPosterCard(
+                                item = item,
+                                onClick = { onDetail(item.id) },
+                                fillCell = true,
+                                modifier = Modifier.then(
+                                    if (item.id == state.results.first().id) Modifier.focusRequester(firstResultFocus)
+                                    else Modifier
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -323,12 +348,12 @@ private fun TvSuggestionRow(
         Text(
             "🔍",
             style = MaterialTheme.typography.titleMedium,
-            color = if (focused) Color.Black else AppColors.TextTertiary
+            color = if (focused) Color.Black else TvText.Meta
         )
         Spacer(Modifier.width(12.dp))
         Text(
             title,
-            color = if (focused) Color.Black else AppColors.TextPrimary,
+            color = if (focused) Color.Black else TvText.Title,
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
@@ -376,13 +401,13 @@ private fun TvSearchField(
         contentAlignment = Alignment.CenterStart
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("🔍", style = MaterialTheme.typography.titleMedium, color = AppColors.TextTertiary)
+            Text("🔍", style = MaterialTheme.typography.titleMedium, color = TvText.Meta)
             Spacer(Modifier.width(12.dp))
             Box(Modifier.weight(1f)) {
                 if (value.isEmpty()) {
                     Text(
                         "搜索片名 / 演员 / 拼音首字母",
-                        color = AppColors.TextTertiary,
+                        color = TvText.Meta,
                         style = MaterialTheme.typography.bodyLarge
                     )
                 }
@@ -391,7 +416,7 @@ private fun TvSearchField(
                     onValueChange = onValueChange,
                     singleLine = true,
                     textStyle = TextStyle(
-                        color = AppColors.TextPrimary,
+                        color = TvText.Title,
                         fontSize = MaterialTheme.typography.bodyLarge.fontSize,
                         fontWeight = FontWeight.Medium
                     ),

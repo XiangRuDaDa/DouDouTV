@@ -23,8 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -41,14 +39,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.graphicsLayer
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
-import com.tabbit.myvidhub.ui.components.subtitle
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.TvText
 
 /**
  * 电视端专用组件（十英尺界面）。
@@ -56,6 +55,14 @@ import com.tabbit.myvidhub.ui.theme.AppColors
  * 与手机端组件完全分开实现，理由很实在：
  *   · 电视没有触摸，所有可交互元素必须是「可聚焦 + 有明显焦点态」，尺寸要按观看距离放大；
  *   · 手机端组件靠涟漪和阴影表达状态，这些在电视上隔着三米根本看不见，必须用白边和放大。
+ *
+ * 字号与文字颜色都不在这里写死：
+ *   · 字号取 MaterialTheme.typography 的档位，电视端实际大小由 Theme 的 TvTypography 决定；
+ *   · 文字颜色取 TvText 的层级（Title / Section / Body / Meta / Muted / Hairline），
+ *     整屏只用白→灰一条轴拉开层级，品牌色只留给按钮和进度条这类「可操作 / 进行中」的元素。
+ *
+ * 聚焦的元件一律先 .zIndex(1f) 再 .graphicsLayer 放大：
+ * 抬高绘制层级，放大后的白边才不会被同排的兄弟节点压住。
  */
 
 /** 电视上的主按钮：白底黑字（主操作）或半透明白底（次操作），聚焦时加粗白边 */
@@ -76,6 +83,8 @@ fun TvPillButton(
 
     Box(
         modifier
+            // 放大后要把绘制层级抬起来，否则同排右侧的兄弟节点会压在白边上面
+            .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(8.dp))
             .background(
@@ -102,16 +111,13 @@ fun TvPillButton(
             text,
             color = when {
                 primary && focused -> Color.Black       // 主按钮 + 聚焦：白底黑字
-                primary -> Color.White                 // 主按钮 + 正常：蓝底白字
-                focused -> Color.Black                 // 次按钮 + 聚焦：白底黑字
-                compact -> Color.White.copy(alpha = 0.72f)  // 紧凑顶栏按钮：72% opacity 轻量化
-                else -> Color.White.copy(alpha = 0.90f)     // 次按钮：90% opacity
+                primary -> TvText.Title                 // 主按钮 + 正常：蓝底白字
+                focused -> Color.Black                  // 次按钮 + 聚焦：白底黑字
+                compact -> TvText.Body                  // 紧凑顶栏按钮：弱化，不跟主操作抢注意力
+                else -> TvText.Section
             },
-            // 非紧凑（主操作）→ Level 3: titleMedium 16sp Bold 100%
-            // 紧凑（顶栏/工具栏）→ labelLarge 14sp Medium 72%
             style = if (compact) MaterialTheme.typography.labelLarge
             else MaterialTheme.typography.titleMedium,
-            fontWeight = if (compact) FontWeight.Medium else FontWeight.Bold,
             maxLines = 1
         )
     }
@@ -128,22 +134,19 @@ fun TvPlayButton(
     compact: Boolean = false,
     onClick: () -> Unit
 ) {
-    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "play_pill")
 
     Row(
         modifier
+            .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(8.dp))
             .background(if (focused) Color.White else AppColors.Brand)
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
-            .onFocusChanged { focused = it.isFocused }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .focusable()
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
             .padding(
                 horizontal = if (compact) 20.dp else 26.dp,
                 vertical = if (compact) 8.dp else 12.dp
@@ -158,11 +161,9 @@ fun TvPlayButton(
         )
         Text(
             text,
-            color = if (focused) Color.Black else Color.White,
-            // Level 3: titleMedium 16sp Bold 100%（主操作语气要肯定）
+            color = if (focused) Color.Black else TvText.Title,
             style = if (compact) MaterialTheme.typography.labelLarge
             else MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
             maxLines = 1
         )
     }
@@ -184,14 +185,15 @@ fun TvIconButton(
      * 直径。放进标题行时贴着大标题站，46dp 会显得比字还抢眼，
      * 所以允许调用方收小一档；操作区里的默认值仍是 46dp。
      */
-    sizeDp: Dp = 46.dp,
-    onFocusChanged: ((Boolean) -> Unit)? = null
+    sizeDp: Dp = 46.dp
 ) {
-    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(140), label = "tv_icon")
 
     Box(
         modifier
+            .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .size(sizeDp)
             .clip(RoundedCornerShape(50))
@@ -206,22 +208,14 @@ fun TvIconButton(
                 if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(50))
                 else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(50))
             )
-            .onFocusChanged {
-                focused = it.isFocused
-                onFocusChanged?.invoke(it.isFocused)
-            }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .focusable(),
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction),
         contentAlignment = Alignment.Center
     ) {
         androidx.compose.material3.Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = if (focused) Color.Black else Color.White,
+            tint = if (focused) Color.Black else TvText.Title,
             // 图标随按钮等比缩，收小后不会出现「大图标塞在小圆里」
             modifier = Modifier.size(sizeDp * 0.48f)
         )
@@ -256,6 +250,8 @@ fun TvPosterCard(
     Column(
         modifier
             .then(if (fillCell) Modifier.fillMaxWidth() else Modifier.width(width))
+            // 放大 10% 后要抬高绘制层级，否则描边会被同行后面的卡片压住
+            .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(10.dp))
             .background(AppColors.Surface)
@@ -295,10 +291,10 @@ fun TvPosterCard(
         }
         Text(
             item.title,
-            // 卡片标题：100% 白 + Bold —— 和海报视觉竞争不能输
-            color = Color.White,
+            // 卡片标题不靠粗体压海报，靠 88% 白 + Medium 保持和正文同族
+            color = TvText.Section,
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Bold,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp)
@@ -326,11 +322,9 @@ fun TvSectionTitle(
     ) {
         Text(
             text,
-            // Level 2 分区标题：titleLarge 22sp Bold · 90% White
-            // headlineSmall(24sp) 太大太粗，分区标题比 Hero 标题低一档
-            color = Color.White.copy(alpha = 0.90f),
+            // 分区标题比 Hero 低一档：titleLarge + Section 级白，靠字号分层而不是靠粗体
+            color = TvText.Section,
             style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f)
         )
         trailing?.invoke()
@@ -343,7 +337,7 @@ fun TvMoreButton(onClick: () -> Unit) {
     TvPillButton(text = "查看全部", primary = false, onClick = onClick)
 }
 
-/** 空状态提示 —— 主文 headlineSmall 24sp 粗 + hint bodyMedium 14sp 55% */
+/** 空状态提示 —— 主文 headlineSmall，下面补一条更弱的 hint */
 @Composable
 fun TvEmptyState(text: String, hint: String? = null, modifier: Modifier = Modifier) {
     Column(
@@ -355,26 +349,26 @@ fun TvEmptyState(text: String, hint: String? = null, modifier: Modifier = Modifi
     ) {
         Text(
             text,
-            color = Color.White.copy(alpha = 0.90f),
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold
+            color = TvText.Section,
+            style = MaterialTheme.typography.headlineSmall
         )
         if (hint != null) {
             Spacer(Modifier.height(10.dp))
             Text(
                 text = hint,
-                // Level 7 信息标签级：14sp · 55% White —— 别和主文抢注意力
-                color = Color.White.copy(alpha = 0.55f),
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium
+                // hint 比主文低两档，别抢注意力
+                color = TvText.Meta,
+                style = MaterialTheme.typography.bodyMedium
             )
         }
     }
 }
 
-/** 元信息条：年份 · 评分 · 类型，中间用圆点分隔 */
-/** TV 端元信息行：年份 · 类型 · 时长（已移除评分 —— 避免与海报背景 IMDb 分重复）。
- *  字号 14sp / Medium / rgba(255,255,255,.72) —— 介于标题与徽章之间的视觉权重。 */
+/**
+ * TV 端元信息行：年份 · 类型 · 时长，中间用圆点分隔。
+ * 评分不在这里显示 —— 海报背景上已带 IMDb 分，重复出现会打架。
+ * 权重介于标题与徽章之间：bodyMedium + Meta 级白。
+ */
 @Composable
 fun TvMetaRow(item: MediaEntity, modifier: Modifier = Modifier) {
     val bits = buildList {
@@ -388,16 +382,14 @@ fun TvMetaRow(item: MediaEntity, modifier: Modifier = Modifier) {
             if (index > 0) {
                 Text(
                     text = "  ·  ",
-                    color = Color.White.copy(alpha = 0.30f),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Normal
+                    color = TvText.Hairline,
+                    style = MaterialTheme.typography.bodyMedium
                 )
             }
             Text(
                 text = s,
-                color = Color.White.copy(alpha = 0.72f),
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium
+                color = TvText.Meta,
+                style = MaterialTheme.typography.bodyMedium
             )
         }
     }
@@ -424,29 +416,22 @@ fun TvBackButton(onBack: () -> Unit) {
     ) {
         Text(
             "← 返回",
-            // 返回按钮：titleSmall 14sp Medium · 72% White —— 不要抢焦点
-            color = if (focused) Color.Black else Color.White.copy(alpha = 0.72f),
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Medium
+            // 返回按钮用 titleSmall + Body 级白：够用但不抢焦点
+            color = if (focused) Color.Black else TvText.Body,
+            style = MaterialTheme.typography.titleSmall
         )
     }
 }
 
 /**
  * 电视端网格列数：跟随设置页「缩略图大小」。
- * 之前网格写死 6 列，设置项只作用于首页横排，切到「查看全部」海报又变回默认大小。
+ * 所有 TV 网格页（分类 / 查看全部 / 搜索 / 来源）都取这个值，避免各处各写一套。
  */
 fun tvGridColumns(): Int = when (Prefs.posterSize) {
     Prefs.PosterSize.SMALL -> 8
     Prefs.PosterSize.MEDIUM -> 6
     Prefs.PosterSize.LARGE -> 4
 }
-
-/** 竖版海报行之间的统一间距 */
-internal val TvRowSpacing = 18.dp
-
-/** 行首尾留白，保证聚焦放大时不被裁切 */
-internal val TvRowPadding = 20.dp
 
 /** 电视端可聚焦的小尺寸标签（题材筛选等） */
 @Composable
@@ -480,13 +465,11 @@ fun TvFilterChip(
             text,
             color = when {
                 focused -> Color.Black
-                selected -> Color.White
-                // 未选中 chip ：85% White —— 徽章级视觉权重
-                else -> Color.White.copy(alpha = 0.85f)
+                selected -> TvText.Title
+                else -> TvText.Body
             },
-            // Level 6 徽章：labelMedium 11sp SemiBold
+            // 徽章级：labelMedium，比正文轻一档
             style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
             maxLines = 1
         )
     }

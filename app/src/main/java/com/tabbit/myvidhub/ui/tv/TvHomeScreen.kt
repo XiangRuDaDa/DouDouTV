@@ -36,11 +36,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AltRoute
-import androidx.compose.material.icons.filled.Source
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -63,7 +59,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -75,6 +70,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.core.Prefs
@@ -86,6 +82,7 @@ import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -421,7 +418,7 @@ private fun TvTopBar(
                     onFocusChanged = markTopBarFocus
                 )
                 if (onHomeSite != null && !siteName.isNullOrBlank()) {
-                    Text("›", color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.titleMedium)
+                    Text("›", color = TvText.Muted, style = MaterialTheme.typography.titleMedium)
                     TvSourceChainPill(
                         label = "线路",
                         value = siteName,
@@ -438,7 +435,7 @@ private fun TvTopBar(
             if (scanning) {
                 CircularProgressIndicator(color = AppColors.Brand, strokeWidth = 2.dp, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("刷新中…", color = AppColors.TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Text("刷新中…", color = TvText.Body, style = MaterialTheme.typography.labelMedium)
             } else {
                 TvPillButton(
                     "刷新", primary = false, compact = true, onClick = onRefresh,
@@ -474,7 +471,7 @@ private fun TvSourceChainPill(
     val labelColor = when (kind) {
         SourceKind.EMBY -> AppColors.BrandSoft
         SourceKind.TVBOX -> AppColors.Rating
-        null -> Color.White.copy(alpha = 0.7f)
+        null -> TvText.Body
     }
     val bg = when {
         focused -> Color.White
@@ -482,10 +479,11 @@ private fun TvSourceChainPill(
         kind == SourceKind.TVBOX -> AppColors.Rating.copy(alpha = 0.16f)
         else -> Color.White.copy(alpha = 0.10f)
     }
-    val textColor = if (focused) Color.Black else Color.White
+    val textColor = if (focused) Color.Black else TvText.Title
 
     Row(
         modifier
+            .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(8.dp))
             .background(bg)
@@ -576,9 +574,8 @@ private fun TvHero(
             } else {
                 Text(
                     item.title,
-                    color = Color.White,
+                    color = TvText.Title,
                     style = MaterialTheme.typography.displayLarge,
-                    fontWeight = FontWeight.Bold,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -806,7 +803,7 @@ private fun TvContinueRow(
                 ) {
                     Text(
                         item.title,
-                        color = Color.White,
+                        color = TvText.Title,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -815,7 +812,7 @@ private fun TvContinueRow(
                     if (item.seriesKey.isNotBlank() && item.season > 0) {
                         Text(
                             "S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')}",
-                            color = Color.White.copy(alpha = 0.7f),
+                            color = TvText.Body,
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -937,8 +934,8 @@ private fun TvDialogOption(
             text,
             color = when {
                 focused -> Color.Black
-                selected -> Color.White
-                else -> AppColors.TextPrimary
+                selected -> TvText.Title
+                else -> TvText.Section
             },
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Normal,
@@ -967,9 +964,8 @@ private fun HomeSourceDialog(
         ) {
             Text(
                 "选择首页来源",
-                color = AppColors.TextPrimary,
+                color = TvText.Title,
                 style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(horizontal = 26.dp)
             )
             Spacer(Modifier.height(14.dp))
@@ -1028,9 +1024,8 @@ private fun HomeSiteDialog(
             ) {
                 Text(
                     "选择线路（站点）",
-                    color = AppColors.TextPrimary,
+                    color = TvText.Title,
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 26.dp)
                 )
                 Spacer(Modifier.height(14.dp))

@@ -85,11 +85,12 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.zIndex
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
-import com.tabbit.myvidhub.ui.components.FormatBadgesRow
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
+import com.tabbit.myvidhub.ui.theme.TvText
 import androidx.compose.runtime.collectAsState
 
 /**
@@ -474,9 +475,8 @@ fun TvDetailScreen(
                                 } else {
                                     Text(
                                         item.title,
-                                        color = Color.White,
+                                        color = TvText.Title,
                                         style = MaterialTheme.typography.displayLarge,
-                                        fontWeight = FontWeight.Bold,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -484,22 +484,25 @@ fun TvDetailScreen(
                             }
                             Spacer(Modifier.width(14.dp))
                             // 收藏在页面最上方：上键到此为止，下键回播放。
+                            // focusRequester 必须挂在这里，否则播放按钮的上键是个空引用、按了没反应。
                             TvIconButton(
                                 icon = if (item.favorite) Icons.Filled.Favorite
                                 else Icons.Filled.FavoriteBorder,
                                 active = item.favorite,
                                 contentDescription = if (item.favorite) "取消收藏" else "收藏",
                                 sizeDp = 40.dp,
-                                modifier = Modifier.focusProperties {
-                                    up = FocusRequester.Cancel
-                                    down = playFocusRequester
-                                },
+                                modifier = Modifier
+                                    .focusRequester(favoriteFocusRequester)
+                                    .focusProperties {
+                                        up = FocusRequester.Cancel
+                                        down = playFocusRequester
+                                    },
                                 onClick = { vm.toggleFavorite(item.id, !item.favorite) }
                             )
                         }
 
-                        // 元信息放在标题与徽章之间，形成节奏：
-                        // 标题(40sp 粗) → 元信息(14sp 中) → 徽章(11sp) → 按钮(15sp 粗)
+                        // 元信息放在标题与徽章之间，形成层级节奏：
+                        // 大标题 → 元信息 → 徽章 → 按钮，各档字号都由 TvTypography 决定
                         Spacer(Modifier.height(8.dp))
                         TvMetaRow(item)
                         Spacer(Modifier.height(10.dp))
@@ -606,10 +609,8 @@ fun TvDetailScreen(
                             Spacer(Modifier.height(16.dp))
                             Text(
                                 text = overview,
-                                color = Color.White.copy(alpha = 0.85f),
+                                color = TvText.Body,
                                 style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Normal,
-                                lineHeight = 28.sp,
                                 // 4 行以内：保证简介 + 主演 + 选集首行能挤进同一屏
                                 maxLines = 4,
                                 overflow = TextOverflow.Ellipsis
@@ -809,13 +810,13 @@ private fun TvInfoLine(label: String, value: String) {
     Row(Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
         Text(
             label,
-            color = AppColors.TextTertiary,
+            color = TvText.Muted,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.width(58.dp)
         )
         Text(
             value,
-            color = AppColors.TextSecondary,
+            color = TvText.Body,
             style = MaterialTheme.typography.bodyMedium,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
@@ -867,6 +868,7 @@ private fun TvEpisodeCard(
 
     Column(
         modifier
+            .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(10.dp))
             .background(if (watched) AppColors.Brand.copy(alpha = 0.18f) else AppColors.Surface)
@@ -892,9 +894,8 @@ private fun TvEpisodeCard(
     ) {
         Text(
             label,
-            color = if (watched) AppColors.BrandSoft else AppColors.TextPrimary,
+            color = if (watched) AppColors.BrandSoft else TvText.Title,
             style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -961,11 +962,10 @@ private fun FormatBadgesRow(
                     label,
                     color = when {
                         label == "TMDB" -> AppColors.BrandSoft
-                        placeholder -> Color.White.copy(alpha = 0.34f)
-                        else -> Color.White.copy(alpha = 0.72f)
+                        placeholder -> TvText.Hairline
+                        else -> TvText.Body
                     },
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Medium
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
         }
@@ -1012,7 +1012,7 @@ private fun TvCastRow(cast: List<TvCast>) {
                     } else {
                         Text(
                             person.name.take(1),
-                            color = AppColors.TextSecondary,
+                            color = TvText.Meta,
                             style = MaterialTheme.typography.titleLarge
                         )
                     }
@@ -1020,7 +1020,7 @@ private fun TvCastRow(cast: List<TvCast>) {
                 Spacer(Modifier.height(6.dp))
                 Text(
                     person.name,
-                    color = AppColors.TextPrimary,
+                    color = TvText.Section,
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -1028,7 +1028,7 @@ private fun TvCastRow(cast: List<TvCast>) {
                 if (person.role.isNotBlank()) {
                     Text(
                         person.role,
-                        color = AppColors.TextTertiary,
+                        color = TvText.Muted,
                         style = MaterialTheme.typography.labelSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis

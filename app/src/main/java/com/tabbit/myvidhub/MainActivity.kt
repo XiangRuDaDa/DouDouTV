@@ -6,7 +6,6 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.phone.PhoneApp
@@ -45,11 +44,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MyVidHubTheme {
-                val context = LocalContext.current
-                // 判定只发生在最外层一次：系统 uiMode 为主，设置里的强制开关为辅，
-                // 并对部分国产盒子 uiMode 上报不准的情况做了无触摸屏兜底。
-                val isTv = remember { context.isTelevision() || context.forceTvMode() }
+            // 判定只发生在最外层一次：系统 uiMode 为主，设置里的强制开关为辅，
+            // 并对部分国产盒子 uiMode 上报不准的情况做了无触摸屏兜底。
+            // 字号表也依赖它：电视端要换整套放大过的 typography，所以判定必须在主题外层。
+            val isTv = remember { isTelevision() || forceTvMode() }
+            MyVidHubTheme(isTv = isTv) {
                 val vm: LibraryViewModel = viewModel()
 
                 if (isTv) {
