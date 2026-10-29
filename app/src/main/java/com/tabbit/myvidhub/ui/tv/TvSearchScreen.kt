@@ -202,7 +202,7 @@ fun TvSearchScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 14.dp),
+                .padding(start = TvPagePadding, end = TvPagePadding, top = 20.dp, bottom = 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 遥控器 Back 键统一由 TvApp.BackHandler 处理，不再放页面内返回按钮
@@ -239,10 +239,10 @@ fun TvSearchScreen(
                     "猜你想看 · 按 OK 直接搜索",
                     color = TvText.Meta,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(start = 20.dp, bottom = 8.dp)
+                    modifier = Modifier.padding(start = TvPagePadding, bottom = 8.dp)
                 )
                 LazyColumn(
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 32.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
@@ -272,11 +272,11 @@ fun TvSearchScreen(
                     },
                     color = TvText.Meta,
                     style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(start = 20.dp, bottom = 10.dp)
+                    modifier = Modifier.padding(start = TvPagePadding, bottom = 10.dp)
                 )
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(tvGridColumns()),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 32.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                     modifier = Modifier.fillMaxSize()

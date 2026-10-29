@@ -65,13 +65,33 @@ import com.tabbit.myvidhub.ui.theme.TvText
  * 抬高绘制层级，放大后的白边才不会被同排的兄弟节点压住。
  */
 
+/**
+ * 电视端按钮的尺寸档位。
+ *
+ * 分档只动内边距，字号一律 titleMedium —— 这是 Netflix 的规矩：可操作元件靠
+ * 「实心 / 幽灵 + 图标」分主次，不靠字号和尺寸分主次。一旦让次要按钮掉到 label 字号，
+ * 就会出现「分区标题旁边一颗大胶囊、Hero 上一对小胶囊」的倒挂，两边都显得不对。
+ *
+ * 三档算上文字行高（23dp）大致是 35 / 43 / 49dp：
+ *   · [Sm] 顶栏入口条（横向预算最紧）；
+ *   · [Md] 页内次操作、分区「查看全部」、选集控制条；
+ *   · [Lg] Hero 与详情页的主操作 —— 全页最大的可点元素。
+ */
+enum class TvButtonSize { Sm, Md, Lg }
+
+private fun tvButtonPadding(size: TvButtonSize): PaddingValues = when (size) {
+    TvButtonSize.Sm -> PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+    TvButtonSize.Md -> PaddingValues(horizontal = 20.dp, vertical = 10.dp)
+    TvButtonSize.Lg -> PaddingValues(horizontal = 26.dp, vertical = 13.dp)
+}
+
 /** 电视上的主按钮：白底黑字（主操作）或半透明白底（次操作），聚焦时加粗白边 */
 @Composable
 fun TvPillButton(
     text: String,
     modifier: Modifier = Modifier,
     primary: Boolean = true,
-    compact: Boolean = false,
+    size: TvButtonSize = TvButtonSize.Md,
     onClick: () -> Unit
 ) {
     // 焦点态统一由 interactionSource 驱动：clickable 与 focusable 共用同一个 source。
@@ -102,10 +122,7 @@ fun TvPillButton(
                 onClick = onClick
             )
             .focusable(interactionSource = interaction)
-            .padding(
-                horizontal = if (compact) 18.dp else 26.dp,
-                vertical = if (compact) 8.dp else 12.dp
-            )
+            .padding(tvButtonPadding(size))
     ) {
         Text(
             text,
@@ -113,11 +130,11 @@ fun TvPillButton(
                 primary && focused -> Color.Black       // 主按钮 + 聚焦：白底黑字
                 primary -> TvText.Title                 // 主按钮 + 正常：蓝底白字
                 focused -> Color.Black                  // 次按钮 + 聚焦：白底黑字
-                compact -> TvText.Body                  // 紧凑顶栏按钮：弱化，不跟主操作抢注意力
+                size == TvButtonSize.Sm -> TvText.Body   // 顶栏按钮：弱化，不跟主操作抢注意力
                 else -> TvText.Section
             },
-            style = if (compact) MaterialTheme.typography.labelLarge
-            else MaterialTheme.typography.titleMedium,
+            // 三档共用同一个字号，层级交给填充与高度
+            style = MaterialTheme.typography.titleMedium,
             maxLines = 1
         )
     }
@@ -131,7 +148,7 @@ fun TvPillButton(
 fun TvPlayButton(
     text: String,
     modifier: Modifier = Modifier,
-    compact: Boolean = false,
+    size: TvButtonSize = TvButtonSize.Md,
     onClick: () -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -147,23 +164,27 @@ fun TvPlayButton(
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .padding(
-                horizontal = if (compact) 20.dp else 26.dp,
-                vertical = if (compact) 8.dp else 12.dp
-            ),
+            .padding(tvButtonPadding(size)),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         androidx.compose.material3.Icon(
             imageVector = Icons.Filled.PlayArrow,
             contentDescription = null,
-            tint = if (focused) Color.Black else Color.White
+            tint = if (focused) Color.Black else Color.White,
+            // 图标跟按钮同档缩放，避免出现「小胶囊里塞个标准大的三角」
+            modifier = Modifier.size(
+                when (size) {
+                    TvButtonSize.Sm -> 18.dp
+                    TvButtonSize.Md -> 22.dp
+                    TvButtonSize.Lg -> 24.dp
+                }
+            )
         )
         Text(
             text,
             color = if (focused) Color.Black else TvText.Title,
-            style = if (compact) MaterialTheme.typography.labelLarge
-            else MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleMedium,
             maxLines = 1
         )
     }
@@ -307,10 +328,9 @@ fun TvPosterCard(
 fun TvSectionTitle(
     text: String,
     modifier: Modifier = Modifier,
-    // 内边距可配：详情页铺满整屏时要把左边界推到 56dp 与信息列对齐，
-    // 其它页面沿用默认值，保持原有观感。
+    // 默认走页面左轴；详情页等信息列更宽的区域由调用方覆写。
     contentPadding: PaddingValues = PaddingValues(
-        start = 20.dp, end = 20.dp, top = 22.dp, bottom = 10.dp
+        start = TvPagePadding, end = TvPagePadding, top = 22.dp, bottom = 10.dp
     ),
     trailing: (@Composable () -> Unit)? = null
 ) {
@@ -331,10 +351,10 @@ fun TvSectionTitle(
     }
 }
 
-/** 电视端的「更多」入口，可用遥控器聚焦点击 */
+/** 电视端的「更多」入口：和分区标题同排，取中档 —— 比它旁边的 20sp 标题略小，不抢字 */
 @Composable
 fun TvMoreButton(onClick: () -> Unit) {
-    TvPillButton(text = "查看全部", primary = false, onClick = onClick)
+    TvPillButton(text = "查看全部", primary = false, size = TvButtonSize.Md, onClick = onClick)
 }
 
 /** 空状态提示 —— 主文 headlineSmall，下面补一条更弱的 hint */
@@ -401,7 +421,7 @@ fun TvBackButton(onBack: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .padding(start = 20.dp, top = 20.dp)
+            .padding(start = TvPagePadding, top = 20.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(if (focused) Color.White else Color.Black.copy(alpha = 0.45f))
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
@@ -422,6 +442,16 @@ fun TvBackButton(onBack: () -> Unit) {
         )
     }
 }
+
+/**
+ * 页面左右边距：电视端所有页面共用这一条左轴。
+ *
+ * 取 40dp（1080p 电视上约等于屏宽的 4~5%），和 Netflix 电视端的页面留白同一量级：
+ * 元素不贴屏边，屏幕不被塞满，聚焦描边也天然有处可放。
+ * Hero 文案、顶栏、行标题、海报行、网格页都从这里取值，
+ * 任何一处单独写死就会立刻出现第二条左轴。
+ */
+internal val TvPagePadding = 40.dp
 
 /**
  * 电视端网格列数：跟随设置页「缩略图大小」。

@@ -75,9 +75,11 @@ import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.tv.TvButtonSize
 import com.tabbit.myvidhub.ui.tv.TvFilterChip
 import com.tabbit.myvidhub.ui.tv.TvIconButton
 import com.tabbit.myvidhub.ui.tv.TvPillButton
+import com.tabbit.myvidhub.ui.tv.TvPagePadding
 
 /**
  * TV 端来源管理 —— 10 英尺界面。
@@ -119,7 +121,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
 
             // ========== 顶部栏 ==========
             Row(
-                Modifier.fillMaxWidth().padding(top = 0.dp, start = 20.dp, end = 40.dp),
+                Modifier.fillMaxWidth().padding(top = 0.dp, start = TvPagePadding, end = TvPagePadding),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
@@ -155,14 +157,14 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                         TvPillButton(
                             text = "全部同步",
                             primary = false,
-                            compact = true,
+                            size = TvButtonSize.Sm,
                             onClick = { vm.syncAll() }
                         )
                     }
                     TvPillButton(
                         text = "＋ 添加来源",
                         primary = true,
-                        compact = true,
+                        size = TvButtonSize.Sm,
                         onClick = { showAdd = true }
                     )
                 }
@@ -171,7 +173,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
             // ========== 内容区 ==========
             LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize().padding(top = 110.dp, start = 36.dp, end = 36.dp, bottom = 32.dp),
+                modifier = Modifier.fillMaxSize().padding(top = 110.dp, start = TvPagePadding, end = TvPagePadding, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(cardGap),
                 verticalArrangement = Arrangement.spacedBy(cardGap),
                 contentPadding = PaddingValues(top = 4.dp)

@@ -1,8 +1,18 @@
 package com.tabbit.myvidhub.ui.tv
 
 import android.view.KeyEvent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -41,8 +51,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -51,11 +63,14 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -67,6 +82,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -83,7 +99,6 @@ import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.TvText
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -135,12 +150,24 @@ fun TvHomeScreen(
     }
 
     var heroIndex by remember { mutableStateOf(0) }
+    /**
+     * 当前这张已停留的进度（0→1）。用帧时钟而不是 delay：
+     * 进度条和换页读同一个值，走到 1 才翻页，两者不会出现「线还差一截就跳下一张」。
+     */
+    val heroProgress = remember { mutableFloatStateOf(0f) }
     LaunchedEffect(heroItems.size) {
         if (heroItems.size > 1) {
             while (true) {
-                delay(9_000L)
+                val startedAt = withFrameNanos { it }
+                while (true) {
+                    val elapsedSec = (withFrameNanos { it } - startedAt) / 1_000_000_000f
+                    heroProgress.floatValue = (elapsedSec / HERO_DWELL_SECONDS).coerceIn(0f, 1f)
+                    if (heroProgress.floatValue >= 1f) break
+                }
                 heroIndex = (heroIndex + 1) % heroItems.size
             }
+        } else {
+            heroProgress.floatValue = 0f
         }
     }
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
@@ -258,6 +285,7 @@ fun TvHomeScreen(
                         item = hero,
                         heroIndex = heroIndex,
                         heroTotal = heroItems.size,
+                        progress = heroProgress,
                         playFocusRequester = heroPlayFocus,
                         onPlay = { onPlay(hero) },
                         onDetail = { onDetail(hero.id) },
@@ -397,7 +425,7 @@ private fun TvTopBar(
             .fillMaxWidth()
             // alpha 在 draw phase 从 listState 计算 —— 不触发 composition 重组，滚动流畅
             .graphicsLayer { this.alpha = alphaProvider() }
-            .padding(start = 20.dp, end = 20.dp, top = 18.dp),
+            .padding(start = TvPagePadding, end = TvPagePadding, top = 18.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -405,7 +433,7 @@ private fun TvTopBar(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (isEmpty) {
                 TvPillButton(
-                    text = "＋ 添加来源", primary = true, compact = true, onClick = onSources,
+                    text = "＋ 添加来源", primary = true, size = TvButtonSize.Sm, onClick = onSources,
                     modifier = Modifier.focusRequester(sourceFocusRequester).onFocusChanged(markTopBarFocus)
                 )
             } else {
@@ -438,17 +466,17 @@ private fun TvTopBar(
                 Text("刷新中…", color = TvText.Body, style = MaterialTheme.typography.labelMedium)
             } else {
                 TvPillButton(
-                    "刷新", primary = false, compact = true, onClick = onRefresh,
+                    "刷新", primary = false, size = TvButtonSize.Sm, onClick = onRefresh,
                     modifier = Modifier
                         .focusRequester(syncFocusRequester)
                         .onFocusChanged(markTopBarFocus)
                 )
             }
-            TvPillButton("搜索", primary = false, compact = true, onClick = onSearch,
+            TvPillButton("搜索", primary = false, size = TvButtonSize.Sm, onClick = onSearch,
                 modifier = Modifier.onFocusChanged(markTopBarFocus))
-            TvPillButton("来源", primary = false, compact = true, onClick = onSources,
+            TvPillButton("来源", primary = false, size = TvButtonSize.Sm, onClick = onSources,
                 modifier = Modifier.onFocusChanged(markTopBarFocus))
-            TvPillButton("设置", primary = false, compact = true, onClick = onSettings,
+            TvPillButton("设置", primary = false, size = TvButtonSize.Sm, onClick = onSettings,
                 modifier = Modifier.onFocusChanged(markTopBarFocus))
         }
     }
@@ -491,7 +519,8 @@ private fun TvSourceChainPill(
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .onFocusChanged(onFocusChanged)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            // 垂直内边距跟顶栏的 Sm 档对齐（6dp）：两颗按钮同高，一行才不会看着错位
+            .padding(horizontal = 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -513,29 +542,114 @@ private fun TvSourceChainPill(
     }
 }
 
+/** 一张精选在 Hero 上停留的秒数；右下进度条按这个时长走满，走满即换页。 */
+private const val HERO_DWELL_SECONDS = 9f
+
+/**
+ * Hero 高度。
+ *
+ * Netflix 的 billboard 约占视口高的 55~60%，但那家的标题排在画面**下方**；
+ * 这里标题、元信息、按钮全压在画面里（logo 就占 110dp），所以要留出内容高度。
+ * 电视的 dp 视口往往只有 540dp 高（1080p 按 2x density 折算），纯按比例算出来只有
+ * 310dp 左右，底部内容块会被压缩 —— 播放按钮会瘦成一条横线。
+ * 因此按比例取，同时夹在 430~620dp 之间：小屏不至于挤内容，大屏也不会顶掉整个首屏。
+ */
+@Composable
+private fun tvHeroHeight(): Dp {
+    val screenH = LocalConfiguration.current.screenHeightDp.dp
+    return (screenH * 0.72f).coerceIn(430.dp, 620.dp)
+}
+
 /** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下。
- *  Hero 从屏幕最顶端开始铺满，顶栏透明悬浮其上。 */
+ *  Hero 从屏幕最顶端开始铺满，顶栏透明悬浮其上。
+ *
+ *  动效按 Netflix billboard 的量级来：
+ *    · 背景换页用淡入覆盖（600ms），不是硬切；
+ *    · 标题/简介随内容淡入淡出，但按钮行留在动画之外 —— 同一 FocusRequester
+ *      若被两份实例同时 attach，焦点落点会变得不确定；
+ *    · 背景持续做极慢的 Ken Burns 缩放（1.02→1.075 再倒回），
+ *      缩放值只在 graphicsLayer 的 lambda 里读取，走 draw 阶段，画面在动但 Composable 不重组；
+ *    · 缩放后的画面必须裁在 Hero 边界内，否则会溢出盖住下面一行和渐隐遮罩。 */
 @Composable
 private fun TvHero(
     item: MediaEntity,
     heroIndex: Int,
     heroTotal: Int,
+    progress: State<Float>,
     playFocusRequester: FocusRequester,
     onPlay: () -> Unit,
     onDetail: () -> Unit,
     onPlayFocusChanged: (Boolean) -> Unit
 ) {
+    val imageUrl = item.backdropUrl.ifBlank { item.posterUrl }
+
+    // 背景换页：旧图留在底层不动，新图在上层淡入盖过去。
+    // 没有直接用 Crossfade —— 它会把两张图同时压到半透明，中间那一瞬露出黑色页面底色，
+    // 整块画面发灰，底部渐隐也跟着破相。
+    val currentUrl = remember { mutableStateOf(imageUrl) }
+    val outgoingUrl = remember { mutableStateOf<String?>(null) }
+    val backdropAlpha = remember { Animatable(1f) }
+    LaunchedEffect(imageUrl) {
+        if (imageUrl != currentUrl.value) {
+            outgoingUrl.value = currentUrl.value
+            currentUrl.value = imageUrl
+            backdropAlpha.snapTo(0f)
+            backdropAlpha.animateTo(1f, tween(600))
+            outgoingUrl.value = null
+        }
+    }
+
+    // Ken Burns：animateFloat 返回 State，故意不用 by 解包 ——
+    // 在 Composable 里解包等于每帧重组整块 Hero，缩放的省帧优势就没了。
+    val zoomTransition = rememberInfiniteTransition(label = "heroKenBurns")
+    val zoom = zoomTransition.animateFloat(
+        initialValue = 1.02f,
+        targetValue = 1.075f,
+        animationSpec = infiniteRepeatable(
+            animation = tween((HERO_DWELL_SECONDS * 2600).toInt(), easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "heroZoom"
+    )
+
     Box(
         Modifier
             .fillMaxWidth()
-            .height(430.dp)
+            .height(tvHeroHeight())
     ) {
-        AsyncImage(
-            model = item.backdropUrl.ifBlank { item.posterUrl },
-            contentDescription = item.title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize()
-        )
+        // 背景层：放大后的图要裁在 Hero 里，不能溢出到下方内容区
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clipToBounds()
+        ) {
+            val old = outgoingUrl.value
+            if (old != null) {
+                AsyncImage(
+                    model = old,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = zoom.value
+                            scaleY = zoom.value
+                        }
+                )
+            }
+            AsyncImage(
+                model = currentUrl.value,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = backdropAlpha.value
+                        scaleX = zoom.value
+                        scaleY = zoom.value
+                    }
+            )
+        }
 
         // 渐变遮罩 —— remember 缓存避免每次重绘都重建 Brush
         val horizVignette = remember {
@@ -562,27 +676,41 @@ private fun TvHero(
         Column(
             Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = 60.dp, end = 320.dp, bottom = 44.dp)
+                .padding(start = TvPagePadding, end = 320.dp, bottom = 44.dp)
         ) {
-            if (item.logoUrl.isNotBlank()) {
-                AsyncImage(
-                    model = item.logoUrl,
-                    contentDescription = item.title,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.height(110.dp).widthIn(max = 520.dp)
-                )
-            } else {
-                Text(
-                    item.title,
-                    color = TvText.Title,
-                    style = MaterialTheme.typography.displayLarge,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
+            // 文字块换页时淡出旧、淡入新，底边对齐保证不会上下跳
+            AnimatedContent(
+                targetState = item,
+                transitionSpec = {
+                    fadeIn(tween(300)) togetherWith fadeOut(tween(150))
+                },
+                contentAlignment = Alignment.BottomStart,
+                label = "heroText"
+            ) { current ->
+                Column {
+                    if (current.logoUrl.isNotBlank()) {
+                        AsyncImage(
+                            model = current.logoUrl,
+                            contentDescription = current.title,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.height(110.dp).widthIn(max = 520.dp)
+                        )
+                    } else {
+                        Text(
+                            current.title,
+                            color = TvText.Title,
+                            style = MaterialTheme.typography.displayLarge,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    TvMetaRow(current)
+                }
             }
-            Spacer(Modifier.height(14.dp))
-            TvMetaRow(item)
             Spacer(Modifier.height(18.dp))
+            // Hero 的两个按钮走最大一档：它们旁边是 44sp 的片名，
+            // 再用顶栏那一档会显得缩在画面角落里。
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TvPillButton(
                     text = if (item.positionMs > 5_000L) "▶ 继续播放" else "▶ 播放",
@@ -590,42 +718,48 @@ private fun TvHero(
                         .focusRequester(playFocusRequester)
                         .onFocusChanged { onPlayFocusChanged(it.isFocused) },
                     primary = true,
-                    compact = true,
+                    size = TvButtonSize.Lg,
                     onClick = onPlay
                 )
-                TvPillButton(text = "ⓘ 详情", primary = false, compact = true, onClick = onDetail)
+                TvPillButton(text = "ⓘ 详情", primary = false, size = TvButtonSize.Lg, onClick = onDetail)
             }
         }
 
-        // 轮播指示器（右下）
+        // 轮播进度（右下）：序号 + 一条细进度线，替代圆点指示器
         if (heroTotal > 1) {
             Row(
                 Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 60.dp, bottom = 44.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .padding(end = TvPagePadding, bottom = 44.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                repeat(heroTotal) { idx ->
-                    val active = idx == heroIndex
-                    Box(
-                        Modifier
-                            .height(10.dp)
-                            .width(if (active) 28.dp else 10.dp)
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(
-                                if (active) Color.White
-                                else Color.White.copy(alpha = 0.35f)
+                Text(
+                    "${heroIndex + 1} / $heroTotal",
+                    color = TvText.Muted,
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Box(
+                    Modifier
+                        .width(120.dp)
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(TvText.Hairline)
+                        // 在 draw 阶段读 State：进度每秒变几十次，只重画这条线，不重组整个 Hero
+                        .drawBehind {
+                            drawRect(
+                                color = AppColors.Brand,
+                                size = Size(size.width * progress.value, size.height)
                             )
-                    )
-                }
+                        }
+                )
             }
         }
     }
 }
 
 /** 空态主视觉：轮播区常驻，但没有可推荐内容时占位。
- *  高度与 TvHero 一致（430dp），避免首页在「加载中 / 空库」之间上下跳版。 */
+ *  高度走同一个 [tvHeroHeight]，避免首页在「加载中 / 空库」之间上下跳版。 */
 @Composable
 private fun TvHeroEmpty(
     libraryIsEmpty: Boolean,
@@ -663,7 +797,7 @@ private fun TvHeroEmpty(
     Box(
         Modifier
             .fillMaxWidth()
-            .height(430.dp)
+            .height(tvHeroHeight())
             .background(bg),
         contentAlignment = Alignment.Center
     ) {
@@ -713,7 +847,7 @@ private fun TvShimmerRow(count: Int = 6) {
     val w = Prefs.posterSize.tvDp.dp
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(count) {
@@ -743,7 +877,7 @@ private fun TvPosterRow(
     LazyRow(
         state = rowState,
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(items, key = { "tv_${it.id}" }) { item ->
@@ -765,7 +899,7 @@ private fun TvContinueRow(
 ) {
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         items(items, key = { "continue_${it.id}" }) { item ->
@@ -775,6 +909,8 @@ private fun TvContinueRow(
             val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
             Box(
                 Modifier
+                    // 放大后的白边要靠 z 轴抬起来，否则会被同行后面的卡片压住
+                    .zIndex(if (focused) 1f else 0f)
                     .graphicsLayer { scaleX = scale; scaleY = scale }
                     .clip(RoundedCornerShape(10.dp))
                     .background(AppColors.SurfaceHi)

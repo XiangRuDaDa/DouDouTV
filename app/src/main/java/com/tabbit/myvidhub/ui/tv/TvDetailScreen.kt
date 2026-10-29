@@ -97,11 +97,13 @@ import androidx.compose.runtime.collectAsState
  * 电视端简介页（独立实现，不复用手机端 DetailScreen）。
  *
  * 交互模型：**单页滚动 + 焦点分区**，参考 Netflix 的电视端详情页。
- *   · 信息不再按层级显隐 —— 标题、简介、主演、选集从进页起就在组合树里，
+ *   · 信息不再按层级显隐 —— 标题、简介、导演、主演、选集从进页起就在组合树里，
  *     方向键只负责在焦点锚点之间移动，视口跟着焦点滚动；
  *   · 因此不存在「按下键解锁剧情」「按上键把选集收掉」这两种模态行为：
  *     上键永远只回上一个区域，内容不会消失；
- *   · 只读区块（简介、主演、导演/类型）不接收焦点，下键会直接跳过它们；
+ *   · 只读区块（简介、导演、主演、署名）不接收焦点，下键会直接跳过它们；
+ *   · 页面以选集收尾：焦点走不出选集网格，放在选集下方的内容等于看不见，
+ *     所以导演排在简介之后、主演之前，TMDB 署名排在主演之后，都在同一屏里；
  *   · 首屏仍保留「大图优先」：55% 顶部占位把标题与操作区压到屏幕下半部，
  *     下键进入第一集时，简介、主演、选集首行同屏可见。
  *
@@ -447,7 +449,7 @@ fun TvDetailScreen(
                     Column(
                         Modifier
                             .fillMaxWidth(0.72f)
-                            .padding(start = 20.dp, end = 12.dp)
+                            .padding(start = TvPagePadding, end = 12.dp)
                     ) {
                         // 标题位：Logo 与文字标题共用同一块「标题槽」，
                         // 起始高度一致、Logo 高度封顶，刮削成功与否页面骨架都长得一样。
@@ -547,7 +549,7 @@ fun TvDetailScreen(
                                 // 按下即把焦点送进第一集，页面随焦点滚到选集。
                                 TvPlayButton(
                                     text = "选择剧集",
-                                    compact = true,
+                                    size = TvButtonSize.Lg,
                                     modifier = playFocusModifier,
                                     onClick = {
                                         epPage = 0
@@ -564,7 +566,7 @@ fun TvDetailScreen(
                                             if (item.positionMs > 5_000L) "继续播放" else "立即播放"
                                         }
                                     },
-                                    compact = true,
+                                    size = TvButtonSize.Lg,
                                     modifier = playFocusModifier,
                                     onClick = { onPlay(item.id) }
                                 )
@@ -572,7 +574,8 @@ fun TvDetailScreen(
                                     TvPillButton(
                                         text = "从头开始",
                                         primary = false,
-                                        compact = true,
+                                        // 次操作取中档：比主按钮小一档，但仍是同一字号
+                                        size = TvButtonSize.Md,
                                         modifier = Modifier
                                             .focusProperties {
                                                 up = favoriteFocusRequester
@@ -589,13 +592,13 @@ fun TvDetailScreen(
                         }
                     }
 
-                    // ========== 内容区：简介 / 主演 / 选集 / 关于 ==========
+                    // ========== 内容区：简介 / 导演 / 主演 / 署名 / 选集 ==========
                     // 全部常驻组合，不再有「展开第几层」的条件渲染。
                     // contentAnchor 挂在内容块顶部：下键进入选集时把它对齐到视口顶部。
                     Column(
                         Modifier
                             .bringIntoViewRequester(contentAnchor)
-                            .padding(start = 20.dp, end = 20.dp)
+                            .padding(start = TvPagePadding, end = TvPagePadding)
                     ) {
                         // ---------- 简介：只读，下键会直接跳过它 ----------
                         // 数据源（TVBox / Emby）的简介常带 <span>、<br> 之类的 HTML 片段，
@@ -617,6 +620,15 @@ fun TvDetailScreen(
                             )
                         }
 
+                        // ---------- 导演：紧接简介，只读、不接收焦点 ----------
+                        val directors = (tmdb?.directors?.takeIf { it.isNotEmpty() }?.map { it.name }
+                            ?: scraped?.directors?.map { it.name })
+                            ?.joinToString(" / ").orEmpty()
+                        if (directors.isNotBlank()) {
+                            Spacer(Modifier.height(10.dp))
+                            TvInfoLine("导演", directors)
+                        }
+
                         // ---------- 主演：上移到选集之前，和简介同屏 ----------
                         if (tvCast.isNotEmpty()) {
                             TvSectionTitle(
@@ -625,6 +637,13 @@ fun TvDetailScreen(
                                 contentPadding = PaddingValues(top = 14.dp, bottom = 6.dp)
                             )
                             TvCastRow(tvCast)
+                        }
+
+                        // ---------- 数据来源署名：只读，位置仍要在焦点滚得到的区域 ----------
+                        // TMDB 条款要求署名可见：放在选集下方等于藏在焦点走不到的地方，等于没署。
+                        if (tmdb != null) {
+                            Spacer(Modifier.height(10.dp))
+                            TmdbCreditLine()
                         }
 
                         // ---------- 选集：标题 + 控制条 + 网格 ----------
@@ -777,24 +796,8 @@ fun TvDetailScreen(
                                 modifier = Modifier.fillMaxWidth().height(160.dp)
                             )
                         }
-
-                        // ---------- 关于：导演 / 类型 / 署名（页面收尾，只读） ----------
-                        val directors = (tmdb?.directors?.takeIf { it.isNotEmpty() }?.map { it.name }
-                            ?: scraped?.directors?.map { it.name })
-                            ?.joinToString(" / ").orEmpty()
-                        if (directors.isNotBlank() || item.genres.isNotBlank() || tmdb != null) {
-                            Spacer(Modifier.height(18.dp))
-                            if (directors.isNotBlank()) {
-                                TvInfoLine("导演", directors)
-                            }
-                            if (item.genres.isNotBlank()) {
-                                TvInfoLine("类型", item.genres)
-                            }
-                            if (tmdb != null) {
-                                Spacer(Modifier.height(12.dp))
-                                TmdbCreditLine()
-                            }
-                        }
+                        // 页面到选集为止：选集下方的内容焦点走不到，
+                        // 导演与署名已上移到主演之后。
                     }
                 }
             }
@@ -978,7 +981,7 @@ private data class TvCast(val name: String, val role: String, val imageUrl: Stri
 /**
  * 主演头像行：圆形头像 + 姓名 + 角色。
  *
- * 上移到选集之前后，它是「简介 → 主演 → 选集」这一屏的一部分，
+ * 上移到选集之前后，它是「简介 → 导演 → 主演 → 选集」这一屏的一部分，
  * 所以头像从 72dp 收到 56dp，一行五个仍能在三米外看清脸，
  * 又不会把选集首行挤出屏幕。
  */

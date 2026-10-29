@@ -124,7 +124,7 @@ fun TvGenreScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 20.dp, top = 20.dp),
+                .padding(start = TvPagePadding, end = TvPagePadding, top = 20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 遥控器 Back 键统一由 TvApp.BackHandler 处理
@@ -156,7 +156,7 @@ fun TvGenreScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 18.dp, bottom = 8.dp),
-                contentPadding = PaddingValues(horizontal = 20.dp),
+                contentPadding = PaddingValues(horizontal = TvPagePadding),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(chips, key = { "chip_${it.first}" }) { (label, k, g) ->
@@ -179,7 +179,7 @@ fun TvGenreScreen(
             else -> LazyVerticalGrid(
                 state = gridState,
                 columns = GridCells.Fixed(tvGridColumns()),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
+                contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
@@ -282,7 +282,7 @@ fun TvCategoryScreen(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 20.dp, end = 20.dp, top = 20.dp),
+                .padding(start = TvPagePadding, end = TvPagePadding, top = 20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
@@ -303,7 +303,7 @@ fun TvCategoryScreen(
         when {
             loading -> LazyVerticalGrid(
                 columns = GridCells.Fixed(tvGridColumns()),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
+                contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
@@ -316,7 +316,7 @@ fun TvCategoryScreen(
             else -> LazyVerticalGrid(
                 state = gridState,
                 columns = GridCells.Fixed(tvGridColumns()),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 32.dp),
+                contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
