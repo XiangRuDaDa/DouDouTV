@@ -698,7 +698,6 @@ private fun TvMenuRow(
                 indication = null,
                 onClick = onClick
             )
-            .focusable()
             .padding(horizontal = 18.dp, vertical = 14.dp)
     ) {
         Row(
@@ -765,7 +764,7 @@ private fun TvSourceFormPanel(
     val nameFieldFocus = remember { FocusRequester() }
     // Dialog 首次显示时，先让 Box 成为焦点根，再延迟 requestFocus 到「来源名称」输入框
     LaunchedEffect(Unit) {
-        dialogRootFocus.requestFocus()
+        runCatching { dialogRootFocus.requestFocus() }
         kotlinx.coroutines.delay(160)
         runCatching { nameFieldFocus.requestFocus() }
     }
@@ -1033,10 +1032,25 @@ private fun TvDeleteConfirmDialog(
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
+    val rootFocus = remember { FocusRequester() }
     val cancelRequester = remember { FocusRequester() }
 
     Box(
-        Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.7f)),
+        Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.7f))
+            // 遮罩自己要成为可聚焦根并接住 Back：否则 Back 会落到导航层的 pop()，
+            // 用户只是想关掉确认框，结果整个退出来源页（同页另外两个面板都是这么拦的）。
+            .focusRequester(rootFocus)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown && event.key == Key.Back) {
+                    onDismiss()
+                    true
+                } else {
+                    false
+                }
+            },
         contentAlignment = Alignment.Center
     ) {
         Surface(
@@ -1121,7 +1135,6 @@ private fun TvDeleteConfirmDialog(
                     )
                     Spacer(Modifier.width(16.dp))
                     // 危险按钮：红色 PillButton 变体
-                    val delRequester = remember { FocusRequester() }
                     var delFocused by remember { mutableStateOf(false) }
                     val delScale by animateFloatAsState(
                         targetValue = if (delFocused) 1.06f else 1f,
@@ -1140,13 +1153,11 @@ private fun TvDeleteConfirmDialog(
                                 else Modifier
                             )
                             .onFocusChanged { delFocused = it.isFocused }
-                            .focusRequester(delRequester)
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
                                 onClick = onConfirm
                             )
-                            .focusable()
                             .padding(horizontal = 32.dp, vertical = 14.dp)
                     ) {
                         Row(
@@ -1172,8 +1183,11 @@ private fun TvDeleteConfirmDialog(
         }
     }
 
-    // 默认焦点落到"取消"按钮 —— 防止遥控器默认聚焦红色按钮导致误触
+    // 默认焦点落到"取消"按钮 —— 防止遥控器默认聚焦红色按钮导致误触。
+    // 先把焦点收进遮罩这一层再交给取消键：跳过中间那帧会让 requestFocus 找不到挂载点。
     LaunchedEffect(Unit) {
-        cancelRequester.requestFocus()
+        runCatching { rootFocus.requestFocus() }
+        kotlinx.coroutines.delay(140)
+        runCatching { cancelRequester.requestFocus() }
     }
 }

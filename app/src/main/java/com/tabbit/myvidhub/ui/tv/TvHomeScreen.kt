@@ -37,7 +37,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -188,6 +187,9 @@ fun TvHomeScreen(
         if (listState.firstVisibleItemIndex > 0) 0f
         else (1f - listState.firstVisibleItemScrollOffset.toFloat() / heroCollapseDistPx).coerceIn(0f, 1f)
     }
+    // 顶栏是否还在（首屏 Hero 可见）。用 derivedStateOf 只观察 firstVisibleItemIndex 这个离散值：
+    // 订阅落在计算块里，滚动时顶栏子树只在真正跨过首屏那一次才重组，不会像直接读连续量那样把整页拖进滚动。
+    val topBarVisible = remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
 
     // 动态分区（kind + 题材）是纯 CPU 计算：按 library 缓存一次，
     // 避免每次重组（轮播换图、焦点变化）都把几千条条目重新分组拆题材 —— 电视上这是掉帧的主要来源之一。
@@ -352,6 +354,7 @@ fun TvHomeScreen(
         } else null
         TvTopBar(
             alphaProvider = alphaProvider,
+            topBarVisible = topBarVisible,
             sourceName = displaySourceName,
             sourceKind = selectedSource?.kind,
             siteName = displaySiteName,
@@ -402,6 +405,7 @@ fun TvHomeScreen(
 @Composable
 private fun TvTopBar(
     alphaProvider: () -> Float,
+    topBarVisible: State<Boolean>,
     sourceName: String,
     sourceKind: SourceKind?,
     siteName: String?,
@@ -419,6 +423,12 @@ private fun TvTopBar(
     val isTvBox = onHomeSite != null || sourceKind == SourceKind.TVBOX
     val isEmpty = sourceKind == null
     val markTopBarFocus: (FocusState) -> Unit = { onAnyButtonFocusChanged(it.isFocused) }
+
+    // 滚过首屏后顶栏已经完全透明，但 Compose 的焦点搜索不看透明度，从下面某行按上键仍会把
+    // 高亮交给这排看不见按钮（compose 1.6 也还没有 focusEnabled 可以关掉）。这里直接从组合里摘掉，
+    // 上键就只会在列表内部走。顶栏一旦抢到焦点，顶层的 revealTopBar 会先把列表滚回顶部，
+    // 于是本条件重新成立、顶栏再挂回来，Hero ↑ 交棒链路不受影响。
+    if (!topBarVisible.value) return
 
     Row(
         Modifier
@@ -1063,7 +1073,6 @@ private fun TvDialogOption(
                 indication = null,
                 onClick = onClick
             )
-            .focusable()
             .padding(horizontal = 18.dp, vertical = 14.dp)
     ) {
         Text(

@@ -322,7 +322,8 @@ fun TvDetailScreen(
     val hasEpisodes = episodes.isNotEmpty()
     /** 选集控制条只有在「多源」「多季」或「多页」时才存在：
      *  它是网格首行上键的落点，所以条件必须和上面控制条的显示条件完全一致，
-     *  否则翻页按钮会变成按不到的孤立节点。 */
+     *  否则翻页按钮会变成按不到的孤立节点。
+     *  controlsFocusRequester 按「源首颗 → 季首颗 → 上一页」的顺序只挂一颗。 */
     val hasControlAnchor = playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1
 
     // 换季 / 换源 / 翻页会换掉整组卡片；在新页组合完成后把焦点送回首集，
@@ -716,7 +717,12 @@ fun TvDetailScreen(
                                         TvPillButton(
                                             text = "‹ 上一页",
                                             primary = false,
-                                            modifier = pillFocus,
+                                            // 单源单季但分集多页时，翻页按钮就是控制条的第一个元件。
+                                            // requester 得跟着挂到这里，否则网格首行的上键指向一个
+                                            // 没挂载的节点，按下去没反应、翻页按钮彻底进不去。
+                                            modifier = if (playSources.size <= 1 && tvSeasons.size <= 1) {
+                                                pillFocus.focusRequester(controlsFocusRequester)
+                                            } else pillFocus,
                                             onClick = {
                                                 if (pageIndex > 0) {
                                                     epPage = pageIndex - 1

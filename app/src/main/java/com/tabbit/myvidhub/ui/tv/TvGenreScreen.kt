@@ -30,6 +30,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -73,6 +74,7 @@ fun TvGenreScreen(
 
     val scope = rememberCoroutineScope()
     val gridState = rememberLazyGridState()
+    val firstCardFocus = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
         tags = runCatching { vm.genreTags() }.getOrDefault(emptyList())
@@ -103,6 +105,15 @@ fun TvGenreScreen(
             .getOrDefault(emptyList())
         if (more.isEmpty()) endReached = true else items = items + more
         loadingMore = false
+    }
+
+    // 首屏数据到位后把焦点交给第一张卡片。这一页原本没有任何抢焦，进页后焦点落在
+    // 谁身上完全交给默认焦点搜索（同文件的分类页是主动抢的），表现就是第一下方向键像没反应。
+    // 等一帧是为了让卡片先完成组合，否则 requester 还没有可挂载的节点。
+    LaunchedEffect(items.isNotEmpty()) {
+        if (items.isEmpty()) return@LaunchedEffect
+        withFrameNanos { }
+        runCatching { firstCardFocus.requestFocus() }
     }
 
     // 题材标签：全部 / 电影 / 剧集 / 动漫 + 库内高频题材
@@ -188,6 +199,9 @@ fun TvGenreScreen(
                     TvPosterCard(
                         item = item,
                         onClick = { onDetail(item.id) },
+                        modifier = if (item.id == items.firstOrNull()?.id) {
+                            Modifier.focusRequester(firstCardFocus)
+                        } else Modifier,
                         fillCell = true
                     )
                 }

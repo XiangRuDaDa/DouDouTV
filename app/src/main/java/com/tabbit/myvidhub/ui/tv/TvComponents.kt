@@ -278,7 +278,6 @@ fun TvPosterCard(
             .background(AppColors.Surface)
             .then(if (focused) Modifier.border(2.5.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .focusable()
             .padding(0.dp)
     ) {
         Box(
@@ -431,7 +430,6 @@ fun TvBackButton(onBack: () -> Unit) {
                 indication = null,
                 onClick = onBack
             )
-            .focusable()
             .padding(horizontal = 18.dp, vertical = 9.dp)
     ) {
         Text(
@@ -488,7 +486,6 @@ fun TvFilterChip(
                 indication = null,
                 onClick = onClick
             )
-            .focusable()
             .padding(horizontal = 20.dp, vertical = 9.dp)
     ) {
         Text(
