@@ -30,7 +30,7 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 两类来源走两条完全不同的入库路径：
  * · Emby：一次拉回库里的电影/剧集，剧集再按 seriesId 逐部取分集
  * · TVBox：列表只入库「剧集壳」，分集等用户点进详情页再按需拉取
- *   （CMS 接口的详情才带播放地址，提前全量拉取会打爆请求量）
+ *   （详情接口才带播放地址，提前全量拉取会打爆请求量）
  */
 class MediaRepository(private val context: Context) {
 
@@ -594,7 +594,7 @@ class MediaRepository(private val context: Context) {
             val client = TvBoxClient(source.location, context)
             val list = client.homeContent()
             if (list.isEmpty()) {
-                throw IllegalStateException("接口未返回任何影片，请确认地址能返回 ac=videolist 的 JSON")
+                throw IllegalStateException("配置里的 spider 站点没有返回任何影片，请检查蜘蛛包与网络")
             }
             saveTvBoxVods(source, list, onProgress).size
         }
@@ -602,7 +602,7 @@ class MediaRepository(private val context: Context) {
     /** 拉取 TVBox 配置里的站点（线路）列表，供首页线路切换 */
     suspend fun tvBoxSites(source: SourceEntity): List<TvBoxSite> = withContext(Dispatchers.IO) {
         if (source.kind != SourceKind.TVBOX) return@withContext emptyList()
-        runCatching { TvBoxClient(source.location, context).availableSites() }.getOrDefault(emptyList())
+        TvBoxClient(source.location, context).availableSites()
     }
 
     /** 统计某来源下 remoteId 前缀匹配的条目数（判断某 TVBox 站点是否已同步过） */
@@ -640,7 +640,9 @@ class MediaRepository(private val context: Context) {
     ): List<MediaEntity> = withContext(Dispatchers.IO) {
         if (source.kind != SourceKind.TVBOX) return@withContext emptyList()
         val vods = TvBoxClient(source.location, context).categoryContent(site, typeId, page)
-        vods.map { browseEntity(source, it) }
+        // 网盘类线路同一页里常出现重复条目（同一个 vodId 出现两次），
+        // 不去重会让 browseEntity 返回同一个临时负 id，列表 key 重复 → LazyRow 直接崩溃
+        vods.distinctBy { it.siteKey to it.vodId }.map { browseEntity(source, it) }
     }
 
     /** 浏览列表 → 内存 MediaEntity（负 id），登记到 [browseHits] 供详情页落库 */

@@ -50,7 +50,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
@@ -72,7 +74,6 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
-import com.tabbit.myvidhub.ui.tv.TvBackButton
 import com.tabbit.myvidhub.ui.tv.TvFilterChip
 import com.tabbit.myvidhub.ui.tv.TvIconButton
 import com.tabbit.myvidhub.ui.tv.TvPillButton
@@ -97,6 +98,8 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
     var showAdd by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<SourceEntity?>(null) }
     var deleting by remember { mutableStateOf<SourceEntity?>(null) }
+    // 卡片 OK 键打开的功能菜单（启停/刷新/编辑/删除）
+    var menuSource by remember { mutableStateOf<SourceEntity?>(null) }
 
     val activeHomeId = vm.effectiveHomeSourceId()
     val embys = remember(sources) { sources.filter { it.kind == SourceKind.EMBY } }
@@ -120,8 +123,6 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    // TvBackButton 自带 start=20dp top=20dp 的内部 padding，与顶部栏布局对齐
-                    TvBackButton(onBack = { /* 交由 TV 导航栈处理；这里只是占位 */ })
                     Column {
                         Text(
                             text = "视频来源",
@@ -188,11 +189,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                             busy = vm.isSourceSyncing(src.id),
                             count = vm.sourceCounts[src.id],
                             lastSync = vm.lastSyncOf(src.id),
-                            onSync = { vm.scanOne(src) },
-                            onRelogin = { vm.reloginEmby(src) },
-                            onEdit = { editing = src },
-                            onToggle = { vm.toggleSourceEnabled(src) },
-                            onDelete = { deleting = src }
+                            onMenu = { menuSource = src }
                         )
                     }
                 }
@@ -211,11 +208,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                             busy = vm.isSourceSyncing(src.id),
                             count = vm.sourceCounts[src.id],
                             lastSync = vm.lastSyncOf(src.id),
-                            onSync = { vm.scanOne(src) },
-                            onRelogin = { vm.reloginEmby(src) },
-                            onEdit = { editing = src },
-                            onToggle = { vm.toggleSourceEnabled(src) },
-                            onDelete = { deleting = src }
+                            onMenu = { menuSource = src }
                         )
                     }
                 }
@@ -224,17 +217,6 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                 if (sources.isEmpty()) {
                     item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(this.maxLineSpan) }) {
                         TvEmptySourcesHint()
-                    }
-                }
-
-                // ---- 添加新来源占位卡 ----
-                if (sources.isNotEmpty()) {
-                    item {
-                        TvAddSourceCard(
-                            width = cardWidth,
-                            height = cardHeight,
-                            onClick = { showAdd = true }
-                        )
                     }
                 }
             }
@@ -273,6 +255,34 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                 vm.removeSource(src)
                 deleting = null
             }
+        )
+    }
+
+    // ========== 卡片功能菜单（OK 键弹出） ==========
+    menuSource?.let { src ->
+        TvSourceActionDialog(
+            source = src,
+            busy = vm.isSourceSyncing(src.id),
+            isActiveHome = src.id == activeHomeId,
+            onToggle = {
+                vm.toggleSourceEnabled(src)
+                menuSource = null
+            },
+            onRefresh = {
+                // Emby 未登录时「刷新」实际是重新登录
+                if (src.kind == SourceKind.EMBY && src.token.isBlank()) vm.reloginEmby(src)
+                else vm.scanOne(src)
+                menuSource = null
+            },
+            onEdit = {
+                editing = src
+                menuSource = null
+            },
+            onDelete = {
+                deleting = src
+                menuSource = null
+            },
+            onDismiss = { menuSource = null }
         )
     }
 }
@@ -319,7 +329,7 @@ private fun TvEmptySourcesHint() {
         )
         Text(
             text = "· Emby：填服务器地址与账号密码，自动登录换 Token\n" +
-                "· TVBox：填 CMS 接口地址（苹果CMS v10 JSON 通用格式）",
+                "· TVBox：填 TVBox 配置 JSON 地址（需包含 spider 与 type=3 站点）",
             style = MaterialTheme.typography.bodyMedium,
             color = AppColors.TextTertiary
         )
@@ -348,11 +358,7 @@ private fun TvSourceCard(
     busy: Boolean,
     count: Int?,
     lastSync: Long,
-    onSync: () -> Unit,
-    onRelogin: () -> Unit,
-    onEdit: () -> Unit,
-    onToggle: () -> Unit,
-    onDelete: () -> Unit
+    onMenu: () -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -378,7 +384,7 @@ private fun TvSourceCard(
             .clickable(
                 interactionSource = interaction,
                 indication = null,
-                onClick = onToggle
+                onClick = onMenu
             )
             .focusable(interactionSource = interaction)
     ) {
@@ -509,44 +515,15 @@ private fun TvSourceCard(
             }
         }
 
-        // —— 操作按钮（卡片聚焦时出现）——
-        Row(
-            Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 14.dp, end = 14.dp)
-                .alpha(if (focused && source.enabled) 1f else 0f),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            if (busy) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(30.dp),
-                    strokeWidth = 2.dp,
-                    color = AppColors.Brand
-                )
-            } else {
-                val onClickAction = if (source.kind == SourceKind.EMBY && source.token.isBlank()) {
-                    { onRelogin() }
-                } else {
-                    { onSync() }
-                }
-                TvIconButton(
-                    icon = Icons.Filled.Refresh,
-                    onClick = onClickAction,
-                    sizeDp = 38.dp,
-                    contentDescription = "同步"
-                )
-            }
-            TvIconButton(
-                icon = Icons.Filled.Edit,
-                onClick = onEdit,
-                sizeDp = 38.dp,
-                contentDescription = "编辑"
-            )
-            TvIconButton(
-                icon = Icons.Filled.Delete,
-                onClick = onDelete,
-                sizeDp = 38.dp,
-                contentDescription = "删除"
+        // 同步中：右上角显示一个不可聚焦的进度环，仅作状态提示
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 18.dp, end = 18.dp)
+                    .size(26.dp),
+                strokeWidth = 2.dp,
+                color = AppColors.Brand
             )
         }
     }
@@ -595,67 +572,155 @@ private fun TvKindBadge(kind: SourceKind) {
 }
 
 /* ========================================================
-   添加来源占位卡片
+   卡片功能菜单（OK 键弹出）
    ======================================================== */
 @Composable
-private fun TvAddSourceCard(
-    width: androidx.compose.ui.unit.Dp,
-    height: androidx.compose.ui.unit.Dp,
-    onClick: () -> Unit
+private fun TvSourceActionDialog(
+    source: SourceEntity,
+    busy: Boolean,
+    isActiveHome: Boolean,
+    onToggle: () -> Unit,
+    onRefresh: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onDismiss: () -> Unit
 ) {
-    val interaction = remember { MutableInteractionSource() }
-    val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (focused) 1.05f else 1f,
-        animationSpec = tween(140),
-        label = "add-card"
-    )
-    val bg = if (focused) AppColors.Brand.copy(alpha = 0.06f) else Color.Transparent
-    val borderColor = if (focused) AppColors.Brand else AppColors.SurfaceHi
+    val rootFocus = remember { FocusRequester() }
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        runCatching { rootFocus.requestFocus() }
+        kotlinx.coroutines.delay(140)
+        runCatching { firstFocus.requestFocus() }
+    }
 
-    Box(
+    BoxWithConstraints(
         Modifier
-            .width(width)
-            .height(height)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(14.dp))
-            .background(bg)
-            .border(2.dp, borderColor, RoundedCornerShape(14.dp))
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .focusable(interactionSource = interaction),
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f))
+            // 焦点根容器：阻止焦点从菜单逃逸到下层网格
+            .focusRequester(rootFocus)
+            .focusable()
+            .onPreviewKeyEvent { e ->
+                if (e.type == KeyEventType.KeyDown && e.key == Key.Back) {
+                    onDismiss()
+                    true
+                } else false
+            },
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+        // 宽度按设备自适应：屏幕宽度的 20% 就够（只有 4 个短菜单项），
+        // 同时给一个最小宽度兜底，避免小密度设备上文字被压得放不下。
+        val dialogWidth = (maxWidth * 0.2f).coerceIn(280.dp, 460.dp)
+        Surface(
+            modifier = Modifier.width(dialogWidth),
+            shape = RoundedCornerShape(20.dp),
+            color = AppColors.Surface,
+            shadowElevation = 24.dp
         ) {
-            Box(
-                Modifier
-                    .size(72.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (focused) AppColors.Brand else Color.White.copy(alpha = 0.08f)
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Add,
-                    contentDescription = null,
-                    tint = if (focused) Color.White else AppColors.Brand,
-                    modifier = Modifier.size(36.dp)
+            Column(Modifier.padding(vertical = 24.dp)) {
+                Column(Modifier.padding(horizontal = 26.dp)) {
+                    Text(
+                        text = source.name,
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = AppColors.TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = buildString {
+                            append(if (source.kind == SourceKind.EMBY) "Emby 媒体服务器" else "TVBox 接口")
+                            append(" · ")
+                            append(if (source.enabled) "已启用" else "已停用")
+                            if (isActiveHome) append(" · 使用中")
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = AppColors.TextTertiary
+                    )
+                }
+                Spacer(Modifier.height(18.dp))
+                Column(
+                    Modifier.padding(horizontal = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 启用/停用共用一个条目，按当前状态切换文案
+                    TvMenuRow(
+                        text = if (source.enabled) "停用" else "启用",
+                        hint = if (isActiveHome && source.enabled) "当前首页使用中" else null,
+                        modifier = Modifier.focusRequester(firstFocus),
+                        onClick = onToggle
+                    )
+                    TvMenuRow(
+                        text = if (source.kind == SourceKind.EMBY && source.token.isBlank()) "重新登录" else "刷新同步",
+                        hint = if (busy) "同步中…" else null,
+                        onClick = onRefresh
+                    )
+                    TvMenuRow(text = "编辑来源", onClick = onEdit)
+                    TvMenuRow(text = "删除来源", danger = true, onClick = onDelete)
+                }
+            }
+        }
+    }
+}
+
+/** 功能菜单里的单行选项：可聚焦，聚焦时反白高亮 */
+@Composable
+private fun TvMenuRow(
+    text: String,
+    hint: String? = null,
+    danger: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                when {
+                    focused -> Color.White
+                    danger -> Color(0xFFE5484D).copy(alpha = 0.10f)
+                    else -> AppColors.SurfaceHi.copy(alpha = 0.35f)
+                }
+            )
+            .then(
+                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
+                else Modifier
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .focusable()
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = text,
+                color = when {
+                    focused && danger -> Color(0xFFE5484D)
+                    focused -> Color.Black
+                    danger -> Color(0xFFFF8A65)
+                    else -> AppColors.TextPrimary
+                },
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
+            if (!hint.isNullOrBlank()) {
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (focused) Color.Black.copy(alpha = 0.6f) else AppColors.TextTertiary
                 )
             }
-            Text(
-                text = "添加新来源",
-                style = MaterialTheme.typography.titleMedium,
-                color = if (focused) AppColors.TextPrimary else AppColors.TextSecondary,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = "Emby 或 TVBox 接口",
-                style = MaterialTheme.typography.labelMedium,
-                color = AppColors.TextTertiary
-            )
         }
     }
 }
@@ -792,13 +857,13 @@ private fun TvSourceFormPanel(
                         )
                     }
 
-                    // 服务器地址 / CMS 接口
+                    // 服务器地址 / TVBox 配置
                     item {
                         TvFormField(
-                            label = if (kind == SourceKind.EMBY) "服务器地址" else "TVBox / CMS 接口地址",
+                            label = if (kind == SourceKind.EMBY) "服务器地址" else "TVBox 配置地址",
                             required = true,
                             value = location,
-                            placeholder = if (kind == SourceKind.EMBY) "https://emby.example.com" else "https://example.com/api.php/provide/vod/",
+                            placeholder = if (kind == SourceKind.EMBY) "https://emby.example.com" else "https://example.com/tvbox.json",
                             keyboardType = KeyboardType.Uri,
                             onValueChange = { location = it }
                         )
@@ -812,7 +877,7 @@ private fun TvSourceFormPanel(
                         } else {
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                text = "接口需支持 ?ac=videolist 返回 JSON（苹果CMS 通用格式）",
+                                text = "需填 TVBox 配置 JSON 地址（含 spider 与 type=3 站点）",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AppColors.TextTertiary
                             )

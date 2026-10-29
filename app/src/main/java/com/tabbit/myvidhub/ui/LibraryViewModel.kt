@@ -304,7 +304,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             if (more.isEmpty()) {
                 _categoryEnded[typeId] = true
             } else {
-                val merged = items + more
+                // 源站翻页时同一条目常会重复出现（上一个视频还在第二页开头），
+                // 直接拼接会得到两个相同 id 的卡片，LazyRow 的 key 冲突直接崩，
+                // 所以追加时按 remoteId 去重
+                val seen = items.mapTo(HashSet(items.size)) { it.remoteId }
+                val merged = items + more.filter { seen.add(it.remoteId) }
                 _categoryVods[typeId] = merged
                 _categoryLoadedPage[typeId] = nextPage
                 _categoryVisibleCount[typeId] = (visible + CATEGORY_PREVIEW_BATCH).coerceAtMost(merged.size)
@@ -396,7 +400,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             ?: enabledSources.value.firstOrNull()?.id
 
     private fun homeSiteMatches(item: MediaEntity, sourceId: Long, siteKey: String): Boolean {
-        if (siteKey.isBlank()) return true // 匿名 CMS 只有一条默认线路，全部条目归属该线路
+        if (siteKey.isBlank()) return true // 空 key 表示聚合视图，全部条目都算命中
         return item.remoteId.startsWith("tvbox:$sourceId:$siteKey:")
     }
 

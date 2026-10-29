@@ -184,7 +184,8 @@ fun TvIconButton(
      * 直径。放进标题行时贴着大标题站，46dp 会显得比字还抢眼，
      * 所以允许调用方收小一档；操作区里的默认值仍是 46dp。
      */
-    sizeDp: Dp = 46.dp
+    sizeDp: Dp = 46.dp,
+    onFocusChanged: ((Boolean) -> Unit)? = null
 ) {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(140), label = "tv_icon")
@@ -205,7 +206,10 @@ fun TvIconButton(
                 if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(50))
                 else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(50))
             )
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                onFocusChanged?.invoke(it.isFocused)
+            }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,

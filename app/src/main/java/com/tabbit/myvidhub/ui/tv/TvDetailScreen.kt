@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +50,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import coil.compose.AsyncImage
+import com.tabbit.myvidhub.MainActivity
 import com.tabbit.myvidhub.data.emby.EmbyClient
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
@@ -126,6 +128,13 @@ fun TvDetailScreen(
     /** TVBox 多播放源（云盘/线路） */
     var playSources by remember { mutableStateOf<List<String>>(emptyList()) }
     var selectedPlaySource by remember { mutableStateOf<String>("") }
+
+    // 详情页期间把 MainActivity 的 finish() 拦下来：爬虫壳拉详情（网盘线路）时会顺手结束宿主，
+    // 不拦就会「点详情直接闪退」。
+    DisposableEffect(Unit) {
+        MainActivity.detailVisible = true
+        onDispose { MainActivity.detailVisible = false }
+    }
 
     /**
      * TMDB 刮削结果。
@@ -586,7 +595,7 @@ fun TvDetailScreen(
                             .padding(start = 20.dp, end = 20.dp)
                     ) {
                         // ---------- 简介：只读，下键会直接跳过它 ----------
-                        // 数据源（CMS / Emby）的简介常带 <span>、<br> 之类的 HTML 片段，
+                        // 数据源（TVBox / Emby）的简介常带 <span>、<br> 之类的 HTML 片段，
                         // 直接交给 Text 会把这些标签当正文显示，先统一清成纯文本
                         val overview = (
                             tmdb?.overview?.takeIf { it.isNotBlank() }

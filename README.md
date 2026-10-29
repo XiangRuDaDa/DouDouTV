@@ -10,13 +10,13 @@
 
 | 模块 | 实现 |
 |---|---|
-| 来源类型 | **Emby**（服务器+账号）、**TVBox**（苹果CMS 风格 JSON 接口） |
+| 来源类型 | **Emby**（服务器+账号）、**TVBox**（配置 JSON + spider 爬虫） |
 | 播放内核 | Media3 / ExoPlayer 1.4.1，支持 MKV、HEVC、AV1、HLS、DASH |
 | Emby 鉴权 | `Users/AuthenticateByName` 换 AccessToken，落库复用，无需反复登录 |
 | Emby 影库 | `Users/{id}/Items` 拉电影+剧集，`Shows/{id}/Episodes` 拉分集 |
 | Emby 播放 | `Videos/{id}/stream?static=true` 原码流直传，局域网不转码 |
-| TVBox 接口 | `ac=videolist` 列表 / `ac=detail` 详情 / `ac=list` 分类 |
-| TVBox 解析 | `vod_play_from` + `vod_play_url` 按 `$$$` `#` `$` 三级拆解多线路 |
+| TVBox 站点 | 读取配置里的 `type=3` spider 站点，DexClassLoader 加载 spider 包后反射调用 |
+| TVBox 解析 | spider 标准方法：`homeContent` / `categoryContent` / `searchContent` / `detailContent` / `playerContent` |
 | 手机首页 | Hero 大图轮播 → 继续观看横滑 → 收藏 → 电影 → 剧集 → 动漫 |
 | 电视首页 | 满屏横版主视觉（9s 轮换）+ 横向海报行 + 顶部横排入口 |
 | 详情页背景 | **封面聚焦色填充**，头图向下长距离溶解为整页底色，无硬边接缝 |
@@ -188,7 +188,7 @@ MyVidHub/
             │   │   └── Converters.kt
             │   ├── model/Entities.kt       # SourceEntity / MediaEntity
             │   ├── emby/EmbyClient.kt      # ★ Emby REST 客户端
-            │   └── tvbox/TvBoxClient.kt    # ★ TVBox/CMS 客户端
+            │   └── tvbox/TvBoxClient.kt    # ★ TVBox 客户端（spider）
             ├── player/PlayerFactory.kt     # 双端缓冲策略 + 1GB 缓存 + ExoPlayer 装配
             └── ui/
                 ├── LibraryViewModel.kt
@@ -339,8 +339,8 @@ Wrapper 已随工程提供（`gradlew` / `gradlew.bat` / `gradle/wrapper/gradle-
 - 若显示「未登录」，点该卡片右侧刷新按钮重新登录
 
 ### 2. 添加 TVBox 来源
-- 选 **TVBox**，填接口地址，需满足 `?ac=videolist` 返回 JSON
-  例如形如 `https://example.com/api.php/provide/vod/`
+- 选 **TVBox**，填 TVBox 配置 JSON 地址，需包含 `spider` 字段与 `type=3` 站点
+  例如形如 `https://example.com/tvbox.json`
 - 添加后同步即可拉到首页列表
 
 ### 3. 同步与播放
@@ -363,9 +363,9 @@ Wrapper 已随工程提供（`gradlew` / `gradlew.bat` / `gradle/wrapper/gradle-
 ## 七、几个设计取舍
 
 ### 1. TVBox 为什么分两次请求
-CMS 接口的列表（`ac=videolist`）**不含播放地址**，只有 `ac=detail` 才返回 `vod_play_url`。
+spider 的首页列表（`homeContent`）**不含播放地址**，只有 `detailContent` 才返回 `vod_play_url`。
 因此列表阶段只入库「剧集壳」，进入详情页才按需拉分集 —— 否则同步几百部剧会打出几百次请求。
-同理，只有 http(s) 直链线路会被保留，迅雷/磁力等客户端专用协议直接丢弃，避免塞给 ExoPlayer 报错。
+云盘线路（`quark://`、`aliyundrive://` 等）的地址原样保留，播放时再由 `playerContent` 解析成真实直链。
 
 ### 2. 唯一索引为什么放在 remoteId
 剧集壳条目的 `uri` 是空字符串。如果唯一索引建在 `uri` 上，第二个壳就会因重复而插入失败。

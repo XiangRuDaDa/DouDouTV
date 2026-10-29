@@ -11,6 +11,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -28,6 +29,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -70,6 +74,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.core.Prefs
@@ -184,6 +189,7 @@ fun TvHomeScreen(
     // 焦点 requester 链：Hero 播放按钮 ↔ TopBar 任意按钮
     // TopBar 在 Box 顶层悬浮，和 LazyColumn 不在同一焦点子树 → 必须手动在 onPreviewKeyEvent 拦截 DPad
     val syncButtonFocus = remember { FocusRequester() }
+    val sourcePillFocus = remember { FocusRequester() }
     val heroPlayFocus = remember { FocusRequester() }
     var heroFocused by remember { mutableStateOf(false) }
     var topBarFocused by remember { mutableStateOf(false) }
@@ -196,10 +202,10 @@ fun TvHomeScreen(
         }
     }
 
-    LaunchedEffect(Unit) { runCatching { heroPlayFocus.requestFocus() } }
+    LaunchedEffect(Unit) { if (hero != null) runCatching { heroPlayFocus.requestFocus() } }
 
     // 最外层统一焦点导航：
-    //   Hero 播放按钮 ↑ → TopBar 同步按钮（首落点）
+    //   Hero 播放按钮 ↑ → TopBar 来源（/「添加来源」）PillButton
     //   TopBar 任意按钮 ↓ → Hero 播放按钮（只要 Hero 还在视口内）
     Box(
         Modifier
@@ -210,23 +216,30 @@ fun TvHomeScreen(
                 val keyCode = event.nativeKeyEvent.keyCode
                 if (keyCode == KeyEvent.KEYCODE_DPAD_UP && heroFocused) {
                     revealTopBar()
-                    // 顶栏与 Hero 不在同一个焦点子树里，这里显式把焦点交给「同步」按钮。
-                    // 请求后校验一帧：若焦点并没有真的进顶栏（requester 暂时不可用、同步中按钮被隐藏等），
-                    // 退回默认的几何焦点搜索，保证画面高亮一定跟着焦点走，不会卡在播放键上。
+                    // 顶栏与 Hero 不在同一个焦点子树里，这里显式把焦点交给左侧「来源」按钮
+                    // （用户视觉上希望焦点从播放键上移到来源链，而不是跳到右侧同步键）。
+                    // 请求后校验一帧：若焦点并没有真的进顶栏（requester 暂时不可用等），
+                    // 依次退回同步按钮 / 默认几何焦点搜索，保证画面高亮一定跟着焦点走。
                     scope.launch {
                         val handedOver = runCatching {
-                            syncButtonFocus.requestFocus()
+                            sourcePillFocus.requestFocus()
                             true
                         }.getOrDefault(false)
                         withFrameNanos { }
                         if (!handedOver || !topBarFocused) {
-                            runCatching { focusManager.moveFocus(FocusDirection.Up) }
+                            val fallback = runCatching {
+                                syncButtonFocus.requestFocus()
+                                true
+                            }.getOrDefault(false)
+                            if (!fallback || !topBarFocused) {
+                                runCatching { focusManager.moveFocus(FocusDirection.Up) }
+                            }
                         }
                     }
                     true
                 } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && topBarFocused) {
                     // 只有 Hero 还可见（未滚出视口）才跳 Hero；否则让 LazyColumn 默认处理
-                    if (listState.firstVisibleItemIndex <= 1) {
+                    if (hero != null && listState.firstVisibleItemIndex <= 1) {
                         heroPlayFocus.requestFocus()
                         true
                     } else false
@@ -241,8 +254,9 @@ fun TvHomeScreen(
             contentPadding = PaddingValues(bottom = 32.dp)
         ) {
             // ---------- 主视觉（置顶，TvTopBar 悬浮其上） ----------
-            if (hero != null) {
-                item {
+            // 轮播区常驻：即使没有内容也保留这一屏高度，避免首页在「加载中 / 空库」之间跳版。
+            item {
+                if (hero != null) {
                     TvHero(
                         item = hero,
                         heroIndex = heroIndex,
@@ -252,25 +266,13 @@ fun TvHomeScreen(
                         onDetail = { onDetail(hero.id) },
                         onPlayFocusChanged = { heroFocused = it }
                     )
-                }
-            } else if (filteredLibrary.isEmpty() && vm.homeCategories.isEmpty()) {
-                item {
-                    Box(Modifier.fillMaxWidth().height(360.dp)) {
-                        val err = vm.homeSitesError
-                        if (library.isEmpty() && err == null && !vm.scanning) {
-                            TvEmptyState(
-                                text = "还没有内容",
-                                hint = "先在「来源」里添加 Emby 或 TVBox，再同步媒体库"
-                            )
-                        } else {
-                            TvEmptyState(
-                                text = err ?: if (vm.scanning) "正在同步媒体库…" else "当前来源/站点暂无内容",
-                                hint = if (err != null) "点击顶部同步按钮重试，或切换其他来源/线路"
-                                else if (vm.scanning) null
-                                else "切换来源或点击顶部同步按钮拉取该来源的首页内容"
-                            )
-                        }
-                    }
+                } else {
+                    TvHeroEmpty(
+                        libraryIsEmpty = library.isEmpty(),
+                        hasCategories = vm.homeCategories.isNotEmpty(),
+                        error = vm.homeSitesError,
+                        scanning = vm.scanning
+                    )
                 }
             }
             // 选了「只有分类没首页影片」的线路时不提示空：下面的分类入口本身就是内容入口
@@ -329,6 +331,7 @@ fun TvHomeScreen(
             siteName = displaySiteName,
             scanning = vm.scanning,
             syncFocusRequester = syncButtonFocus,
+            sourceFocusRequester = sourcePillFocus,
             onAnyButtonFocusChanged = { focused ->
                 topBarFocused = focused
                 if (focused) revealTopBar()
@@ -377,6 +380,7 @@ private fun TvTopBar(
     sourceKind: SourceKind?,
     siteName: String?,
     syncFocusRequester: FocusRequester,
+    sourceFocusRequester: FocusRequester,
     onAnyButtonFocusChanged: (Boolean) -> Unit,
     onSearch: () -> Unit,
     onHomeSource: () -> Unit,
@@ -404,7 +408,7 @@ private fun TvTopBar(
             if (isEmpty) {
                 TvPillButton(
                     text = "＋ 添加来源", primary = true, compact = true, onClick = onSources,
-                    modifier = Modifier.onFocusChanged(markTopBarFocus)
+                    modifier = Modifier.focusRequester(sourceFocusRequester).onFocusChanged(markTopBarFocus)
                 )
             } else {
                 TvSourceChainPill(
@@ -412,6 +416,7 @@ private fun TvTopBar(
                     value = sourceName,
                     kind = sourceKind,
                     onClick = onHomeSource,
+                    modifier = Modifier.focusRequester(sourceFocusRequester),
                     onFocusChanged = markTopBarFocus
                 )
                 if (onHomeSite != null && !siteName.isNullOrBlank()) {
@@ -459,6 +464,7 @@ private fun TvSourceChainPill(
     value: String,
     kind: SourceKind?,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     onFocusChanged: (FocusState) -> Unit = {}
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -478,7 +484,7 @@ private fun TvSourceChainPill(
     val textColor = if (focused) Color.Black else Color.White
 
     Row(
-        Modifier
+        modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(8.dp))
             .background(bg)
@@ -617,6 +623,53 @@ private fun TvHero(
                 }
             }
         }
+    }
+}
+
+/** 空态主视觉：轮播区常驻，但没有可推荐内容时占位。
+ *  高度与 TvHero 一致（430dp），避免首页在「加载中 / 空库」之间上下跳版。 */
+@Composable
+private fun TvHeroEmpty(
+    libraryIsEmpty: Boolean,
+    hasCategories: Boolean,
+    error: String?,
+    scanning: Boolean
+) {
+    val text: String
+    val hint: String?
+    when {
+        scanning -> {
+            text = "正在同步媒体库…"
+            hint = null
+        }
+        error != null -> {
+            text = error
+            hint = "点击顶部同步按钮重试，或切换其他来源/线路"
+        }
+        libraryIsEmpty -> {
+            text = "还没有内容"
+            hint = "先在「来源」里添加 Emby 或 TVBox，再同步媒体库"
+        }
+        hasCategories -> {
+            text = "暂无推荐内容"
+            hint = "可从下方分类入口浏览"
+        }
+        else -> {
+            text = "当前来源/站点暂无内容"
+            hint = "切换来源或线路，或点击顶部同步按钮拉取"
+        }
+    }
+    val bg = remember {
+        Brush.verticalGradient(0f to AppColors.Surface, 0.7f to AppColors.Bg, 1f to AppColors.Bg)
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(430.dp)
+            .background(bg),
+        contentAlignment = Alignment.Center
+    ) {
+        TvEmptyState(text = text, hint = hint)
     }
 }
 
@@ -907,7 +960,7 @@ private fun HomeSourceDialog(
     Dialog(onDismissRequest = onDismiss) {
         Column(
             Modifier
-                .width(560.dp)
+                .width(400.dp)
                 .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
                 .padding(vertical = 26.dp)
         ) {
@@ -920,8 +973,8 @@ private fun HomeSourceDialog(
             )
             Spacer(Modifier.height(14.dp))
             LazyColumn(
-                Modifier.widthIn(max = 560.dp).heightIn(max = 460.dp),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                Modifier.widthIn(max = 400.dp).heightIn(max = 460.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 itemsIndexed(sources, key = { _, src -> "src_${src.id}" }) { index, src ->
@@ -938,7 +991,8 @@ private fun HomeSourceDialog(
     }
 }
 
-/** 电视端「选择线路（站点）」弹窗 */
+/** 电视端「选择线路（站点）」弹窗 —— 横网格铺开，线路一屏可见，遥控器上下左右都能走。
+ *  宽度/列数按当前设备屏幕自适应（不写死），1080p 电视上默认铺满约 92% 屏幕宽度。 */
 @Composable
 private fun HomeSiteDialog(
     sites: List<TvBoxSite>,
@@ -948,41 +1002,60 @@ private fun HomeSiteDialog(
 ) {
     val firstFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
-    Dialog(onDismissRequest = onDismiss) {
-        Column(
+    Dialog(
+        onDismissRequest = onDismiss,
+        // 关掉平台默认窄宽度，让内容自己按屏幕尺寸决定弹窗宽度
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        BoxWithConstraints(
             Modifier
-                .width(560.dp)
-                .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
-                .padding(vertical = 26.dp)
+                .fillMaxSize()
+                .padding(horizontal = 48.dp, vertical = 32.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Text(
-                "选择线路（站点）",
-                color = AppColors.TextPrimary,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 26.dp)
-            )
-            Spacer(Modifier.height(14.dp))
-            LazyColumn(
-                Modifier.widthIn(max = 560.dp).heightIn(max = 460.dp),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+            // 宽度：屏幕宽度的 80%，夹在 560dp ~ 1280dp 之间（手机/电视都不至于过窄或过宽）
+            val dialogWidth = (maxWidth * 0.80f).coerceIn(560.dp, 1280.dp)
+            // 列数：按每个选项至少 240dp 估算，2 ~ 6 列
+            val columns = ((dialogWidth - 40.dp) / 120.dp).toInt().coerceIn(4, 6)
+            // 列表高度上限：屏幕高度的 60%（先取值，避免在 LazyGridScope 里被同名接收者遮蔽）
+            val gridMaxHeight = maxHeight * 0.6f
+            Column(
+                Modifier
+                    .width(dialogWidth)
+                    .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
+                    .padding(vertical = 26.dp)
             ) {
-                item {
-                    Box(Modifier.focusRequester(firstFocus)) {
+                Text(
+                    "选择线路（站点）",
+                    color = AppColors.TextPrimary,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 26.dp)
+                )
+                Spacer(Modifier.height(14.dp))
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    modifier = Modifier.fillMaxWidth().heightIn(max = gridMaxHeight),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item {
+                        Box(Modifier.focusRequester(firstFocus)) {
+                            TvDialogOption(
+                                "全部站点",
+                                selected = selectedKey.isNullOrEmpty(),
+                                onClick = { onPick(null, null) }
+                            )
+                        }
+                    }
+                    gridItems(sites, key = { "site_${it.key}" }) { site ->
                         TvDialogOption(
-                            "全部站点",
-                            selected = selectedKey.isNullOrEmpty(),
-                            onClick = { onPick(null, null) }
+                            site.name,
+                            selected = selectedKey == site.key,
+                            onClick = { onPick(site.key, site) }
                         )
                     }
-                }
-                items(sites, key = { "site_${it.key}" }) { site ->
-                    TvDialogOption(
-                        site.name,
-                        selected = selectedKey == site.key,
-                        onClick = { onPick(site.key, site) }
-                    )
                 }
             }
         }

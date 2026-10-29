@@ -7,7 +7,7 @@ import androidx.room.PrimaryKey
 /** 只保留两类来源 */
 enum class SourceKind {
     EMBY,   // Emby 媒体服务器（自建影库）
-    TVBOX   // TVBox / 苹果CMS 风格 JSON 接口
+    TVBOX   // TVBox 配置 JSON（type=3 spider 站点）
 }
 
 @Entity(tableName = "sources")
@@ -15,7 +15,7 @@ data class SourceEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
     val name: String,
     val kind: SourceKind,
-    /** EMBY: 服务器地址 https://emby.example.com ; TVBOX: 配置 JSON 或 CMS 接口地址 */
+    /** EMBY: 服务器地址 https://emby.example.com ; TVBOX: TVBox 配置 JSON 地址 */
     val location: String,
     val username: String = "",
     val password: String = "",

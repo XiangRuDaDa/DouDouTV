@@ -166,23 +166,22 @@ fun HomeScreen(
             contentPadding = PaddingValues(bottom = 28.dp)
         ) {
             // ---------- 精选大图（置顶，顶栏悬浮其上） ----------
-            if (heroItems.isNotEmpty()) {
-                item {
+            // 轮播区常驻：没有可推荐内容时用同高度占位，避免首页在「加载中 / 空库」之间跳版。
+            item {
+                if (heroItems.isNotEmpty()) {
                     HeroBanner(
                         items = heroItems,
                         isTv = isTv,
                         onOpen = { onOpenDetail(it.id) },
                         onPlay = { onPlay(it) }
                     )
-                }
-            } else {
-                // 整库为空 → 引导添加来源；库里有内容但当前来源/站点没内容 → 提示同步；
-                // 选了「只有分类没首页影片」的线路时不提示空（分类入口本身就是内容入口）
-                item {
-                    when {
-                        library.isEmpty() -> EmptyState(vm)
-                        vm.homeCategories.isEmpty() -> LineEmptyHint(vm.homeSitesError)
-                    }
+                } else {
+                    HeroEmpty(
+                        vm = vm,
+                        isTv = isTv,
+                        libraryEmpty = library.isEmpty(),
+                        hasCategories = vm.homeCategories.isNotEmpty()
+                    )
                 }
             }
 
@@ -490,6 +489,46 @@ private fun CountBadge(count: Int) {
         style = MaterialTheme.typography.labelSmall,
         color = AppColors.TextTertiary
     )
+}
+
+/** 轮播区占位：和 HeroBanner 同高（TV 430dp / 手机 392dp），居中放空态说明，保证首页版式稳定 */
+@Composable
+private fun HeroEmpty(vm: LibraryViewModel, isTv: Boolean, libraryEmpty: Boolean, hasCategories: Boolean) {
+    val h = if (isTv) 430.dp else 392.dp
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(h)
+            .background(
+                Brush.verticalGradient(
+                    0f to AppColors.Brand.copy(alpha = 0.14f),
+                    0.62f to AppColors.Bg,
+                    1f to AppColors.Bg
+                )
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            libraryEmpty -> EmptyState(vm)
+            hasCategories -> Column(
+                Modifier.padding(36.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "暂无推荐内容",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = AppColors.TextPrimary
+                )
+                Text(
+                    "可从下方分类入口浏览",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AppColors.TextTertiary
+                )
+            }
+            else -> LineEmptyHint(vm.homeSitesError)
+        }
+    }
 }
 
 @Composable

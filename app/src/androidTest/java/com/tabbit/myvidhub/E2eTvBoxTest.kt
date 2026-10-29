@@ -35,7 +35,7 @@ class E2eTvBoxTest {
                     val cats = result.categories
                     Log.i(
                         "E2E",
-                        "站点=${site.key} 类型=${site.type} 成功 vod=${vods.size} 分类=${cats.size}" +
+                        "站点=${site.key} 成功 vod=${vods.size} 分类=${cats.size}" +
                             " 分类前3=${cats.take(3).joinToString(";") { "${it.typeId}:${it.typeName}" }}" +
                             " 首个=${vods.firstOrNull()?.name} 耗时=${System.currentTimeMillis() - t0}ms"
                     )

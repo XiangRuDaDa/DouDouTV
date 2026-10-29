@@ -43,6 +43,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +72,7 @@ import android.graphics.Bitmap
 import androidx.core.graphics.drawable.toBitmap
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.R
+import com.tabbit.myvidhub.MainActivity
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
@@ -98,7 +100,7 @@ import androidx.compose.runtime.collectAsState
  *   → 季切换（仅剧集）
  *   → 分集网格
  *
- * TVBox 来源有个特殊点：列表接口不含播放地址，必须进详情时才请求 ac=detail。
+ * TVBox 来源有个特殊点：列表（homeContent）不含播放地址，必须进详情时才请求 detailContent。
  * 因此首次进入会先拉一次详情，这段时间显示加载态。
  */
 @Composable
@@ -122,6 +124,13 @@ fun DetailScreen(
     val playSourceListState = rememberLazyListState()
 
     val scope = rememberCoroutineScope()
+
+    // 详情页期间把 MainActivity 的 finish() 拦下来：爬虫壳拉详情（网盘线路）时会顺手结束宿主，
+    // 不拦就会「点详情直接闪退」。
+    DisposableEffect(Unit) {
+        MainActivity.detailVisible = true
+        onDispose { MainActivity.detailVisible = false }
+    }
 
     /** Emby 刮削信息（导演/演员/分级/工作室） */
     var scraped by remember { mutableStateOf<EmbyClient.ItemDetail?>(null) }

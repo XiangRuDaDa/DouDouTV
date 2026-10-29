@@ -646,13 +646,13 @@ private fun SourceDialog(
 
                     SourceKind.TVBOX -> {
                         MobileFormField(
-                            label = "TVBox / CMS 接口地址",
+                            label = "TVBox 配置地址",
                             value = location,
-                            placeholder = "https://example.com/api.php/provide/vod/",
+                            placeholder = "https://example.com/tvbox.json",
                             onValueChange = { location = it },
                             keyboardType = KeyboardType.Uri,
                             imeAction = ImeAction.Done,
-                            hint = "接口需支持 ?ac=videolist 返回 JSON（苹果CMS 通用格式）"
+                            hint = "填 TVBox 配置 JSON 地址，需包含 spider 与 type=3 的 spider 站点"
                         )
                     }
                 }

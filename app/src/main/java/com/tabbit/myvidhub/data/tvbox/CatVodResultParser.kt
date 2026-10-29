@@ -109,7 +109,7 @@ object CatVodResultParser {
                         n to u
                     }
                     // 保留所有 URL，包括云盘 scheme（quark://、aliyundrive://、uc:// 等）。
-                    // 之前用 AbsolutePlayUrl 过滤掉非 http 地址，导致网盘线路的分集全部丢失。
+                    // 注意不能按 http(s) 过滤，否则网盘线路的分集会全部丢失。
                     // 云盘地址的真实播放地址由 playerContent 在播放时按需解析。
                     val absolute = TvBoxClient.AbsoluteUrl(epUrl)
                     TvBoxClient.Episode(epName, absolute)
