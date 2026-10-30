@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Source
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -121,6 +122,9 @@ fun HomeScreen(
 
     val cardWidth = if (isTv) Prefs.posterSize.tvDp.dp else Prefs.posterSize.mobileDp.dp
 
+    // 「继续观看」卡片长按弹出的操作菜单（TV 端的对应实现在 TvHomeScreen，走遥控器长按 OK）
+    var continueMenu by remember { mutableStateOf<MediaEntity?>(null) }
+
     // 当前生效的来源：手动选择的来源，未选择（或已删除/停用）时回退到第一个启用中的来源
     val selectedSource = sources.firstOrNull { it.id == vm.homeSourceId } ?: sources.firstOrNull()
 
@@ -196,7 +200,29 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(continueList, key = { "cw_${it.id}" }) { item ->
-                            ContinueCard(item = item, onClick = { onPlay(item) })
+                            ContinueCard(
+                                item = item,
+                                onClick = { onPlay(item) },
+                                onLongClick = { continueMenu = item }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ---------- 收藏 ----------
+            // 收藏是用户主动留下的内容，排在「继续观看」之前，与 TV 端首页同一顺序
+            if (favorites.isNotEmpty()) {
+                item { SectionTitle("我的收藏", trailing = { CountBadge(favorites.size) }) }
+                item {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 18.dp),
+                        horizontalArrangement = Arrangement.spacedBy(9.dp)
+                    ) {
+                        items(favorites, key = { "fav_${it.id}" }) { item ->
+                            Box(Modifier.width(cardWidth)) {
+                                PosterCard(item = item, onClick = { onOpenDetail(item.id) })
+                            }
                         }
                     }
                 }
@@ -258,23 +284,6 @@ fun HomeScreen(
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ---------- 收藏 ----------
-            if (favorites.isNotEmpty()) {
-                item { SectionTitle("我的收藏", trailing = { CountBadge(favorites.size) }) }
-                item {
-                    LazyRow(
-                        contentPadding = PaddingValues(horizontal = 18.dp),
-                        horizontalArrangement = Arrangement.spacedBy(9.dp)
-                    ) {
-                        items(favorites, key = { "fav_${it.id}" }) { item ->
-                            Box(Modifier.width(cardWidth)) {
-                                PosterCard(item = item, onClick = { onOpenDetail(item.id) })
                             }
                         }
                     }
@@ -364,6 +373,123 @@ fun HomeScreen(
             }
         }
     }
+
+    // ---------- 继续观看卡片长按菜单 ----------
+    continueMenu?.let { item ->
+        ContinueActionDialog(
+            item = item,
+            onPlay = {
+                continueMenu = null
+                onPlay(item)
+            },
+            onDetail = {
+                continueMenu = null
+                onOpenDetail(item.id)
+            },
+            onClear = {
+                // 只归零进度，不删媒体行：条目立刻离开「继续观看」，片子还在库里
+                vm.clearWatchProgress(item.id)
+                continueMenu = null
+            },
+            onDismiss = { continueMenu = null }
+        )
+    }
+}
+
+/**
+ * 手机端「继续观看」卡片长按菜单：继续播放 / 查看详情 / 清除观看记录。
+ *
+ * 用 [AlertDialog] 而不是自制浮层 —— 手指点按的场景下系统弹窗的遮罩、焦点、
+ * Back 关闭都是现成的，与来源页删除确认框（SourcesScreen）同一套视觉。
+ */
+@Composable
+private fun ContinueActionDialog(
+    item: MediaEntity,
+    onPlay: () -> Unit,
+    onDetail: () -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = AppColors.Surface,
+        title = {
+            Text(
+                text = item.title,
+                color = AppColors.TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        },
+        text = {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    text = buildString {
+                        if (item.seriesKey.isNotBlank() && item.season > 0) {
+                            append("S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')} · ")
+                        }
+                        append("看到 ")
+                        append(continueClock(item.positionMs))
+                        if (item.durationMs > 0L) {
+                            append(" / ")
+                            append(continueClock(item.durationMs))
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppColors.TextTertiary
+                )
+                Spacer(Modifier.height(10.dp))
+                ContinueMenuAction("继续播放", hint = "从上次的位置接着看") { onPlay() }
+                ContinueMenuAction("查看详情") { onDetail() }
+                ContinueMenuAction("清除观看记录", hint = "片子还在库里，只是不再出现在这里", danger = true) { onClear() }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消", color = AppColors.TextSecondary)
+            }
+        }
+    )
+}
+
+@Composable
+private fun ContinueMenuAction(
+    text: String,
+    hint: String? = null,
+    danger: Boolean = false,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (danger) Color(0xFFE5484D) else AppColors.TextPrimary
+        )
+        if (!hint.isNullOrBlank()) {
+            Text(
+                text = hint,
+                style = MaterialTheme.typography.labelSmall,
+                color = AppColors.TextTertiary
+            )
+        }
+    }
+}
+
+/** 菜单里的进度时长：分够一小时才带时位 */
+private fun continueClock(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0L)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
 /**

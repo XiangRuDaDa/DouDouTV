@@ -81,6 +81,7 @@ import com.tabbit.myvidhub.ui.theme.TvText
 import com.tabbit.myvidhub.ui.tv.TvButtonSize
 import com.tabbit.myvidhub.ui.tv.TvFilterChip
 import com.tabbit.myvidhub.ui.tv.TvIconButton
+import com.tabbit.myvidhub.ui.tv.TvMenuRow
 import com.tabbit.myvidhub.ui.tv.TvPillButton
 import com.tabbit.myvidhub.ui.tv.TvPagePadding
 
@@ -665,66 +666,6 @@ private fun TvSourceActionDialog(
                     TvMenuRow(text = "编辑来源", onClick = onEdit)
                     TvMenuRow(text = "删除来源", danger = true, onClick = onDelete)
                 }
-            }
-        }
-    }
-}
-
-/** 功能菜单里的单行选项：可聚焦，聚焦时反白高亮 */
-@Composable
-private fun TvMenuRow(
-    text: String,
-    hint: String? = null,
-    danger: Boolean = false,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    var focused by remember { mutableStateOf(false) }
-    Box(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(
-                when {
-                    focused -> Color.White
-                    danger -> Color(0xFFE5484D).copy(alpha = 0.10f)
-                    else -> AppColors.SurfaceHi.copy(alpha = 0.35f)
-                }
-            )
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
-                else Modifier
-            )
-            .onFocusChanged { focused = it.isFocused }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
-            .padding(horizontal = 18.dp, vertical = 14.dp)
-    ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = text,
-                color = when {
-                    focused && danger -> Color(0xFFE5484D)
-                    focused -> Color.Black
-                    danger -> Color(0xFFFF8A65)
-                    else -> TvText.Title
-                },
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
-            )
-            if (!hint.isNullOrBlank()) {
-                Text(
-                    text = hint,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (focused) Color.Black.copy(alpha = 0.6f) else TvText.Meta
-                )
             }
         }
     }

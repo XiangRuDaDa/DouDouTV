@@ -111,6 +111,13 @@ class TvPlayerActivity : ComponentActivity() {
     private var toast by mutableStateOf<String?>(null)
     private var seekHint by mutableStateOf<String?>(null)
     private var isPlaying by mutableStateOf(false)
+
+    /**
+     * 缓冲提示（非空 = 正在「想播但没数据」）。
+     * 高码率原码资源在低带宽下会长时间不起播，画面看着就是「卡死」；
+     * 把已缓冲秒数和这条流需要的码率摊出来，用户才能分辨是网速不够还是片子坏了。
+     */
+    private var bufferHint by mutableStateOf<String?>(null)
     private var positionMs by mutableStateOf(0L)
     private var durationMs by mutableStateOf(0L)
     private var speed by mutableStateOf(1f)
@@ -136,10 +143,35 @@ class TvPlayerActivity : ComponentActivity() {
                 positionMs = p.currentPosition.coerceAtLeast(0L)
                 durationMs = p.duration.takeIf { it > 0L } ?: 0L
                 isPlaying = p.isPlaying
+                bufferHint = buildBufferHint(p)
+                // 缓冲时把进度层叫回来：不然后台在缓冲、屏幕上什么都看不到。
+                // 功能面板开着时不抢它的位子。
+                if (bufferHint != null && panelTab == null) overlayVisible = true
                 if (p.isPlaying) saveProgress(force = false)
             }
             handler.postDelayed(this, 500L)
         }
+    }
+
+    /** 只在「已按下播放但数据还没到」时给出提示文本，其余情况返回 null */
+    private fun buildBufferHint(p: Player): String? {
+        if (p.playbackState != Player.STATE_BUFFERING) return null
+        if (!p.playWhenReady) return null
+        val bufferedSec = (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L) / 1000
+        val bps = videoBitrateBps(p)
+        return if (bps > 0) {
+            "缓冲中 · 已缓冲 ${bufferedSec}s · 这条流 ${"%.1f".format(bps / 1_000_000.0)} Mbps"
+        } else {
+            "缓冲中 · 已缓冲 ${bufferedSec}s"
+        }
+    }
+
+    /** 当前视频轨的声明码率（bit/s）；容器没写或还拿不到轨信息时返回 0 */
+    private fun videoBitrateBps(p: Player): Int {
+        val group = p.currentTracks.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO } ?: return 0
+        val index = (0 until group.length).firstOrNull { group.isTrackSelected(it) } ?: 0
+        val bitrate = runCatching { group.getTrackFormat(index).bitrate }.getOrNull()
+        return if (bitrate != null && bitrate > 0) bitrate else 0
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -548,7 +580,8 @@ class TvPlayerActivity : ComponentActivity() {
                     title = titleText,
                     position = positionMs,
                     duration = durationMs,
-                    playing = isPlaying
+                    playing = isPlaying,
+                    buffering = bufferHint
                 )
             }
 
@@ -647,7 +680,8 @@ private fun TvProgressBar(
     title: String,
     position: Long,
     duration: Long,
-    playing: Boolean
+    playing: Boolean,
+    buffering: String?
 ) {
     val fraction = if (duration > 0L) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f
 
@@ -696,9 +730,11 @@ private fun TvProgressBar(
         }
 
         Text(
-            if (playing) "播放中 · OK 暂停 · ↓ 功能" else "已暂停 · OK 继续 · ↓ 功能",
-            color = Color.White.copy(alpha = 0.6f),
-            style = MaterialTheme.typography.labelMedium
+            // 缓冲提示优先占这一行：它旁边的进度条停着不动，配上「已缓冲 X 秒」才知道是在等数据
+            text = buffering ?: if (playing) "播放中 · OK 暂停 · ↓ 功能" else "已暂停 · OK 继续 · ↓ 功能",
+            color = if (buffering != null) Color(0xFFFFC46B) else Color.White.copy(alpha = 0.6f),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (buffering != null) FontWeight.SemiBold else FontWeight.Normal
         )
     }
 }

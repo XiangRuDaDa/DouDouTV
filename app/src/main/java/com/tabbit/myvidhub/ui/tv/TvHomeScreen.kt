@@ -1,5 +1,6 @@
 package com.tabbit.myvidhub.ui.tv
 
+import android.os.SystemClock
 import android.view.KeyEvent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
@@ -54,6 +55,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -104,6 +106,7 @@ import com.tabbit.myvidhub.ui.theme.themeSeamFade
 import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * 电视端首页（Netflix 式横版结构，针对遥控器与十英尺观看距离设计）。
@@ -219,6 +222,18 @@ fun TvHomeScreen(
     // 选择器弹窗开关
     var showSourceDialog by remember { mutableStateOf(false) }
     var showSiteDialog by remember { mutableStateOf(false) }
+    // 「继续观看」卡片的操作菜单：长按 OK / 按 Menu 唤出。
+    // 连同卡片自己的 FocusRequester 一起存，菜单关掉后要把焦点还回那张卡。
+    var continueMenu by remember { mutableStateOf<Pair<MediaEntity, FocusRequester>?>(null) }
+
+    // 弹窗关闭后把焦点交还给触发它的卡片：否则整页焦点被清空，
+    // 用户要重按一次方向键才能重新出现高亮。
+    val restoreCardFocus: (FocusRequester) -> Unit = { requester ->
+        scope.launch {
+            withFrameNanos { }
+            runCatching { requester.requestFocus() }
+        }
+    }
 
     // 焦点 requester 链：Hero 播放按钮 ↔ TopBar 来源按钮。
     // TopBar 在 Box 顶层悬浮，和 LazyColumn 不在同一焦点子树 → 落点必须显式给（规范 R1），
@@ -315,10 +330,24 @@ fun TvHomeScreen(
                 item { TvHeroSeamFade() }
             }
 
+            // ---------- 我的收藏 ----------
+            // 收藏是用户主动留下的内容，优先级高于「继续观看」，双端都排在它上面
+            if (favorites.isNotEmpty()) {
+                item(key = "fav_title") { TvSectionTitle("★ 我的收藏") }
+                item(key = "fav_row") { TvPosterRow(items = favorites, onDetail = onDetail) }
+            }
+
             // ---------- 继续观看 ----------
             if (continueItems.isNotEmpty()) {
                 item { TvSectionTitle("▶ 继续观看") { } }
-                item { TvContinueRow(items = continueItems, onDetail = onDetail, onPlay = onPlay) }
+                item {
+                    TvContinueRow(
+                        items = continueItems,
+                        onDetail = onDetail,
+                        onPlay = onPlay,
+                        onMenu = { media, cardFocus -> continueMenu = media to cardFocus }
+                    )
+                }
             }
 
             // ---------- TVBox 动态分类预览 sections ----------
@@ -344,13 +373,6 @@ fun TvHomeScreen(
                     // 某个分类加载完成只重组它自己那一行，不会把整个首页的 item 列表重建一遍。
                     TvCategoryPreview(typeId = cat.typeId, vm = vm, onDetail = onDetail)
                 }
-            }
-
-            // ---------- 我的收藏 ----------
-            // 位置与手机端一致：排在分类行之后、动态分区之前
-            if (favorites.isNotEmpty()) {
-                item(key = "fav_title") { TvSectionTitle("★ 我的收藏") }
-                item(key = "fav_row") { TvPosterRow(items = favorites, onDetail = onDetail) }
             }
 
             // ---------- 动态分区：根据 filteredLibrary 实际存在的 kind 渲染 ----------
@@ -413,6 +435,30 @@ fun TvHomeScreen(
                     showSiteDialog = false
                 },
                 onDismiss = { showSiteDialog = false }
+            )
+        }
+
+        // ---------- 继续观看卡片的操作菜单（长按 OK / Menu 键唤出） ----------
+        continueMenu?.let { (media, cardFocus) ->
+            TvContinueActionDialog(
+                item = media,
+                onPlay = {
+                    continueMenu = null
+                    onPlay(media)
+                },
+                onDetail = {
+                    continueMenu = null
+                    onDetail(media.id)
+                },
+                onClear = {
+                    // 只归零进度，不删媒体行：条目立刻离开「继续观看」，片子还在库里
+                    vm.clearWatchProgress(media.id)
+                    continueMenu = null
+                },
+                onDismiss = {
+                    continueMenu = null
+                    restoreCardFocus(cardFocus)
+                }
             )
         }
     }
@@ -1015,7 +1061,8 @@ private fun TvPosterRow(
 private fun TvContinueRow(
     items: List<MediaEntity>,
     onDetail: (Long) -> Unit,
-    onPlay: (MediaEntity) -> Unit
+    onPlay: (MediaEntity) -> Unit,
+    onMenu: (MediaEntity, FocusRequester) -> Unit
 ) {
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
@@ -1027,8 +1074,36 @@ private fun TvContinueRow(
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
             val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
+            val cardFocus = remember { FocusRequester() }
+            // OK 键按下的时间戳（elapsedRealtime，0 表示当前没有按下中）
+            var centerDownAt by remember { mutableLongStateOf(0L) }
+            // 必须排在 clickable 之前：按键点击发生在 clickable 自己的 preview 处理里，
+            // 同一节点上外层的 preview 先拿到事件，长按才能把 KeyUp 吃掉、不让它起播。
+            val longPressMenu: Modifier = Modifier
+                .focusRequester(cardFocus)
+                .onPreviewKeyEvent { e ->
+                    val native = e.nativeKeyEvent
+                    val isCenter = native.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || native.keyCode == KeyEvent.KEYCODE_ENTER
+                    when {
+                        // 有 Menu 键的遥控器走这条捷径；没有的机型只能长按 OK
+                        native.keyCode == KeyEvent.KEYCODE_MENU -> {
+                            if (native.action == KeyEvent.ACTION_DOWN) onMenu(item, cardFocus)
+                            true
+                        }
+                        isCenter && native.action == KeyEvent.ACTION_DOWN && native.repeatCount == 0 -> {
+                            centerDownAt = SystemClock.elapsedRealtime()
+                            false
+                        }
+                        isCenter && native.action == KeyEvent.ACTION_UP -> {
+                            val held = if (centerDownAt == 0L) 0L else SystemClock.elapsedRealtime() - centerDownAt
+                            centerDownAt = 0L
+                            held >= 500L
+                        }
+                        else -> false
+                    }
+                }
             Box(
-                Modifier
+                longPressMenu
                     // 放大后的白边要靠 z 轴抬起来，否则会被同行后面的卡片压住
                     .zIndex(if (focused) 1f else 0f)
                     .graphicsLayer { scaleX = scale; scaleY = scale }
@@ -1087,6 +1162,108 @@ private fun TvContinueRow(
             }
         }
     }
+}
+
+/**
+ * 「继续观看」卡片的操作菜单（长按 OK / Menu 键唤出）。
+ *
+ * 弹窗形态跟本页的来源/线路选择器一致（Compose Dialog + tvMoveFocus 抢焦，规范 R1/R5）：
+ * 独立窗口天然把焦点关在菜单里，不会逃逸到下层海报行，Back 也由窗口自己处理。
+ * 行样式复用 [TvMenuRow]，与来源页功能菜单同一套视觉。
+ */
+@Composable
+private fun TvContinueActionDialog(
+    item: MediaEntity,
+    onPlay: () -> Unit,
+    onDetail: () -> Unit,
+    onClear: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val firstFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        // 等一帧：Dialog 内容要先组合完成，requester 才挂得上
+        withFrameNanos { }
+        tvMoveFocus(firstFocus)
+    }
+
+    val progress = if (item.durationMs > 0L) (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f) else 0f
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        // 关掉平台默认窄宽度，宽度由弹窗自己按屏幕尺寸决定
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        BoxWithConstraints(
+            Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            val dialogWidth = (maxWidth * 0.34f).coerceIn(380.dp, 640.dp)
+            Column(
+                Modifier
+                    .width(dialogWidth)
+                    .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
+                    .padding(vertical = 26.dp)
+            ) {
+                Text(
+                    text = item.title,
+                    color = TvText.Title,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 26.dp)
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = buildString {
+                        if (item.seriesKey.isNotBlank() && item.season > 0) {
+                            append("S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')} · ")
+                        }
+                        append("看到 ")
+                        append(tvClock(item.positionMs))
+                        if (item.durationMs > 0L) {
+                            append(" / ")
+                            append(tvClock(item.durationMs))
+                            append("（")
+                            append((progress * 100).roundToInt())
+                            append("%）")
+                        }
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TvText.Meta,
+                    modifier = Modifier.padding(horizontal = 26.dp)
+                )
+                Spacer(Modifier.height(18.dp))
+                Column(
+                    Modifier.padding(horizontal = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    TvMenuRow(
+                        text = "继续播放",
+                        hint = "从上次的位置接着看",
+                        modifier = Modifier.focusRequester(firstFocus),
+                        onClick = onPlay
+                    )
+                    TvMenuRow(text = "查看详情", onClick = onDetail)
+                    TvMenuRow(
+                        text = "清除观看记录",
+                        hint = "片子还在库里，只是不再出现在这里",
+                        danger = true,
+                        onClick = onClear
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 观看进度菜单用的简短时长：小时才带时位，分钟秒补足 */
+private fun tvClock(ms: Long): String {
+    val total = (ms / 1000).coerceAtLeast(0L)
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val s = total % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
 /**

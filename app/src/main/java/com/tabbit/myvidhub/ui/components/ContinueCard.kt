@@ -2,9 +2,10 @@ package com.tabbit.myvidhub.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -46,11 +47,15 @@ import com.tabbit.myvidhub.ui.theme.AppColors
  *
  * 与海报卡区分开是有意的 —— VidHub 首页把「继续观看」做成横幅卡片而非竖版海报，
  * 因为用户此刻要的是"接着看"，缩略画面比海报更能唤起记忆。
+ *
+ * 单击直接接着播，长按唤出卡片菜单（查看详情 / 清除观看记录）。
  */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 fun ContinueCard(
     item: MediaEntity,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -73,7 +78,12 @@ fun ContinueCard(
             .clip(shape)
             .background(AppColors.Surface)
             .then(if (focused) Modifier.border(2.5.dp, AppColors.Brand, shape) else Modifier)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .combinedClickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .focusable()
     ) {
         // 无图或死链时露出渐变兜底，不再是一块纯色矩形；图上已经压了片名，占位只放首字

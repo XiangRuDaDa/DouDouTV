@@ -109,6 +109,14 @@ class PhonePlayerActivity : ComponentActivity() {
     private var seekPreview by mutableStateOf<String?>(null)
     private var seekPreviewJob: Job? = null
 
+    /**
+     * 缓冲提示（非空 = 正在「想播但没数据」），与 TV 端同一套文案。
+     * 高码率原码资源在低带宽下会长时间不起播，画面看着就是「卡死」；
+     * 把已缓冲秒数和这条流需要的码率摊出来，用户才能分辨是网速不够还是片子坏了。
+     */
+    private var bufferHint by mutableStateOf<String?>(null)
+    private var bufferJob: Job? = null
+
     private var speedState by mutableStateOf(1f)
 
     /** 0=适应 1=铺满 2=缩放 */
@@ -157,6 +165,7 @@ class PhonePlayerActivity : ComponentActivity() {
                 PlayerScreen(
                     toast = toastState,
                     seekPreview = seekPreview,
+                    buffering = bufferHint,
                     onViewCreated = { view, _ ->
                         playerView = view
                         player?.let { view.player = it }
@@ -485,6 +494,7 @@ class PhonePlayerActivity : ComponentActivity() {
                 override fun onPlaybackStateChanged(state: Int) {
                     Log.d("PhonePlayer", "player state=$state")
                     if (state == Player.STATE_ENDED) playNext()
+                    watchBuffering()
                 }
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -603,6 +613,7 @@ class PhonePlayerActivity : ComponentActivity() {
                 np.addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         if (state == Player.STATE_ENDED) playNext()
+                        watchBuffering()
                     }
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         updatePlayPauseLabel()
@@ -798,6 +809,55 @@ class PhonePlayerActivity : ComponentActivity() {
         return "背景 ${bg}% · ${subtitleTextSize.toInt()}sp"
     }
 
+    /**
+     * 缓冲状态下开始/停止 500ms 轮询。
+     * 手机端没有 TV 端那样的常驻进度 ticker（控制条自己刷），所以缓冲期间临时起一个循环，
+     * 让「已缓冲 X 秒」是活的而不是进门时的一次性快照。
+     */
+    private fun watchBuffering() {
+        val p = player ?: return
+        val buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady
+        if (!buffering) {
+            bufferJob?.cancel()
+            bufferJob = null
+            bufferHint = null
+            return
+        }
+        bufferHint = buildBufferHint(p)
+        if (bufferJob?.isActive == true) return
+        bufferJob = lifecycleScope.launch {
+            while (true) {
+                delay(500)
+                val cur = player ?: break
+                val hint = buildBufferHint(cur)
+                bufferHint = hint
+                if (hint == null) break
+            }
+            bufferJob = null
+        }
+    }
+
+    /** 只在「已按下播放但数据还没到」时给出提示文本，其余情况返回 null */
+    private fun buildBufferHint(p: Player): String? {
+        if (p.playbackState != Player.STATE_BUFFERING) return null
+        if (!p.playWhenReady) return null
+        val bufferedSec = (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L) / 1000
+        val bps = videoBitrateBps(p)
+        return if (bps > 0) {
+            "缓冲中 · 已缓冲 ${bufferedSec}s · 这条流 ${"%.1f".format(bps / 1_000_000.0)} Mbps"
+        } else {
+            "缓冲中 · 已缓冲 ${bufferedSec}s"
+        }
+    }
+
+    /** 当前视频轨的声明码率（bit/s）；容器没写或还拿不到轨信息时返回 0 */
+    private fun videoBitrateBps(p: Player): Int {
+        val group = p.currentTracks.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO } ?: return 0
+        val index = (0 until group.length).firstOrNull { group.isTrackSelected(it) } ?: 0
+        val bitrate = runCatching { group.getTrackFormat(index).bitrate }.getOrNull()
+        return if (bitrate != null && bitrate > 0) bitrate else 0
+    }
+
     private fun saveProgress(force: Boolean = false) {
         val item = current ?: return
         val p = player ?: return
@@ -908,6 +968,7 @@ private data class TrackOption(
 private fun PlayerScreen(
     toast: String?,
     seekPreview: String?,
+    buffering: String?,
     onViewCreated: (PlayerView, Context) -> Unit,
     updateResizeMode: (PlayerView) -> Unit
 ) {
@@ -951,6 +1012,24 @@ private fun PlayerScreen(
                     .padding(horizontal = 18.dp, vertical = 12.dp)
             ) {
                 Text(toast, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        // 缓冲提示：控制条上那个转圈只说「还在等」，这里补上等了多久、这条流要多大带宽
+        if (!buffering.isNullOrBlank()) {
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 120.dp)
+                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    buffering,
+                    color = Color(0xFFFFC46B),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }
