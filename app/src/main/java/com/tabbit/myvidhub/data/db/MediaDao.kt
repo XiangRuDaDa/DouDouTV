@@ -129,6 +129,10 @@ interface MediaDao {
     @Query("UPDATE media SET durationMs = :duration WHERE id = :id AND durationMs = 0")
     suspend fun fillDuration(id: Long, duration: Long)
 
+    /** 清除观看记录：只归零进度，不删行（行删了分集要重新联网拉） */
+    @Query("UPDATE media SET positionMs = 0, lastPlayedAt = 0 WHERE id = :id")
+    suspend fun clearProgress(id: Long)
+
     @Query("DELETE FROM media WHERE sourceId = :sourceId")
     suspend fun deleteBySource(sourceId: Long)
 

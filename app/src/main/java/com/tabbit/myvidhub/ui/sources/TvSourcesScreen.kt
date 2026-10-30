@@ -76,6 +76,7 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
 import com.tabbit.myvidhub.ui.tv.TvButtonSize
 import com.tabbit.myvidhub.ui.tv.TvFilterChip
@@ -119,7 +120,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
         val cardWidth = (usableWidth - cardGap * (columns - 1)) / columns
         val cardHeight = (cardWidth * 0.72f).coerceIn(210.dp, 280.dp)
 
-        Box(Modifier.fillMaxSize().background(AppColors.Bg)) {
+        Box(Modifier.fillMaxSize().themeBackdrop()) {
 
             // ========== 顶部栏 ==========
             Row(

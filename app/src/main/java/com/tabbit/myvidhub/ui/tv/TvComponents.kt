@@ -207,7 +207,7 @@ private fun tvButtonPadding(size: TvButtonSize): PaddingValues = when (size) {
     TvButtonSize.Lg -> PaddingValues(horizontal = 26.dp, vertical = 13.dp)
 }
 
-/** 电视上的主按钮：白底黑字（主操作）或半透明白底（次操作），聚焦时加粗白边 */
+/** 电视上的主按钮：品牌色实底（主操作）或品牌色淡底（次操作），聚焦时加粗白边并提到更亮的一档 */
 @Composable
 fun TvPillButton(
     text: String,
@@ -222,6 +222,8 @@ fun TvPillButton(
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "pill")
+    val brand = AppColors.Brand
+    val brandSoft = AppColors.BrandSoft
 
     Box(
         modifier
@@ -230,11 +232,15 @@ fun TvPillButton(
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(8.dp))
             .background(
+                // 填充整颗跟着主题色走，聚焦态不再刷纯白：
+                // 十英尺下焦点是常态（进页第一个落点就是主按钮），
+                // 白填充等于把主题色在屏幕上唯一的大色块抹掉，看上去就是「按钮没适配主题」。
+                // 层级靠「浅色实底 → 品牌色 → 品牌色淡底」三档加白边拉开，不再靠白/黑两套色相。
                 when {
-                    primary && focused -> Color.White
-                    primary -> AppColors.Brand
-                    focused -> Color.White.copy(alpha = 0.28f)
-                    else -> Color.White.copy(alpha = 0.14f)
+                    primary && focused -> brandSoft
+                    primary -> brand
+                    focused -> brand.copy(alpha = 0.46f)
+                    else -> brand.copy(alpha = 0.18f)
                 }
             )
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
@@ -249,11 +255,10 @@ fun TvPillButton(
         Text(
             text,
             color = when {
-                primary && focused -> Color.Black       // 主按钮 + 聚焦：白底黑字
-                primary -> TvText.Title                 // 主按钮 + 正常：蓝底白字
-                focused -> Color.Black                  // 次按钮 + 聚焦：白底黑字
-                size == TvButtonSize.Sm -> TvText.Body   // 顶栏按钮：弱化，不跟主操作抢注意力
-                else -> TvText.Section
+                // 主按钮聚焦压在浅色上，黑字最稳；其余态都在深色上，用白字
+                primary && focused -> Color.Black
+                size == TvButtonSize.Sm -> TvText.Body
+                else -> TvText.Title
             },
             // 三档共用同一个字号，层级交给填充与高度
             style = MaterialTheme.typography.titleMedium,
@@ -282,7 +287,7 @@ fun TvPlayButton(
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(RoundedCornerShape(8.dp))
-            .background(if (focused) Color.White else AppColors.Brand)
+            .background(if (focused) AppColors.BrandSoft else AppColors.Brand)
             .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
@@ -497,6 +502,70 @@ fun TvSectionTitle(
 @Composable
 fun TvMoreButton(onClick: () -> Unit) {
     TvPillButton(text = "查看全部", primary = false, size = TvButtonSize.Md, onClick = onClick)
+}
+
+/**
+ * 功能菜单里的单行选项：可聚焦，聚焦时反白高亮。
+ * 来源页的操作面板和首页「继续观看」长按菜单共用这一种行样式，
+ * 菜单类弹窗不要再另造一套按钮视觉。
+ */
+@Composable
+fun TvMenuRow(
+    text: String,
+    hint: String? = null,
+    danger: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                when {
+                    focused -> Color.White
+                    danger -> Color(0xFFE5484D).copy(alpha = 0.10f)
+                    else -> AppColors.SurfaceHi.copy(alpha = 0.35f)
+                }
+            )
+            .then(
+                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
+                else Modifier
+            )
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 18.dp, vertical = 14.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = text,
+                color = when {
+                    focused && danger -> Color(0xFFE5484D)
+                    focused -> Color.Black
+                    danger -> Color(0xFFFF8A65)
+                    else -> TvText.Title
+                },
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium
+            )
+            if (!hint.isNullOrBlank()) {
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (focused) Color.Black.copy(alpha = 0.6f) else TvText.Meta
+                )
+            }
+        }
+    }
 }
 
 /** 空状态提示 —— 主文 headlineSmall，下面补一条更弱的 hint */

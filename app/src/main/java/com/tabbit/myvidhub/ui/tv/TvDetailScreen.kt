@@ -532,7 +532,13 @@ fun TvDetailScreen(
                                         up = FocusRequester.Cancel
                                         down = playFocusRequester
                                     },
-                                onClick = { vm.toggleFavorite(item.id, !item.favorite) }
+                                onClick = {
+                                    val next = !item.favorite
+                                    vm.toggleFavorite(item.id, next)
+                                    // media 是进页时一次性读出的快照，库 Flow 的回填不会流到这里，
+                                    // 不本地回写就是「按了没反应」（同手机端的处理）
+                                    media = media?.copy(favorite = next)
+                                }
                             )
                         }
 

@@ -20,6 +20,7 @@ object Prefs {
     private const val KEY_SOURCE_LAST_SYNC = "source_last_sync_"
     private const val KEY_SEARCH_HISTORY = "search_history_list"
     private const val KEY_PINYIN_VERSION = "pinyin_version"
+    private const val KEY_THEME_ID = "theme_id"
 
     /** 缩略图尺寸三档 */
     enum class PosterSize(val mobileDp: Int, val tvDp: Int) {
@@ -36,6 +37,18 @@ object Prefs {
         }
 
     private lateinit var sp: SharedPreferences
+
+    /**
+     * 全局主题色板 id。
+     *
+     * 空串表示「没选过」，由 ui.theme 那边回落到默认色板：
+     * core 不认得具体色板，也就不需要跟着色表一起改。
+     */
+    var themeId: String
+        get() = sp.getString(KEY_THEME_ID, "").orEmpty()
+        set(value) {
+            sp.edit().putString(KEY_THEME_ID, value).apply()
+        }
 
     fun init(context: Context) {
         if (!::sp.isInitialized) {

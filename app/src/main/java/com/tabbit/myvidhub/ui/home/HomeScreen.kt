@@ -88,6 +88,8 @@ import com.tabbit.myvidhub.ui.components.PosterCard
 import com.tabbit.myvidhub.ui.components.SectionTitle
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.themeBackdrop
+import com.tabbit.myvidhub.ui.theme.themeSeamFade
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -151,30 +153,30 @@ fun HomeScreen(
     // 注意：alpha 计算放在 graphicsLayer 的 draw 阶段（下面 Column 里），
     // 不在这里在 composition 层读 firstVisibleItemScrollOffset —— 那会导致每像素滚动都触发整页重组
 
-    Box(Modifier.fillMaxSize()) {
+    // 背景走全 app 统一的那套光晕层：原来这里在 LazyColumn 上写死了一条
+    // 「Brand@0.09 → Bg」的顶部渐变，往下整屏都是纯黑，换主题色在首页读不出来；
+    // 而且挂在滚动节点上，光晕会跟着内容一起滚走。
+    Box(Modifier.fillMaxSize().themeBackdrop()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to AppColors.Brand.copy(alpha = 0.09f),
-                        0.22f to AppColors.Bg,
-                        1f to AppColors.Bg
-                    )
-                ),
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 28.dp)
         ) {
             // ---------- 精选大图（置顶，顶栏悬浮其上） ----------
             // 轮播区常驻：没有可推荐内容时用同高度占位，避免首页在「加载中 / 空库」之间跳版。
             item {
                 if (heroItems.isNotEmpty()) {
-                    HeroBanner(
-                        items = heroItems,
-                        isTv = isTv,
-                        onOpen = { onOpenDetail(it.id) },
-                        onPlay = { onPlay(it) }
-                    )
+                    // 大图渐隐收到的纯 Bg，与下方渗了品牌色的页面背景对不上，
+                    // 接缝正压在轮播底边上 —— 用一条收色带把接缝挪进渐变中段（见 themeSeamFade）
+                    Column {
+                        HeroBanner(
+                            items = heroItems,
+                            isTv = isTv,
+                            onOpen = { onOpenDetail(it.id) },
+                            onPlay = { onPlay(it) }
+                        )
+                        Box(Modifier.themeSeamFade(if (isTv) 40.dp else 28.dp))
+                    }
                 } else {
                     HeroEmpty(
                         vm = vm,
@@ -497,16 +499,11 @@ private fun CountBadge(count: Int) {
 private fun HeroEmpty(vm: LibraryViewModel, isTv: Boolean, libraryEmpty: Boolean, hasCategories: Boolean) {
     val h = if (isTv) 430.dp else 392.dp
     Box(
+        // 不再自绘「Brand@0.14 → Bg」：这格位置本来就落在首页的 themeBackdrop 上，
+        // 自己糊一层等于把刚接进来的主题背景又盖回纯黑
         Modifier
             .fillMaxWidth()
-            .height(h)
-            .background(
-                Brush.verticalGradient(
-                    0f to AppColors.Brand.copy(alpha = 0.14f),
-                    0.62f to AppColors.Bg,
-                    1f to AppColors.Bg
-                )
-            ),
+            .height(h),
         contentAlignment = Alignment.Center
     ) {
         when {
@@ -782,16 +779,12 @@ fun GenreScreen(
     }
     val currentTab = tabs.firstOrNull { it.kind == kind && it.genre == genre }
 
+    // 根容器不滚动（滚动的是下面的网格），所以统一背景直接挂在它上：
+    // 原来这里写死了一条「Brand@0.09 → Bg」的顶部渐变，往下整屏纯黑，换主题色在这页读不出来
     Column(
         Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    0f to AppColors.Brand.copy(alpha = 0.09f),
-                    0.22f to AppColors.Bg,
-                    1f to AppColors.Bg
-                )
-            )
+            .themeBackdrop()
     ) {
         // ---------- 顶栏 ----------
         Row(
@@ -820,9 +813,12 @@ fun GenreScreen(
             Modifier
                 .fillMaxWidth()
                 .background(
+                    // 两头都淡出、只在中段压一层半透明 Bg：原来收到不透明纯色时，
+                    // 这条带的底边会在带主题色的背景上压出一条横线；半透明两头收口就没这个界线
                     Brush.verticalGradient(
                         0f to Color.Transparent,
-                        1f to AppColors.Bg
+                        0.62f to AppColors.Bg.copy(alpha = 0.5f),
+                        1f to Color.Transparent
                     )
                 )
                 .padding(vertical = 4.dp)
@@ -1309,16 +1305,11 @@ fun TvBoxCategoryScreen(
         loading = false
     }
 
+    // 同 GenreScreen：根容器不滚动，统一背景直接挂在它上，替掉原来那条写死的顶部渐变
     Column(
         Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    0f to AppColors.Brand.copy(alpha = 0.09f),
-                    0.22f to AppColors.Bg,
-                    1f to AppColors.Bg
-                )
-            )
+            .themeBackdrop()
     ) {
         // ---------- 顶栏 ----------
         Row(

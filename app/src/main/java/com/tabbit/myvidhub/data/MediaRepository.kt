@@ -831,6 +831,14 @@ class MediaRepository(private val context: Context) {
         mediaDao.fillDuration(mediaId, durationMs)
     }
 
+    /**
+     * 清除观看记录：进度与最后播放时间归零，条目随即离开「继续观看」。
+     * 刻意不删媒体行 —— 分集行删掉后详情页要重新联网拉一次，代价和风险都比归零大。
+     */
+    suspend fun clearProgress(mediaId: Long) {
+        mediaDao.clearProgress(mediaId)
+    }
+
     private companion object {
         /** 热门榜联想缓存有效期：24 小时 */
         const val HOT_SUGGEST_TTL_MS = 24 * 60 * 60 * 1000L

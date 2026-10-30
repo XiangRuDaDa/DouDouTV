@@ -788,4 +788,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     fun saveProgress(mediaId: Long, positionMs: Long) {
         viewModelScope.launch { repo.saveProgress(mediaId, positionMs) }
     }
+
+    /** 首页「继续观看」卡片上的清除记录：归零后 Flow 自动把卡片摘掉 */
+    fun clearWatchProgress(mediaId: Long) {
+        viewModelScope.launch { repo.clearProgress(mediaId) }
+    }
 }

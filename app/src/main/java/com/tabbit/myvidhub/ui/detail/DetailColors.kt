@@ -85,7 +85,7 @@ internal fun focusColorOf(bitmap: Bitmap): Color {
     val argb = swatch?.rgb ?: averageColorOf(bitmap)
     val hsv = FloatArray(3)
     android.graphics.Color.colorToHSV(argb, hsv)
-    if (hsv[1] < 0.06f) return AppColors.Brand
+    if (hsv[1] < 0.06f) return AppColors.BrandBase
 
     hsv[1] = hsv[1].coerceIn(0.40f, 0.90f)
     hsv[2] = hsv[2].coerceIn(0.45f, 0.82f)
@@ -122,7 +122,7 @@ private fun centerAverageColorOf(bitmap: Bitmap): Int {
         }
         y += stepY
     }
-    if (n == 0L) return AppColors.Brand.toArgb()
+    if (n == 0L) return AppColors.BrandBase.toArgb()
     return android.graphics.Color.rgb((r / n).toInt(), (g / n).toInt(), (b / n).toInt())
 }
 
@@ -147,7 +147,7 @@ private fun averageColorOf(bitmap: Bitmap): Int {
         }
         y += stepY
     }
-    if (n == 0L) return AppColors.Brand.toArgb()
+    if (n == 0L) return AppColors.BrandBase.toArgb()
     return android.graphics.Color.rgb((r / n).toInt(), (g / n).toInt(), (b / n).toInt())
 }
 

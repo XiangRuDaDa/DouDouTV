@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.delay
 
@@ -197,7 +198,7 @@ fun TvSearchScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .background(AppColors.Bg)
+            .themeBackdrop()
     ) {
         Row(
             Modifier

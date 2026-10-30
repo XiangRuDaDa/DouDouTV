@@ -43,6 +43,7 @@ import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.launch
 
@@ -135,7 +136,7 @@ fun TvGenreScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .background(AppColors.Bg)
+            .themeBackdrop()
     ) {
         Row(
             Modifier
@@ -296,7 +297,7 @@ fun TvCategoryScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .background(AppColors.Bg)
+            .themeBackdrop()
     ) {
         Row(
             Modifier

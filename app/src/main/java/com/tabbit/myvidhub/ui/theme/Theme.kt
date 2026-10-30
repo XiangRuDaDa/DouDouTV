@@ -8,15 +8,30 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
-/** VidHub 式深色影音配色：近黑底 + 蓝紫强调色 */
 object AppColors {
-    val Brand = Color(0xFF4F8CFF)
-    val BrandSoft = Color(0xFF6BA1FF)
+    /**
+     * 品牌色的静态基准值 —— 与默认色板同色。
+     *
+     * 保留它是为了那些不在组合式上下文里的用法（详情页取色的兜底分支），
+     * 那些地方拿不到 CompositionLocal，也不需要跟随主题。
+     */
+    val BrandBase = Color(0xFF4F8CFF)
+    val BrandSoftBase = Color(0xFF6BA1FF)
+
+    /** 品牌色：跟随设置页选的主题色板，只在组合式上下文里可读 */
+    val Brand: Color
+        @Composable get() = LocalPalette.current.brand
+
+    /** 品牌浅色：用于品牌色上的文字与弱强调 */
+    val BrandSoft: Color
+        @Composable get() = LocalPalette.current.brandSoft
+
     val Bg = Color(0xFF0B0D12)
     val Surface = Color(0xFF141822)
     val SurfaceHi = Color(0xFF1E2430)
@@ -24,6 +39,13 @@ object AppColors {
     val TextSecondary = Color(0xFF9BA4B4)
     val TextTertiary = Color(0xFF6B7482)
     val Rating = Color(0xFFFFC107)
+
+    /**
+     * 详情页顶栏 scrim 的底色。
+     *
+     * 这里要的是「和屏幕底色完全一致」，不是一个会随主题漂移的语义品牌色，
+     * 所以详情页直接用它、绕开 MaterialTheme；详情页自己有一套从海报取色的配色体系。
+     */
     val ScrimTop = Color(0xFF0B0D12)
 }
 
@@ -55,11 +77,18 @@ object TvText {
     val Hairline = Color(0x40FFFFFF)
 }
 
-private val Scheme = darkColorScheme(
-    primary = AppColors.Brand,
+/**
+ * Material3 配色表。
+ *
+ * 原来是一个顶层 val：Compose 的 object 初始化只跑一次，色板换了它也拿不到新值，
+ * 所以改成按色板现算。传进来的是色板而不是直接读状态，让「谁订阅了主题」这件事
+ * 只发生在 MyVidHubTheme 那一处，下面整棵树都靠 CompositionLocal 各自订阅。
+ */
+private fun schemeFor(palette: ThemePalette) = darkColorScheme(
+    primary = palette.brand,
     onPrimary = Color.White,
-    primaryContainer = AppColors.BrandSoft,
-    secondary = AppColors.BrandSoft,
+    primaryContainer = palette.brandSoft,
+    secondary = palette.brandSoft,
     background = AppColors.Bg,
     onBackground = AppColors.TextPrimary,
     surface = AppColors.Surface,
@@ -141,9 +170,15 @@ fun Context.isTelevision(): Boolean {
 
 @Composable
 fun MyVidHubTheme(isTv: Boolean = false, content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = Scheme,
-        typography = if (isTv) TvTypography else MobileTypography,
-        content = content
-    )
+    val palette = AppPalette.current
+    CompositionLocalProvider(
+        LocalPalette provides palette,
+        LocalTvMode provides isTv
+    ) {
+        MaterialTheme(
+            colorScheme = schemeFor(palette),
+            typography = if (isTv) TvTypography else MobileTypography,
+            content = content
+        )
+    }
 }

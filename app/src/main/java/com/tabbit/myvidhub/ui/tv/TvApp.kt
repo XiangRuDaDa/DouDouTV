@@ -36,7 +36,6 @@ import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.player.tv.TvPlayerActivity
-import com.tabbit.myvidhub.ui.settings.SettingsScreen
 import com.tabbit.myvidhub.ui.sources.TvSourcesScreen
 import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.delay
@@ -150,7 +149,7 @@ fun TvApp(vm: LibraryViewModel) {
                 )
 
                 is TvRoute.Sources -> TvSourcesScreen(vm = vm)
-                is TvRoute.Settings -> SettingsScreen(vm = vm)
+                is TvRoute.Settings -> TvSettingsScreen(vm = vm)
             }
         }
 

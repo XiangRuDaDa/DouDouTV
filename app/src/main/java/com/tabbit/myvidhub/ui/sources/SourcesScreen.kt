@@ -66,6 +66,7 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.themeBackdrop
 
 /**
  * 手机端来源管理。
@@ -110,51 +111,54 @@ fun SourcesScreen(vm: LibraryViewModel, isTv: Boolean = false) {
             }
         }
     ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            item {
-                Header(
-                    syncing = vm.scanning,
-                    onSyncAll = { vm.syncAll() }
-                )
-            }
-
-            if (sources.isEmpty()) {
-                item { EmptySourceHint() }
-            } else {
-                if (embys.isNotEmpty()) {
-                    item { GroupLabel("Emby 媒体服务器", embys.size) }
-                    items(embys, key = { "emby-${it.id}" }) { src ->
-                        SourceCard(
-                            vm = vm,
-                            source = src,
-                            isActiveHome = src.id == activeHomeId,
-                            busy = vm.isSourceSyncing(src.id),
-                            onSync = { vm.scanOne(src) },
-                            onRelogin = { vm.reloginEmby(src) },
-                            onEdit = { editing = src },
-                            onToggle = { vm.toggleSourceEnabled(src) },
-                            onDelete = { deleting = src }
-                        )
-                    }
+        // 光晕画在不滚动的外层：挂在 LazyColumn 上会跟内容一起滚走，滚到底就只剩纯黑
+        Box(Modifier.fillMaxSize().themeBackdrop()) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    Header(
+                        syncing = vm.scanning,
+                        onSyncAll = { vm.syncAll() }
+                    )
                 }
-                if (tvboxes.isNotEmpty()) {
-                    item { GroupLabel("TVBox 接口", tvboxes.size) }
-                    items(tvboxes, key = { "tvbox-${it.id}" }) { src ->
-                        SourceCard(
-                            vm = vm,
-                            source = src,
-                            isActiveHome = src.id == activeHomeId,
-                            busy = vm.isSourceSyncing(src.id),
-                            onSync = { vm.scanOne(src) },
-                            onRelogin = { vm.reloginEmby(src) },
-                            onEdit = { editing = src },
-                            onToggle = { vm.toggleSourceEnabled(src) },
-                            onDelete = { deleting = src }
-                        )
+
+                if (sources.isEmpty()) {
+                    item { EmptySourceHint() }
+                } else {
+                    if (embys.isNotEmpty()) {
+                        item { GroupLabel("Emby 媒体服务器", embys.size) }
+                        items(embys, key = { "emby-${it.id}" }) { src ->
+                            SourceCard(
+                                vm = vm,
+                                source = src,
+                                isActiveHome = src.id == activeHomeId,
+                                busy = vm.isSourceSyncing(src.id),
+                                onSync = { vm.scanOne(src) },
+                                onRelogin = { vm.reloginEmby(src) },
+                                onEdit = { editing = src },
+                                onToggle = { vm.toggleSourceEnabled(src) },
+                                onDelete = { deleting = src }
+                            )
+                        }
+                    }
+                    if (tvboxes.isNotEmpty()) {
+                        item { GroupLabel("TVBox 接口", tvboxes.size) }
+                        items(tvboxes, key = { "tvbox-${it.id}" }) { src ->
+                            SourceCard(
+                                vm = vm,
+                                source = src,
+                                isActiveHome = src.id == activeHomeId,
+                                busy = vm.isSourceSyncing(src.id),
+                                onSync = { vm.scanOne(src) },
+                                onRelogin = { vm.reloginEmby(src) },
+                                onEdit = { editing = src },
+                                onToggle = { vm.toggleSourceEnabled(src) },
+                                onDelete = { deleting = src }
+                            )
+                        }
                     }
                 }
             }

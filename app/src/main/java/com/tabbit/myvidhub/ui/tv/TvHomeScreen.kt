@@ -99,6 +99,8 @@ import com.tabbit.myvidhub.ui.components.PosterArt
 import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.themeBackdrop
+import com.tabbit.myvidhub.ui.theme.themeSeamFade
 import com.tabbit.myvidhub.ui.theme.TvText
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -130,6 +132,8 @@ fun TvHomeScreen(
 ) {
     val library by vm.library.collectAsStateWithLifecycle()
     val sources by vm.enabledSources.collectAsStateWithLifecycle()
+    // 收藏是全库范围，不跟首页来源/线路过滤走（与手机端同一份数据源）
+    val favorites by vm.favorites.collectAsStateWithLifecycle()
 
     // 首页内容按选中的来源/站点（线路）过滤；未选择来源时原样返回
     val filteredLibrary = remember(library, vm.homeSourceId, vm.homeSiteKey) { vm.filterForHome(library) }
@@ -143,12 +147,14 @@ fun TvHomeScreen(
             .take(5)
     }
 
-    // 继续观看：播放进度 > 5s 且最近 30 天内看过的条目，取最近 8 条
-    val continueItems = remember(filteredLibrary) {
-        filteredLibrary
-            .filter { it.positionMs > 5_000L && it.lastPlayedAt > 0L && it.lastPlayedAt > System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L }
-            .sortedByDescending { it.lastPlayedAt }
-            .take(8)
+    // 继续观看：与手机端同一份数据源（vm.continueWatching 直接读 positionMs>5s 的 MOVIE/EPISODE 行）。
+    // 以前是从 filteredLibrary 里筛的，而 observeLibrary() 只返回 MOVIE/SERIES，
+    // 进度又写在 EPISODE 行上、剧集壳永远不带进度 —— 结果电视端只显示电影，
+    // 一整季的追看记录都看不见；来源过滤还会把别的源看过的内容一并砍掉。
+    val continueWatching by vm.continueWatching.collectAsStateWithLifecycle()
+    val continueItems = remember(continueWatching) {
+        val cutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
+        continueWatching.filter { it.lastPlayedAt > cutoff }.take(8)
     }
 
     var heroIndex by remember { mutableStateOf(0) }
@@ -266,7 +272,7 @@ fun TvHomeScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(AppColors.Bg)
+            .themeBackdrop()
     ) {
         LazyColumn(
             state = listState,
@@ -303,6 +309,11 @@ fun TvHomeScreen(
                 }
             }
             // 选了「只有分类没首页影片」的线路时不提示空：下面的分类入口本身就是内容入口
+            if (hero != null) {
+                // 收色带：接缝正好落在 Hero 底边上时，无论把渐隐终点配成什么色都会露出一条线，
+                // 所以把接缝挪进这条渐变里 —— 顶边与 Hero 底边同色（看不出发界），底边完全透明（露出页面背景）
+                item { TvHeroSeamFade() }
+            }
 
             // ---------- 继续观看 ----------
             if (continueItems.isNotEmpty()) {
@@ -333,6 +344,13 @@ fun TvHomeScreen(
                     // 某个分类加载完成只重组它自己那一行，不会把整个首页的 item 列表重建一遍。
                     TvCategoryPreview(typeId = cat.typeId, vm = vm, onDetail = onDetail)
                 }
+            }
+
+            // ---------- 我的收藏 ----------
+            // 位置与手机端一致：排在分类行之后、动态分区之前
+            if (favorites.isNotEmpty()) {
+                item(key = "fav_title") { TvSectionTitle("★ 我的收藏") }
+                item(key = "fav_row") { TvPosterRow(items = favorites, onDetail = onDetail) }
             }
 
             // ---------- 动态分区：根据 filteredLibrary 实际存在的 kind 渲染 ----------
@@ -564,6 +582,15 @@ private fun TvSourceChainPill(
 private const val HERO_DWELL_SECONDS = 9f
 
 /**
+ * Hero 与页面背景之间的收色带：把两者共用的那条接缝挪进渐变中段。
+ * 画法与手机端首页的轮播同款，见 [themeSeamFade]。
+ */
+@Composable
+private fun TvHeroSeamFade(modifier: Modifier = Modifier) {
+    Box(modifier.themeSeamFade(40.dp))
+}
+
+/**
  * Hero 高度。
  *
  * Netflix 的 billboard 约占视口高的 55~60%，但那家的标题排在画面**下方**；
@@ -679,8 +706,17 @@ private fun TvHero(
             )
         }
         val bottomVignette = remember {
+            // 起点从 0.55 提前到 0.28：渐隐摊到 Hero 高度的七成上，明暗不再在中段陡然起步；
+            // 中间补三段 stops 走近似 smoothstep，收尾放平，避免线性尾巴在暗部出现可见台阶。
+            // 0.90 起收到不透明纯色，底边留出一条横贯整宽的纯色着陆带 ——
+            // 下面的收色带要跟它接，接的必须是一条确定的色，不能是还在渐变的段。
+            // 收色仍然是纯 Bg：与下方背景的衔接交给 TvHeroSeamFade，不在这里配品牌色 ——
+            // 页面背景横着是不均匀的（左浓右淡），配出来的色只在那一个点准，这就是上一版还留条黑线的原因。
             Brush.verticalGradient(
-                0.55f to Color.Transparent,
+                0.28f to Color.Transparent,
+                0.55f to AppColors.Bg.copy(alpha = 0.26f),
+                0.78f to AppColors.Bg.copy(alpha = 0.62f),
+                0.90f to AppColors.Bg,
                 1f to AppColors.Bg
             )
         }
@@ -773,6 +809,8 @@ private fun TvHero(
                     color = TvText.Muted,
                     style = MaterialTheme.typography.labelMedium
                 )
+                // 品牌色在组合阶段取好：drawBehind 不是组合式上下文，读不了 CompositionLocal
+                val brandColor = AppColors.Brand
                 Box(
                     Modifier
                         .width(120.dp)
@@ -782,7 +820,7 @@ private fun TvHero(
                         // 在 draw 阶段读 State：进度每秒变几十次，只重画这条线，不重组整个 Hero
                         .drawBehind {
                             drawRect(
-                                color = AppColors.Brand,
+                                color = brandColor,
                                 size = Size(size.width * progress.value, size.height)
                             )
                         }
