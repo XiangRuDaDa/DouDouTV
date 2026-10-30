@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.theme.AppColors
@@ -75,15 +76,9 @@ fun ContinueCard(
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable()
     ) {
-        if (image.isNotBlank()) {
-            AsyncImage(
-                model = image,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Box(Modifier.fillMaxSize().background(Color(0xFF1B2130)))
+        // 无图或死链时露出渐变兜底，不再是一块纯色矩形；图上已经压了片名，占位只放首字
+        PosterArt(model = image, contentDescription = item.title) {
+            PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
         }
 
         // 左侧压暗，保证文字可读

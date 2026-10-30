@@ -19,10 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,10 +31,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import androidx.compose.ui.unit.sp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.theme.AppColors
@@ -88,15 +84,10 @@ fun PosterCard(
             )
             .focusable()
     ) {
-        if (item.posterUrl.isNotBlank()) {
-            AsyncImage(
-                model = item.posterUrl,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            PlaceholderArt()
+        // 无图、或者图是 404 死链时露出按片名哈希的兜底封面，不再是一块空灰矩形。
+        // 这张卡底部渐变上已经有片名了，所以占位只排首字水印，避免同屏两处重复。
+        PosterArt(model = item.posterUrl, contentDescription = item.title) {
+            PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
         }
 
         Box(
@@ -142,25 +133,6 @@ private fun ProgressLine(fraction: Float) {
             Modifier
                 .fillMaxWidth(fraction.coerceIn(0f, 1f))
                 .background(AppColors.Brand)
-        )
-    }
-}
-
-@Composable
-private fun PlaceholderArt() {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(Color(0xFF232A38), Color(0xFF14181F)))
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = Icons.Outlined.Movie,
-            contentDescription = null,
-            tint = Color.White.copy(alpha = 0.22f),
-            modifier = Modifier.fillMaxWidth(0.28f)
         )
     }
 }

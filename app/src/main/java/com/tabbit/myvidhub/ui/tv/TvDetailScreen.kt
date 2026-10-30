@@ -115,6 +115,13 @@ import androidx.compose.runtime.collectAsState
  *     又能一屏看到已看进度，找「看到哪了」比手机端还快。
  *
  * 背景沿用「封面聚焦色填充 + 封面到填充色的长距离溶解过渡」。
+ *
+ * 焦点锚点链（本页只认这一条链，全部显式声明，规范 R1/R4）：
+ *   收藏 ⇅ 播放/从头开始 ⇅ 选集控制条（源 · 季 · 翻页）⇅ 选集网格
+ *   · 下键逐层走，一层都没有才跳过只读区块；
+ *   · 在控制条上完成的切换（换源、换季、翻页）焦点留在控制条，主动按下才进网格；
+ *   · ↑ 走到收藏即停，并把滚动位置送回首屏构图（海报 + 标题大图态），
+ *     不能只靠 bring-into-view 的最小滚动 —— 那样标题会顶在屏幕顶上回不去。
  */
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 @Composable
@@ -168,11 +175,8 @@ fun TvDetailScreen(
     val controlsFocusRequester = remember { FocusRequester() }
     val firstEpFocusRequester = remember { FocusRequester() }
 
-    /** 换季 / 换源 / 翻页后把焦点送回新页首集（仅当焦点原本在选集内） */
-    var restoreGridFocus by remember(mediaId) { mutableStateOf(false) }
-
-    /** 进页只落一次焦点；刮削回填 media 时不能把焦点从选集抢回播放键 */
-    var initialFocusDone by remember(mediaId) { mutableStateOf(false) }
+    /** 界面每次回到前台（进出播放器）都要重新站好焦点，见 [tvResumeTick] */
+    val resumeTick = tvResumeTick()
 
     val scope = rememberCoroutineScope()
 
@@ -285,14 +289,16 @@ fun TvDetailScreen(
         dominant = color
     }
 
-    // 加载完成后把焦点落到「播放」按钮上，进页即可直接按 OK 播放
-    LaunchedEffect(media, loading) {
-        if (!loading && media != null && !initialFocusDone) {
-            kotlinx.coroutines.delay(120)
-            runCatching { playFocusRequester.requestFocus() }
-            initialFocusDone = true
-        }
-    }
+    /**
+     * 进页与「界面每次回到前台」都把焦点站回播放键（规范 R7），进页即可直接按 OK 播放。
+     * key 只带「数据到位与否 + resume 次数」：刮削回填会换掉 media 实例，
+     * 但 id 不变，所以不会把用户已经站好的焦点从选集抢走（等价于原来的 initialFocusDone 只落一次）。
+     */
+    tvClaimFocusOnEnter(
+        tick = listOf(resumeTick, if (loading) null else media?.id),
+        anchors = *arrayOf(playFocusRequester),
+        settleMillis = 120
+    )
 
     val item = media
 
@@ -326,14 +332,10 @@ fun TvDetailScreen(
      *  controlsFocusRequester 按「源首颗 → 季首颗 → 上一页」的顺序只挂一颗。 */
     val hasControlAnchor = playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1
 
-    // 换季 / 换源 / 翻页会换掉整组卡片；在新页组合完成后把焦点送回首集，
-    // 否则旧卡片被移除，焦点会掉到 null，遥控器像「失灵」。
-    LaunchedEffect(pagedEpisodes) {
-        if (!restoreGridFocus || pagedEpisodes.isEmpty()) return@LaunchedEffect
-        withFrameNanos { }
-        runCatching { firstEpFocusRequester.requestFocus() }
-        restoreGridFocus = false
-    }
+    // 换季 / 换源 / 翻页会换掉整组卡片，但按键落点在控制条上，控制条本身不随内容变化消失，
+    // 焦点因此不会掉 —— 这里刻意不再做任何抢焦。
+    // 原来的 restoreGridFocus 会在每次切换后把焦点抢到第一集，
+    // 表现就是「切完云盘，焦点自己跑到剧集上了」（规范 R4：离开哪一层就留在哪一层）。
 
     val tones = remember(dominant) {
         if (dominant == Color.Unspecified) {
@@ -407,18 +409,37 @@ fun TvDetailScreen(
         val contentAnchor = remember { BringIntoViewRequester() }
 
         /**
-         * 一次下键的完整转场：内容块顶部对齐 → 焦点交给第一集。
+         * 一次下键的完整转场：内容块顶部对齐 → 焦点交给 [target]。
          *
-         * 只依赖焦点的自动 brings-into-view，视口会「最小滚动」，第一集虽然露出来了，
+         * 只依赖焦点的自动 brings-into-view，视口会「最小滚动」，落点虽然露出来了，
          * 简介顶部却常常被切掉；先把内容锚点滚到顶部再聚焦，才能稳定做到
          * 「一屏看到简介 + 主演 + 选集首行」，这也是「一次下键看全」的关键。
          */
-        fun enterEpisodeSection() {
+        fun enterEpisodeSection(target: FocusRequester) {
             scope.launch {
                 runCatching { contentAnchor.bringIntoView() }
                 withFrameNanos { }
-                runCatching { firstEpFocusRequester.requestFocus() }
+                // 控制条这次没渲染出来（单源单季单页）时退回网格首格
+                tvMoveFocus(target, firstEpFocusRequester)
             }
+        }
+
+        /**
+         * 播放区按下 ↓ 的落点。有控制条就先落控制条：
+         * 原来这里写死第一集，从播放键一按就越过源/季切换直达剧集，
+         * 想换云盘还得先按 ↑ 走回来（规范 R1/R4：一层一层走，不许跨层抢）。
+         */
+        val belowPlay: FocusRequester = when {
+            !hasEpisodes -> FocusRequester.Cancel
+            hasControlAnchor -> controlsFocusRequester
+            else -> firstEpFocusRequester
+        }
+
+        /** 焦点回到首屏锚点时，构图也要回到首屏（规范 R7）。
+         *  只靠 bring-into-view 的最小滚动，标题与大海报会留在视口外，
+         *  用户看到的就是「名字顶在屏幕顶上，再按上键也回不到刚进页那个状态」。 */
+        fun restoreHeaderComposition() {
+            if (scrollState.value > 0) scope.launch { runCatching { scrollState.animateScrollTo(0) } }
         }
 
         /**
@@ -486,7 +507,8 @@ fun TvDetailScreen(
                                 }
                             }
                             Spacer(Modifier.width(14.dp))
-                            // 收藏在页面最上方：上键到此为止，下键回播放。
+                            // 收藏是焦点链最顶端：↑ 到此为止，同时把构图送回「海报 + 大标题」的首屏态；
+                            // 下键回播放。
                             // focusRequester 必须挂在这里，否则播放按钮的上键是个空引用、按了没反应。
                             TvIconButton(
                                 icon = if (item.favorite) Icons.Filled.Favorite
@@ -496,6 +518,16 @@ fun TvDetailScreen(
                                 sizeDp = 40.dp,
                                 modifier = Modifier
                                     .focusRequester(favoriteFocusRequester)
+                                    // 焦点走到这一层 = 用户已经按回到顶，构图跟着回首屏（规范 R7）
+                                    .onFocusChanged { if (it.hasFocus) restoreHeaderComposition() }
+                                    .onPreviewKeyEvent { e ->
+                                        if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionUp) {
+                                            restoreHeaderComposition()
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
                                     .focusProperties {
                                         up = FocusRequester.Cancel
                                         down = playFocusRequester
@@ -519,25 +551,30 @@ fun TvDetailScreen(
                         // 操作按钮行：只出一个主按钮，三种内容状态各自对应一个明确动词。
                         // 没看过的剧先选集，看过的直接续播。
                         val seriesUnwatched = item.kind == MediaKind.SERIES && item.positionMs <= 5_000L
-                        // 播放按钮的下键直接进选集：只读的简介 / 主演不接收焦点，
+                        // 操作按钮的下键进选集区：只读的简介 / 主演不接收焦点，
                         // 所以不会出现「按几次才滚到剧集」。
-                        // 下键：先把内容块滚到顶部再交给第一集；预览阶段消费，
+                        // 下键：先把内容块滚到顶部再交给落点（默认控制条首颗）；预览阶段消费，
                         // 避免默认焦点搜索先一步把视口滚到「只露出卡片」的位置。
                         val episodeDownModifier = Modifier.onPreviewKeyEvent { e ->
                             if (hasEpisodes && e.type == KeyEventType.KeyDown &&
                                 e.key == Key.DirectionDown
                             ) {
-                                enterEpisodeSection()
+                                enterEpisodeSection(belowPlay)
                                 true
                             } else {
                                 false
                             }
                         }
+                        // 焦点走到操作区 = 用户已经按回顶部，构图同步送回「海报 + 大标题」态
+                        val restoreHeaderOnFocus = Modifier.onFocusChanged {
+                            if (it.hasFocus) restoreHeaderComposition()
+                        }
                         val playFocusModifier = Modifier
                             .focusRequester(playFocusRequester)
+                            .then(restoreHeaderOnFocus)
                             .focusProperties {
                                 up = favoriteFocusRequester
-                                down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
+                                down = belowPlay
                             }
                             .then(episodeDownModifier)
                         Spacer(Modifier.height(18.dp))
@@ -548,13 +585,15 @@ fun TvDetailScreen(
                             if (seriesUnwatched) {
                                 // 没看过的剧：不猜「从哪集开始」，让用户自己点。
                                 // 按下即把焦点送进第一集，页面随焦点滚到选集。
+                                // 这里刻意落到网格、不落控制条：按钮写的是「选择剧集」，
+                                // 要换云盘 / 换季从首行按 ↑ 回控制条即可。
                                 TvPlayButton(
                                     text = "选择剧集",
                                     size = TvButtonSize.Lg,
                                     modifier = playFocusModifier,
                                     onClick = {
                                         epPage = 0
-                                        enterEpisodeSection()
+                                        enterEpisodeSection(firstEpFocusRequester)
                                     }
                                 )
                             } else {
@@ -578,9 +617,10 @@ fun TvDetailScreen(
                                         // 次操作取中档：比主按钮小一档，但仍是同一字号
                                         size = TvButtonSize.Md,
                                         modifier = Modifier
+                                            .then(restoreHeaderOnFocus)
                                             .focusProperties {
                                                 up = favoriteFocusRequester
-                                                down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
+                                                down = belowPlay
                                             }
                                             .then(episodeDownModifier),
                                         onClick = {
@@ -685,7 +725,6 @@ fun TvDetailScreen(
                                                 onClick = {
                                                     selectedPlaySource = src
                                                     epPage = 0
-                                                    restoreGridFocus = true
                                                     scope.launch {
                                                         val item2 = media
                                                         if (item2 != null) {
@@ -708,7 +747,6 @@ fun TvDetailScreen(
                                                 onClick = {
                                                     selectedSeason = sn
                                                     epPage = 0
-                                                    restoreGridFocus = true
                                                 }
                                             )
                                         }
@@ -726,7 +764,6 @@ fun TvDetailScreen(
                                             onClick = {
                                                 if (pageIndex > 0) {
                                                     epPage = pageIndex - 1
-                                                    restoreGridFocus = true
                                                 }
                                             }
                                         )
@@ -742,7 +779,6 @@ fun TvDetailScreen(
                                             onClick = {
                                                 if (pageIndex < totalPages - 1) {
                                                     epPage = pageIndex + 1
-                                                    restoreGridFocus = true
                                                 }
                                             }
                                         )
@@ -753,7 +789,6 @@ fun TvDetailScreen(
                                             modifier = pillFocus,
                                             onClick = {
                                                 epPage = totalPages - 1
-                                                restoreGridFocus = true
                                             }
                                         )
                                     }

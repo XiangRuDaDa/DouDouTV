@@ -25,27 +25,39 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.graphicsLayer
-import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
+import com.tabbit.myvidhub.ui.components.PosterArt
+import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.TvText
 
@@ -63,7 +75,117 @@ import com.tabbit.myvidhub.ui.theme.TvText
  *
  * 聚焦的元件一律先 .zIndex(1f) 再 .graphicsLayer 放大：
  * 抬高绘制层级，放大后的白边才不会被同排的兄弟节点压住。
+ *
+ * 焦点路由的硬约束见本文件下面的「焦点路由规范 R1-R8」；
+ * 新增可聚焦元件一律走 tvFocusRoute / tvMoveFocus / tvClaimFocusOnEnter，不要手拼。
  */
+
+/* ========================================================
+   焦点路由规范（TV 端硬约束，R1-R8）
+   ========================================================
+   这八条是从 8 个真机故障里归纳出来的，评审新页面就按它们打回：
+
+   R1 显式路由优先。同一功能区里每颗可聚焦元件的 up/down 必须显式给 FocusRequester；
+      默认几何搜索只允许用于同一行内的左右移动。跨功能区（顶栏 ↔ Hero、控制条 ↔ 选集网格、
+      Header ↔ 选集）禁止依赖几何搜索 —— 它只在「当前视口内的可聚焦节点」里找，
+      可达性被 Hero 高度这类无关参数决定，用户看到的就是「按了没反应」。
+   R2 按键拦截挂在元件自己身上（modifier 级 onPreviewKeyEvent）。
+      禁止「顶层容器 + 页面级布尔位」表示焦点在哪颗按钮上：一个布尔覆盖不了一片按钮，
+      结果就是「播放键的 ↑ 有效，旁边详情键的 ↑ 无效」。状态位只用于视觉高亮。
+   R3 不许用状态位校验跳转结果。成败只看 requestFocus 是否抛异常，跳完即止；
+      降级顺序固定：同区备用锚 → moveFocus(方向) → 什么都不做。
+      「跳完读状态位、读不到再跳一次」会把已经落对的焦点拽走。
+   R4 焦点离开哪一层就留在哪一层。在控制条上完成的动作（换源/换季/翻页）本来就站在控制条上，
+      所以数据回填后「什么都不做」才是对的；只有用户主动按下才进网格。
+      「内容一变就抢焦回网格首行」这类无来源的抢焦一律禁止 —— 按钮还在组合里没消失，
+      焦点不会掉，加一次恢复反而是把高亮从刚按下的按钮拽走。
+   R5 弹窗与列表的默认焦点 = 当前选中项，不是第 0 项；没有选中项才回退第 0。
+   R6 不允许焦点死区。任何占视口高 >40% 的不可聚焦区域必须自带至少一颗可聚焦 CTA，
+      首屏必须存在一条「能往下走」的路。空态比满态更容易犯这条。
+   R7 可见即恢复。Activity resume（进出播放器）与上级页 pop 回来时，把焦点交回该页声明的
+      入口锚点；恢复焦点要与恢复构图（滚动位置）成对做，只靠 bring-into-view 的最小滚动
+      回不到首屏大图。1.6.8 的 FocusManager 既不暴露 hasFocus 也不暴露 currentFocus，
+      查不到「当前有没有焦点」，所以只能统一重抢一次；入口锚点已经持有焦点时重复请求是空操作。
+   R8 引用别的子树或条件分支里的 requester 前，先确认它这一帧真的挂载了。
+      淡出即摘除的元件不能当路由目标；跨分支 requestFocus 一律走 tvMoveFocus（内部已兜异常）。
+      1.6.8 的 requestFocus() 返回 Unit，成功与否读不到，所以入口抢焦要补抢一次（见 tvClaimFocusOnEnter）。
+   ======================================================== */
+
+/**
+ * R1：声明一颗可聚焦元件的上/下落点。
+ * 传 null 表示这一向不设规则，交给默认几何搜索 —— 那只允许用于同一行内的左右移动。
+ */
+fun Modifier.tvFocusRoute(
+    up: FocusRequester? = null,
+    down: FocusRequester? = null,
+): Modifier = focusProperties {
+    if (up != null) this.up = up
+    if (down != null) this.down = down
+}
+
+/**
+ * R3：跳焦点的唯一入口。
+ * 按顺序试各个落点，[FocusRequester.requestFocus] 没抛异常就算到位并立即返回；
+ * 全部没挂载时才按 [direction] 降级到默认几何搜索。绝不读 onFocusChanged 的状态位再校验一遍。
+ */
+fun tvMoveFocus(
+    vararg targets: FocusRequester,
+    focusManager: FocusManager? = null,
+    direction: FocusDirection? = null,
+): Boolean {
+    for (target in targets) {
+        if (runCatching { target.requestFocus() }.isSuccess) return true
+    }
+    if (focusManager != null && direction != null) {
+        runCatching { focusManager.moveFocus(direction) }
+    }
+    return false
+}
+
+/** 每次界面重新回到前台 +1（进播放器再退出来也会走一次 ON_RESUME）。 */
+@Composable
+fun tvResumeTick(): Int {
+    val owner = LocalLifecycleOwner.current
+    var tick by remember { mutableIntStateOf(0) }
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) tick++
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    return tick
+}
+
+/**
+ * R7：入口抢焦。[tick] 每次变化（首次组合 + 每次界面回到前台）都把焦点交给第一个已挂载的落点。
+ *
+ * 为什么不在这里判断「当前是不是已经有焦点」：1.6.8 的 FocusManager 不暴露焦点查询，
+ * 而跨 Activity 回来时（进播放器再退出）恰恰是「焦点状态还在、视觉选中框没了」和
+ * 「焦点彻底丢了」两种情况混在一起，只能统一重抢一次来保证一定看得见选中态。
+ * 代价是从播放器回来会把焦点放回该页入口锚点（而不是你离开时那颗卡片），
+ * 这比「按了没反应」可预期；以后要做「记住离开位置」，把锚点表换成按层级记录的表即可。
+ */
+@Composable
+fun tvClaimFocusOnEnter(
+    tick: Any,
+    vararg anchors: FocusRequester,
+    scrollToTop: suspend () -> Unit = {},
+    settleMillis: Long = 0L,
+) {
+    LaunchedEffect(tick) {
+        runCatching { scrollToTop() }
+        if (settleMillis > 0) delay(settleMillis)
+        // 等一帧：requester 要等节点组合完成才挂得上
+        withFrameNanos { }
+        tvMoveFocus(*anchors)
+        // 再补一次：路由淡入淡出、刚从播放器 resume 回来时，锚点节点这一帧可能还没挂上，
+        // 而 requestFocus 是否成功在 1.6.8 里读不到返回值。对已经持有焦点的节点重复请求是空操作，
+        // 所以补一次只会「把没抢到的焦点抢上」，不会把用户已经走到位的焦点拽回来。
+        delay(120)
+        tvMoveFocus(*anchors)
+    }
+}
 
 /**
  * 电视端按钮的尺寸档位。
@@ -286,12 +408,19 @@ fun TvPosterCard(
                 .then(if (fillCell) Modifier.aspectRatio(2f / 3f) else Modifier.height(width * 1.5f))
                 .background(AppColors.SurfaceHi)
         ) {
-            AsyncImage(
+            // 无海报（TVBox 的 vod_pic 常是空串）或图是 404 死链时，用按片名哈希的渐变封面顶上，
+            // 不再出现一整排空灰块。
+            PosterArt(
                 model = item.posterUrl.ifBlank { item.backdropUrl },
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
+                contentDescription = item.title
+            ) {
+                PosterFallback(
+                    title = item.title,
+                    subtitle = posterMetaLine(item),
+                    titleFontSize = MaterialTheme.typography.titleMedium.fontSize,
+                    subtitleFontSize = MaterialTheme.typography.bodySmall.fontSize
+                )
+            }
             if (progress > 0f) {
                 Box(
                     Modifier
@@ -321,6 +450,20 @@ fun TvPosterCard(
         )
     }
 }
+
+/**
+ * 兜底封面上那行小字：年份 + 首个分类标签。
+ * TVBox 的 vod_year 常常是空或 "0000"，取不到就只剩分类，两个都没有就返回空串不占位。
+ */
+private fun posterMetaLine(item: MediaEntity): String {
+    val genre = item.genres.split(TvGenreSplit).firstOrNull { it.isNotBlank() }?.trim()
+    return listOfNotNull(
+        item.year.takeIf { it > 0 }?.toString(),
+        genre?.takeIf { it.isNotBlank() }
+    ).joinToString(" · ")
+}
+
+private val TvGenreSplit = Regex("[,，、/\\s]+")
 
 /** 分区标题：电视上字要大、留白要多，右侧可挂「更多」 */
 @Composable

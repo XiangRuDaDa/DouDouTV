@@ -117,14 +117,19 @@ fun TvGenreScreen(
     }
 
     // 题材标签：全部 / 电影 / 剧集 / 动漫 + 库内高频题材
+    //
+    // 库内题材必须按标签去重后再追加：TVBox 的类型名常常就叫「电影」，直接 append 会出现
+    // 两张一模一样的 chip，而 chip 的 key 用的是标签本身 —— LazyRow 撞到重复 key 会直接崩
+    // （java.lang.IllegalArgumentException: Key "chip_电影" was already used）。
     val chips = remember(tags) {
-        buildList {
-            add(Triple("全部", null as String?, null as String?))
-            add(Triple("电影", MediaKind.MOVIE, null))
-            add(Triple("剧集", MediaKind.SERIES, null))
-            add(Triple("动漫", null, "动漫"))
-            tags.forEach { add(Triple(it, null, it)) }
-        }
+        val fixed = listOf(
+            Triple("全部", null as String?, null as String?),
+            Triple("电影", MediaKind.MOVIE, null),
+            Triple("剧集", MediaKind.SERIES, null),
+            Triple("动漫", null, "动漫")
+        )
+        val labels = fixed.mapTo(mutableSetOf()) { it.first }
+        fixed + tags.filter { it !in labels }.distinct().map { Triple(it, null as String?, it) }
     }
 
     Column(

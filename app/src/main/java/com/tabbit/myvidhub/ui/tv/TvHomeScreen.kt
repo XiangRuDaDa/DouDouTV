@@ -59,12 +59,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.focusRequester
@@ -78,11 +78,11 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.zIndex
@@ -95,9 +95,12 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.components.PosterArt
+import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.TvText
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -173,7 +176,6 @@ fun TvHomeScreen(
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    val focusManager = LocalFocusManager.current
     // 滚动距离驱动顶栏透明度 —— 注意：**不要用 animateFloatAsState + 直接读 listState**（那会让 LazyColumn 每次
     // scroll 都触发整个 Box 重组）。把计算延后到 TvTopBar 内部 graphicsLayer 的 draw phase 执行：
     val configuration = LocalConfiguration.current
@@ -212,13 +214,15 @@ fun TvHomeScreen(
     var showSourceDialog by remember { mutableStateOf(false) }
     var showSiteDialog by remember { mutableStateOf(false) }
 
-    // 焦点 requester 链：Hero 播放按钮 ↔ TopBar 任意按钮
-    // TopBar 在 Box 顶层悬浮，和 LazyColumn 不在同一焦点子树 → 必须手动在 onPreviewKeyEvent 拦截 DPad
+    // 焦点 requester 链：Hero 播放按钮 ↔ TopBar 来源按钮。
+    // TopBar 在 Box 顶层悬浮，和 LazyColumn 不在同一焦点子树 → 落点必须显式给（规范 R1），
+    // 不能再靠默认几何搜索：它只在「当前视口内的可聚焦节点」里找，而 Hero 空态整块不可聚焦，
+    // 于是出现「顶栏按 ↓ 没反应」「详情键按 ↑ 没反应」。
     val syncButtonFocus = remember { FocusRequester() }
     val sourcePillFocus = remember { FocusRequester() }
     val heroPlayFocus = remember { FocusRequester() }
-    var heroFocused by remember { mutableStateOf(false) }
-    var topBarFocused by remember { mutableStateOf(false) }
+    // Hero 空态（没有轮播数据）里的第一颗 CTA：顶栏的 ↓ 在没有播放按钮时落到它
+    val heroEmptyFocus = remember { FocusRequester() }
 
     // 顶栏不再常驻：滚出首屏后会完全淡出。一旦焦点落到顶栏（遥控器按上键），
     // 把列表回滚到顶部，让顶栏边淡入边进入视野，避免「焦点在看不见的按钮上」。
@@ -228,49 +232,41 @@ fun TvHomeScreen(
         }
     }
 
-    LaunchedEffect(Unit) { if (hero != null) runCatching { heroPlayFocus.requestFocus() } }
+    /**
+     * Hero（含空态 CTA）按 ↑ 交棒给顶栏。
+     *
+     * 这里必须走按键拦截 + tvMoveFocus，而不是 focusProperties { up = sourcePillFocus }：
+     * 顶栏滚出首屏就不在组合里了（对应规范 R8），requester 没挂载时 focusProperties 会把
+     * 异常抛到焦点事务里。先 revealTopBar 让顶栏回到组合，等一帧再跳，跳不动就隔一小段重试一次 ——
+     * 两次都指向同一个落点，不是「跳完再校验一遍状态位」那种重复跳转（规范 R3）。
+     */
+    val goTopBar: () -> Unit = goTopBar@{
+        revealTopBar()
+        scope.launch {
+            withFrameNanos { }
+            if (tvMoveFocus(sourcePillFocus, syncButtonFocus)) return@launch
+            delay(180)
+            tvMoveFocus(sourcePillFocus, syncButtonFocus)
+        }
+    }
 
-    // 最外层统一焦点导航：
-    //   Hero 播放按钮 ↑ → TopBar 来源（/「添加来源」）PillButton
-    //   TopBar 任意按钮 ↓ → Hero 播放按钮（只要 Hero 还在视口内）
+    // 进页与「每次界面回到前台」都要把焦点站好：从播放器退回来时焦点是空的，
+    // 用户看到的就是「没有选中框，按一下方向键才出现」。
+    val resumeTick = tvResumeTick()
+    // key 带上「Hero 有没有数据」：库数据晚到时抢焦目标从空态 CTA 换成播放按钮，
+    // 否则首屏会停在没人抢焦的状态（原来只在首次组合抢一次，那时通常还没数据）。
+    tvClaimFocusOnEnter(
+        tick = listOf(resumeTick, hero != null),
+        *arrayOf(if (hero != null) heroPlayFocus else heroEmptyFocus)
+    )
+
+    // 顶层不再拦 ↑/↓：交棒改由 Hero 按钮自己的按键拦截（goTopBar）和顶栏的显式 down 承担。
+    // 原来这里用 heroFocused / topBarFocused 两个页面级布尔位判断「焦点在哪颗按钮上」，
+    // 一位表达不了多颗按钮，结果就是播放键 ↑ 有效、旁边的详情键 ↑ 无效（规范 R2）。
     Box(
         Modifier
             .fillMaxSize()
             .background(AppColors.Bg)
-            .onPreviewKeyEvent { event ->
-                if (event.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                val keyCode = event.nativeKeyEvent.keyCode
-                if (keyCode == KeyEvent.KEYCODE_DPAD_UP && heroFocused) {
-                    revealTopBar()
-                    // 顶栏与 Hero 不在同一个焦点子树里，这里显式把焦点交给左侧「来源」按钮
-                    // （用户视觉上希望焦点从播放键上移到来源链，而不是跳到右侧同步键）。
-                    // 请求后校验一帧：若焦点并没有真的进顶栏（requester 暂时不可用等），
-                    // 依次退回同步按钮 / 默认几何焦点搜索，保证画面高亮一定跟着焦点走。
-                    scope.launch {
-                        val handedOver = runCatching {
-                            sourcePillFocus.requestFocus()
-                            true
-                        }.getOrDefault(false)
-                        withFrameNanos { }
-                        if (!handedOver || !topBarFocused) {
-                            val fallback = runCatching {
-                                syncButtonFocus.requestFocus()
-                                true
-                            }.getOrDefault(false)
-                            if (!fallback || !topBarFocused) {
-                                runCatching { focusManager.moveFocus(FocusDirection.Up) }
-                            }
-                        }
-                    }
-                    true
-                } else if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && topBarFocused) {
-                    // 只有 Hero 还可见（未滚出视口）才跳 Hero；否则让 LazyColumn 默认处理
-                    if (hero != null && listState.firstVisibleItemIndex <= 1) {
-                        heroPlayFocus.requestFocus()
-                        true
-                    } else false
-                } else false
-            }
     ) {
         LazyColumn(
             state = listState,
@@ -291,14 +287,18 @@ fun TvHomeScreen(
                         playFocusRequester = heroPlayFocus,
                         onPlay = { onPlay(hero) },
                         onDetail = { onDetail(hero.id) },
-                        onPlayFocusChanged = { heroFocused = it }
+                        onNavigateUp = goTopBar
                     )
                 } else {
                     TvHeroEmpty(
                         libraryIsEmpty = library.isEmpty(),
                         hasCategories = vm.homeCategories.isNotEmpty(),
                         error = vm.homeSitesError,
-                        scanning = vm.scanning
+                        scanning = vm.scanning,
+                        firstFocusRequester = heroEmptyFocus,
+                        onNavigateUp = goTopBar,
+                        onAddSource = onSources,
+                        onRefresh = { vm.refreshHome() }
                     )
                 }
             }
@@ -361,10 +361,11 @@ fun TvHomeScreen(
             scanning = vm.scanning,
             syncFocusRequester = syncButtonFocus,
             sourceFocusRequester = sourcePillFocus,
-            onAnyButtonFocusChanged = { focused ->
-                topBarFocused = focused
-                if (focused) revealTopBar()
-            },
+            // 顶栏的 ↓ 显式落到 Hero 的可聚焦元件上：有轮播是播放按钮，没轮播是空态第一颗 CTA。
+            // 这两个 requester 在顶栏可见时（firstVisibleItemIndex == 0）一定挂得上。
+            belowFocusRequester = if (hero != null) heroPlayFocus else heroEmptyFocus,
+            // 焦点进顶栏就先把列表滚回顶部，保证高亮看得见（这是视觉补偿，不是跳转校验）
+            onGainFocus = revealTopBar,
             onSearch = onSearch,
             onHomeSource = { showSourceDialog = true },
             onHomeSite = if (showSiteButton) ({ showSiteDialog = true }) else null,
@@ -400,8 +401,10 @@ fun TvHomeScreen(
 }
 
 /** 顶部入口条：SpaceBetween 布局 — 左侧来源链 PillButton，右侧操作组。
- *  所有可聚焦元素（来源/线路 PillButton、同步/搜索/来源/设置按钮）gain focus 时
- *  都通过 onAnyButtonFocusChanged 通知顶层，让 Box 的 onPreviewKeyEvent 能统一处理 D-PAD。 */
+ *  每颗可聚焦元件都显式声明落点（规范 R1）：↑ = Cancel（顶栏之上没有东西，别让焦点跳飞出屏），
+ *  ↓ = belowFocusRequester（Hero 的播放按钮或空态 CTA）。
+ *  gain focus 时通过 onGainFocus 通知顶层把列表滚回顶部，保证高亮一定看得见。 */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun TvTopBar(
     alphaProvider: () -> Float,
@@ -411,7 +414,8 @@ private fun TvTopBar(
     siteName: String?,
     syncFocusRequester: FocusRequester,
     sourceFocusRequester: FocusRequester,
-    onAnyButtonFocusChanged: (Boolean) -> Unit,
+    belowFocusRequester: FocusRequester,
+    onGainFocus: () -> Unit,
     onSearch: () -> Unit,
     onHomeSource: () -> Unit,
     onHomeSite: (() -> Unit)? = null,
@@ -422,7 +426,8 @@ private fun TvTopBar(
 ) {
     val isTvBox = onHomeSite != null || sourceKind == SourceKind.TVBOX
     val isEmpty = sourceKind == null
-    val markTopBarFocus: (FocusState) -> Unit = { onAnyButtonFocusChanged(it.isFocused) }
+    val markTopBarFocus: (FocusState) -> Unit = { if (it.isFocused) onGainFocus() }
+    val topBarRoute = Modifier.tvFocusRoute(up = FocusRequester.Cancel, down = belowFocusRequester)
 
     // 滚过首屏后顶栏已经完全透明，但 Compose 的焦点搜索不看透明度，从下面某行按上键仍会把
     // 高亮交给这排看不见按钮（compose 1.6 也还没有 focusEnabled 可以关掉）。这里直接从组合里摘掉，
@@ -444,7 +449,9 @@ private fun TvTopBar(
             if (isEmpty) {
                 TvPillButton(
                     text = "＋ 添加来源", primary = true, size = TvButtonSize.Sm, onClick = onSources,
-                    modifier = Modifier.focusRequester(sourceFocusRequester).onFocusChanged(markTopBarFocus)
+                    modifier = topBarRoute
+                        .focusRequester(sourceFocusRequester)
+                        .onFocusChanged(markTopBarFocus)
                 )
             } else {
                 TvSourceChainPill(
@@ -452,7 +459,7 @@ private fun TvTopBar(
                     value = sourceName,
                     kind = sourceKind,
                     onClick = onHomeSource,
-                    modifier = Modifier.focusRequester(sourceFocusRequester),
+                    modifier = topBarRoute.focusRequester(sourceFocusRequester),
                     onFocusChanged = markTopBarFocus
                 )
                 if (onHomeSite != null && !siteName.isNullOrBlank()) {
@@ -462,6 +469,7 @@ private fun TvTopBar(
                         value = siteName,
                         kind = null,
                         onClick = onHomeSite,
+                        modifier = topBarRoute,
                         onFocusChanged = markTopBarFocus
                     )
                 }
@@ -477,23 +485,23 @@ private fun TvTopBar(
             } else {
                 TvPillButton(
                     "刷新", primary = false, size = TvButtonSize.Sm, onClick = onRefresh,
-                    modifier = Modifier
+                    modifier = topBarRoute
                         .focusRequester(syncFocusRequester)
                         .onFocusChanged(markTopBarFocus)
                 )
             }
             TvPillButton("搜索", primary = false, size = TvButtonSize.Sm, onClick = onSearch,
-                modifier = Modifier.onFocusChanged(markTopBarFocus))
+                modifier = topBarRoute.onFocusChanged(markTopBarFocus))
             TvPillButton("来源", primary = false, size = TvButtonSize.Sm, onClick = onSources,
-                modifier = Modifier.onFocusChanged(markTopBarFocus))
+                modifier = topBarRoute.onFocusChanged(markTopBarFocus))
             TvPillButton("设置", primary = false, size = TvButtonSize.Sm, onClick = onSettings,
-                modifier = Modifier.onFocusChanged(markTopBarFocus))
+                modifier = topBarRoute.onFocusChanged(markTopBarFocus))
         }
     }
 }
 
 /** 来源链 PillButton — label 用品牌色，value 用白色；来源名 ellipsis 到 ~16 字。
- *  通过 onFocusChanged 把焦点状态冒泡到 TvHomeScreen 顶层，供 onPreviewKeyEvent 统一处理。 */
+ *  落点由调用方通过 modifier 传进来（顶栏统一用 tvFocusRoute），焦点状态只用于视觉与「滚回顶部」。 */
 @Composable
 private fun TvSourceChainPill(
     label: String,
@@ -589,7 +597,8 @@ private fun TvHero(
     playFocusRequester: FocusRequester,
     onPlay: () -> Unit,
     onDetail: () -> Unit,
-    onPlayFocusChanged: (Boolean) -> Unit
+    /** ↑ 交棒给顶栏来源按钮；两颗按钮都要，之前只有播放键接了 ↑，详情键按上没反应 */
+    onNavigateUp: () -> Unit
 ) {
     val imageUrl = item.backdropUrl.ifBlank { item.posterUrl }
 
@@ -721,17 +730,32 @@ private fun TvHero(
             Spacer(Modifier.height(18.dp))
             // Hero 的两个按钮走最大一档：它们旁边是 44sp 的片名，
             // 再用顶栏那一档会显得缩在画面角落里。
+            // ↑ 交棒挂在按钮自己身上（规范 R2），两颗都接 ——
+            // 之前是顶层看 heroFocused 这个页面级布尔位判断，只有播放键喂得动它，
+            // 详情键按 ↑ 就什么都不发生。
+            val heroUpKey: Modifier = Modifier.onPreviewKeyEvent { e ->
+                if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+                    e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP
+                ) {
+                    onNavigateUp()
+                    true
+                } else false
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TvPillButton(
                     text = if (item.positionMs > 5_000L) "▶ 继续播放" else "▶ 播放",
-                    modifier = Modifier
-                        .focusRequester(playFocusRequester)
-                        .onFocusChanged { onPlayFocusChanged(it.isFocused) },
+                    modifier = heroUpKey.focusRequester(playFocusRequester),
                     primary = true,
                     size = TvButtonSize.Lg,
                     onClick = onPlay
                 )
-                TvPillButton(text = "ⓘ 详情", primary = false, size = TvButtonSize.Lg, onClick = onDetail)
+                TvPillButton(
+                    text = "ⓘ 详情",
+                    modifier = heroUpKey,
+                    primary = false,
+                    size = TvButtonSize.Lg,
+                    onClick = onDetail
+                )
             }
         }
 
@@ -775,7 +799,11 @@ private fun TvHeroEmpty(
     libraryIsEmpty: Boolean,
     hasCategories: Boolean,
     error: String?,
-    scanning: Boolean
+    scanning: Boolean,
+    firstFocusRequester: FocusRequester,
+    onNavigateUp: () -> Unit,
+    onAddSource: () -> Unit,
+    onRefresh: () -> Unit
 ) {
     val text: String
     val hint: String?
@@ -786,11 +814,11 @@ private fun TvHeroEmpty(
         }
         error != null -> {
             text = error
-            hint = "点击顶部同步按钮重试，或切换其他来源/线路"
+            hint = "可以重新同步，或换一个来源/线路"
         }
         libraryIsEmpty -> {
             text = "还没有内容"
-            hint = "先在「来源」里添加 Emby 或 TVBox，再同步媒体库"
+            hint = "先添加 Emby 或 TVBox 来源，再同步媒体库"
         }
         hasCategories -> {
             text = "暂无推荐内容"
@@ -798,20 +826,64 @@ private fun TvHeroEmpty(
         }
         else -> {
             text = "当前来源/站点暂无内容"
-            hint = "切换来源或线路，或点击顶部同步按钮拉取"
+            hint = "重新同步，或换一个来源/线路"
         }
     }
     val bg = remember {
         Brush.verticalGradient(0f to AppColors.Surface, 0.7f to AppColors.Bg, 1f to AppColors.Bg)
     }
+
+    /**
+     * 空态必须自带可聚焦入口（规范 R6）。
+     * 这块 Hero 高 430~620dp、整屏的八成，原来里面一个字都点不动：
+     * 顶栏按 ↓ 时焦点在视口内找不到任何落点，就卡在工具栏上出不去。
+     * 按钮行的位置与有内容时一致（左下、bottom 44dp），顶栏的 ↓ 正好落在这第一颗上。
+     */
+    val actions: List<Triple<String, Boolean, () -> Unit>> = when {
+        libraryIsEmpty -> listOf(Triple("＋ 添加来源", true, onAddSource))
+        scanning -> listOf(Triple("＋ 添加来源", false, onAddSource))
+        else -> listOf(
+            Triple("↻ 立即同步", true, onRefresh),
+            Triple("＋ 切换来源", false, onAddSource)
+        )
+    }
+    val heroUpKey: Modifier = Modifier.onPreviewKeyEvent { e ->
+        if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+            e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP
+        ) {
+            onNavigateUp()
+            true
+        } else false
+    }
+
     Box(
         Modifier
             .fillMaxWidth()
             .height(tvHeroHeight())
-            .background(bg),
-        contentAlignment = Alignment.Center
+            .background(bg)
     ) {
-        TvEmptyState(text = text, hint = hint)
+        TvEmptyState(
+            text = text,
+            hint = hint,
+            modifier = Modifier.align(Alignment.Center)
+        )
+        Row(
+            Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = TvPagePadding, bottom = 44.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            actions.forEachIndexed { index, (label, primary, onClick) ->
+                val focusModifier = if (index == 0) heroUpKey.focusRequester(firstFocusRequester) else heroUpKey
+                TvPillButton(
+                    text = label,
+                    modifier = focusModifier,
+                    primary = primary,
+                    size = TvButtonSize.Lg,
+                    onClick = onClick
+                )
+            }
+        }
     }
 }
 
@@ -932,12 +1004,13 @@ private fun TvContinueRow(
                     .width(320.dp)
                     .height(120.dp)
             ) {
-                AsyncImage(
+                // 横卡没有 backdrop 也没有 poster、或图是死链时，露出渐变兜底而不是空灰块
+                PosterArt(
                     model = item.backdropUrl.ifBlank { item.posterUrl },
-                    contentDescription = item.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
+                    contentDescription = item.title
+                ) {
+                    PosterFallback(title = item.title, showTitle = false, titleFontSize = 34.sp)
+                }
                 // 底部渐变 + 标题 + 进度条
                 Box(
                     Modifier
@@ -1099,7 +1172,15 @@ private fun HomeSourceDialog(
     onDismiss: () -> Unit
 ) {
     val firstFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
+    // 规范 R5：默认焦点 = 当前选中项，不是列表第 0 项。
+    // 库里已有来源时用户进来是「换一个来源」，停在第 0 项就得先按几下才回到现选项。
+    val selectedHit = sources.indexOfFirst { it.id == selectedId }
+    val focusIndex = if (selectedHit >= 0) selectedHit else 0
+    LaunchedEffect(Unit) {
+        // 等一帧：Dialog 内容要先组合完成，requester 才挂得上
+        withFrameNanos { }
+        tvMoveFocus(firstFocus)
+    }
     Dialog(onDismissRequest = onDismiss) {
         Column(
             Modifier
@@ -1120,7 +1201,7 @@ private fun HomeSourceDialog(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 itemsIndexed(sources, key = { _, src -> "src_${src.id}" }) { index, src ->
-                    Box(Modifier.then(if (index == 0) Modifier.focusRequester(firstFocus) else Modifier)) {
+                    Box(Modifier.then(if (index == focusIndex) Modifier.focusRequester(firstFocus) else Modifier)) {
                         TvDialogOption(
                             src.name,
                             selected = selectedId == src.id,
@@ -1143,7 +1224,13 @@ private fun HomeSiteDialog(
     onDismiss: () -> Unit
 ) {
     val firstFocus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
+    // 规范 R5：默认焦点落在当前选中的线路上，不是「全部站点」。
+    // 选中的线路已经不在列表里（换过来源）时，effectiveKey 为 null，回退到第一格。
+    val effectiveKey = selectedKey?.takeIf { key -> sites.any { it.key == key } }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        tvMoveFocus(firstFocus)
+    }
     Dialog(
         onDismissRequest = onDismiss,
         // 关掉平台默认窄宽度，让内容自己按屏幕尺寸决定弹窗宽度
@@ -1182,7 +1269,11 @@ private fun HomeSiteDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     item {
-                        Box(Modifier.focusRequester(firstFocus)) {
+                        Box(
+                            Modifier.then(
+                                if (effectiveKey == null) Modifier.focusRequester(firstFocus) else Modifier
+                            )
+                        ) {
                             TvDialogOption(
                                 "全部站点",
                                 selected = selectedKey.isNullOrEmpty(),
@@ -1194,7 +1285,10 @@ private fun HomeSiteDialog(
                         TvDialogOption(
                             site.name,
                             selected = selectedKey == site.key,
-                            onClick = { onPick(site.key, site) }
+                            onClick = { onPick(site.key, site) },
+                            modifier = if (site.key == effectiveKey) {
+                                Modifier.focusRequester(firstFocus)
+                            } else Modifier
                         )
                     }
                 }
