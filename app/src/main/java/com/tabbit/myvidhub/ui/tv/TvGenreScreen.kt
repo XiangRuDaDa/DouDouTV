@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -45,6 +46,7 @@ import com.tabbit.myvidhub.ui.gridState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
+import kotlinx.coroutines.CancellationException
 
 private const val TV_PAGE_SIZE = 60
 
@@ -108,8 +110,17 @@ fun TvGenreScreen(
     LaunchedEffect(shouldLoadMore, endReached, loading) {
         if (!shouldLoadMore || endReached || loading || loadingMore) return@LaunchedEffect
         loadingMore = true
-        val more = runCatching { vm.browseGenre(kind, genre, TV_PAGE_SIZE, items.size) }
-            .getOrDefault(emptyList())
+        // 取消（换筛选 / 退出页面）要原样抛出去，不能当成「没有更多」——
+        // 吞掉会让 endReached 误置 true，列表停在页边界上。
+        val more = try {
+            vm.browseGenre(kind, genre, TV_PAGE_SIZE, items.size)
+        } catch (e: CancellationException) {
+            loadingMore = false
+            throw e
+        } catch (e: Exception) {
+            loadingMore = false
+            return@LaunchedEffect
+        }
         if (more.isEmpty()) endReached = true else items = items + more
         loadingMore = false
     }
@@ -208,7 +219,7 @@ fun TvGenreScreen(
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(items, key = { "tv_g_${it.id}" }) { item ->
+                items(items, key = { "tv_g_${it.id}" }, contentType = { "poster" }) { item ->
                     val ownFocus = remember(item.id) { FocusRequester() }
                     TvPosterCard(
                         item = item,
@@ -293,10 +304,15 @@ fun TvCategoryScreen(
         exhausted = false
         items = emptyList()
         page = 1
-        val result = runCatching { vm.tvBoxCategoryPage(currentTypeId, 1) }
-        result.onFailure { loadError = it.message ?: "网络或接口异常" }
-        items = result.getOrDefault(emptyList())
-        page = 2
+        try {
+            items = vm.tvBoxCategoryPage(currentTypeId, 1)
+            page = 2
+        } catch (e: CancellationException) {
+            // 切分类 / 退出页面时的取消不是「加载失败」
+            throw e
+        } catch (e: Exception) {
+            loadError = e.message ?: "网络或接口异常"
+        }
         loading = false
     }
 
@@ -307,43 +323,50 @@ fun TvCategoryScreen(
     )
 
     // 接近底部自动翻页
-    val shouldLoadMore by remember(gridState) {
+    val shouldLoadMore = remember(gridState) {
         derivedStateOf {
             val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             val total = gridState.layoutInfo.totalItemsCount
             total > 0 && last >= total - 12
         }
     }
-    // 注意：key 里不能放 loadingMore —— 协程内把它置 true 会重启自身、把在途请求取消，
-    // runCatching 会把取消当失败吞成空列表，于是「明明请求到了下一页却判定到底」。
-    LaunchedEffect(shouldLoadMore, loading, exhausted, loadError, currentTypeId) {
-        if (!shouldLoadMore || loading || loadingMore || exhausted || loadError != null) return@LaunchedEffect
-        while (true) {
-            loadingMore = true
-            val result = runCatching { vm.tvBoxCategoryPage(currentTypeId, page) }
-            result.onFailure { loadError = it.message ?: "网络或接口异常" }
-            val more = result.getOrDefault(emptyList())
-            if (more.isEmpty()) {
-                exhausted = true
-            } else {
-                val seen = items.mapTo(HashSet(items.size)) { it.id }
-                val fresh = more.filter { seen.add(it.id) }
-                // 源站忽略 page 参数时会反复返回同一页：没有新增就当到底，
-                // 否则 page 一直加、列表永远停在原地（用户看到的就是「只有 40 部」）。
-                if (fresh.isEmpty()) {
-                    exhausted = true
-                } else {
+    // 翻页触发条件**不能写进 LaunchedEffect 的 key**：
+    // 追加一页会让它立刻变 false，key 变化把自己的协程取消掉；被取消的请求只要被当成
+    // 「空结果」或「无新增」，就会误判到底 —— 表现就是每个分类只加载两页（80 条）。
+    // 这里用一个不随数据变化的长期协程盯住条件，请求不会被自己重启掉。
+    LaunchedEffect(currentTypeId) {
+        snapshotFlow { shouldLoadMore.value && !loading && !exhausted && loadError == null }
+            .collect { canLoad ->
+                if (!canLoad) return@collect
+                while (shouldLoadMore.value && !exhausted && loadError == null) {
+                    loadingMore = true
+                    val more = try {
+                        vm.tvBoxCategoryPage(currentTypeId, page)
+                    } catch (e: CancellationException) {
+                        loadingMore = false
+                        throw e
+                    } catch (e: Exception) {
+                        loadError = e.message ?: "网络或接口异常"
+                        loadingMore = false
+                        break
+                    }
+                    loadingMore = false
+                    if (more.isEmpty()) {
+                        exhausted = true
+                        break
+                    }
+                    val seen = items.mapTo(HashSet(items.size)) { it.id }
+                    val fresh = more.filter { seen.add(it.id) }
+                    // 源站忽略 page 参数时会反复返回同一页：没有新增就当到底，
+                    // 否则 page 一直加、列表永远停在原地。
+                    if (fresh.isEmpty()) {
+                        exhausted = true
+                        break
+                    }
                     items = items + fresh
                     page += 1
                 }
             }
-            loadingMore = false
-            if (exhausted || loadError != null) break
-            // 还是贴在底部就继续要下一页，离开底部就等下一次滚动触发
-            val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            val total = gridState.layoutInfo.totalItemsCount
-            if (total <= 0 || last < total - 12) break
-        }
     }
 
     Column(
@@ -420,7 +443,7 @@ fun TvCategoryScreen(
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(items, key = { "tv_cat_${it.id}" }) { item ->
+                items(items, key = { "tv_cat_${it.id}" }, contentType = { "poster" }) { item ->
                     val ownFocus = remember(item.id) { FocusRequester() }
                     TvPosterCard(
                         item = item,

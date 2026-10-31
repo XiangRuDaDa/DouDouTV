@@ -354,12 +354,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** TVBoxCategoryScreen 分页拉取：typeId + page → 该页 MediaEntity 列表 */
+    /**
+     * 分类浏览页取某一页（不落库，见 MediaRepository.tvBoxCategory）。
+     *
+     * 这里故意不吞异常：调用方（Compose 的 LaunchedEffect）需要区分「真失败」和
+     * 「协程被取消」—— 吞成空列表会让取消看起来像「没有下一页」，列表就停在页边界上。
+     */
     suspend fun tvBoxCategoryPage(typeId: String, page: Int): List<MediaEntity> {
         val sourceId = homeSourceId ?: return emptyList()
         val site = activeSite ?: return emptyList()
         val src = repo.getSource(sourceId) ?: return emptyList()
-        return runCatching { repo.tvBoxCategory(src, site, typeId, page) }
-            .getOrDefault(emptyList())
+        return repo.tvBoxCategory(src, site, typeId, page)
     }
 
     /** 点选站点分类：加载该分类的内容并展开为分区（对应 TVBox 的 categoryContent） */
