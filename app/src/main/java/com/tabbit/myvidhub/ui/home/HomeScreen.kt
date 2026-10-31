@@ -21,7 +21,6 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -83,11 +82,13 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.ReturnSpot
 import com.tabbit.myvidhub.ui.components.ContinueCard
 import com.tabbit.myvidhub.ui.components.HeroBanner
 import com.tabbit.myvidhub.ui.components.PosterCard
 import com.tabbit.myvidhub.ui.components.SectionTitle
 import com.tabbit.myvidhub.ui.components.ShimmerCard
+import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.themeSeamFade
@@ -131,6 +132,10 @@ fun HomeScreen(
     // 首页内容按选中的来源/站点（线路）过滤；无来源时原样返回
     val filteredLibrary = remember(library, selectedSource?.id, vm.homeSiteKey) { vm.filterForHome(library) }
     val filteredFeatured = remember(featured, selectedSource?.id, vm.homeSiteKey) { vm.filterForHome(featured) }
+    // 继续观看只看当前来源/线路的那份记录：换来源就看到另一份追看记录
+    val filteredContinue = remember(continueList, selectedSource?.id, vm.homeSiteKey) {
+        vm.filterForHome(continueList)
+    }
 
     // 优先用有背景图的条目做精选，不足时用有海报的补
     val heroItems = remember(filteredFeatured, filteredLibrary) {
@@ -150,7 +155,9 @@ fun HomeScreen(
         selectedSource?.id?.let { vm.ensureHomeSites(it) }
     }
 
-    val listState = rememberLazyListState()
+    // 首页纵向位置 + 每条横向行的位置都记在 ReturnSpot：进详情再返回（这一页子树被
+    // AnimatedContent 整个销毁重建）时，组合的第一帧就站在离开时的位置。
+    val listState = ReturnSpot.listState(PhoneHomeKey)
     // 软件名淡出距离：轮播图高度的 ~55%
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val heroCollapseDist = (configuration.screenWidthDp * 0.55f).toInt()
@@ -192,14 +199,15 @@ fun HomeScreen(
             }
 
             // ---------- 继续观看 ----------
-            if (continueList.isNotEmpty()) {
+            if (filteredContinue.isNotEmpty()) {
                 item { SectionTitle("继续观看") }
                 item {
                     LazyRow(
+                        state = ReturnSpot.listState("$PhoneHomeKey/continue"),
                         contentPadding = PaddingValues(horizontal = 18.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        items(continueList, key = { "cw_${it.id}" }) { item ->
+                        items(filteredContinue, key = { "cw_${it.id}" }) { item ->
                             ContinueCard(
                                 item = item,
                                 onClick = { onPlay(item) },
@@ -216,6 +224,7 @@ fun HomeScreen(
                 item { SectionTitle("我的收藏", trailing = { CountBadge(favorites.size) }) }
                 item {
                     LazyRow(
+                        state = ReturnSpot.listState("$PhoneHomeKey/fav"),
                         contentPadding = PaddingValues(horizontal = 18.dp),
                         horizontalArrangement = Arrangement.spacedBy(9.dp)
                     ) {
@@ -250,6 +259,7 @@ fun HomeScreen(
                     }
                     item {
                         LazyRow(
+                            state = ReturnSpot.listState("$PhoneHomeKey/cat_${cat.typeId}"),
                             contentPadding = PaddingValues(horizontal = 18.dp),
                             horizontalArrangement = Arrangement.spacedBy(9.dp)
                         ) {
@@ -439,9 +449,9 @@ private fun ContinueActionDialog(
                     color = AppColors.TextTertiary
                 )
                 Spacer(Modifier.height(10.dp))
-                ContinueMenuAction("继续播放", hint = "从上次的位置接着看") { onPlay() }
+                ContinueMenuAction("继续播放") { onPlay() }
                 ContinueMenuAction("查看详情") { onDetail() }
-                ContinueMenuAction("清除观看记录", hint = "片子还在库里，只是不再出现在这里", danger = true) { onClear() }
+                ContinueMenuAction("清除观看记录", danger = true) { onClear() }
             }
         },
         confirmButton = {
@@ -507,6 +517,9 @@ private fun continueClock(ms: Long): String {
 private const val LAZY_TAKE = 10
 private const val MIN_GENRE_ITEMS = 2
 private const val MAX_GENRE_SECTIONS = 4
+
+/** 手机端首页在 [ReturnSpot] 里的页面标识，纵向位置和各行横向位置都挂在它下面 */
+private const val PhoneHomeKey = "phone_home"
 
 private fun LazyListScope.DynamicGallerySections(
     library: List<MediaEntity>,
@@ -585,6 +598,7 @@ private fun LazyListScope.GallerySection(
     item { SectionTitle(title, trailing = { MoreLink(onMore) }) }
     item {
         LazyRow(
+            state = ReturnSpot.listState("$PhoneHomeKey/sec_$title"),
             contentPadding = PaddingValues(horizontal = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(9.dp)
         ) {
@@ -881,6 +895,8 @@ fun GenreScreen(
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    // 纵向位置按「页 + 当前筛选」分键，进详情返回时从这一筛选上次的位置起滚
+    val gridState = ReturnSpot.listState("phone_genre/${kind ?: "all"}/${genre ?: "all"}")
 
     LaunchedEffect(Unit) {
         tags = runCatching { vm.genreTags() }.getOrDefault(emptyList())
@@ -985,7 +1001,10 @@ fun GenreScreen(
                 modifier = Modifier.fillMaxWidth().padding(36.dp)
             )
 
-            else -> LazyColumn(contentPadding = PaddingValues(bottom = 28.dp)) {
+            else -> LazyColumn(
+                state = gridState,
+                contentPadding = PaddingValues(bottom = 28.dp)
+            ) {
                 item {
                     Text(
                         "共 ${items.size} 条" + if (items.size >= GENRE_PAGE_SIZE) "（持续加载中）" else "",
@@ -1144,6 +1163,8 @@ fun SearchScreen(
 ) {
     var history by remember { mutableStateOf<List<String>>(Prefs.getSearchHistory()) }
     val inputFocus = remember { FocusRequester() }
+    // 结果区的位置记录：状态在导航层，从详情返回时这一页重建，位置靠这里找回
+    val resultsListState = ReturnSpot.listState("phone_search/results")
 
     // 首次进搜索页后台拉一次豆瓣热门榜，补齐联想（24h 内走本地缓存，不联网）
     LaunchedEffect(Unit) {
@@ -1342,7 +1363,10 @@ fun SearchScreen(
                 HintText("没有找到「${state.submittedKeyword}」相关内容")
 
             // 有结果：按来源分组展示
-            else -> LazyColumn(contentPadding = PaddingValues(bottom = 28.dp)) {
+            else -> LazyColumn(
+                state = resultsListState,
+                contentPadding = PaddingValues(bottom = 28.dp)
+            ) {
                 item { SectionTitle("搜索结果 ${state.results.size} 条 · ${state.grouped.size} 个来源") }
                 state.grouped.forEach { (srcName, itemsOfSource) ->
                     item {
@@ -1353,6 +1377,7 @@ fun SearchScreen(
                     }
                     item {
                         LazyRow(
+                            state = ReturnSpot.listState("phone_search/row_$srcName"),
                             contentPadding = PaddingValues(horizontal = 18.dp),
                             horizontalArrangement = Arrangement.spacedBy(hSpacing)
                         ) {
@@ -1420,6 +1445,7 @@ fun TvBoxCategoryScreen(
     var loadingMore by remember { mutableStateOf(false) }
     var exhausted by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val gridState = ReturnSpot.listState("phone_cat_$typeId")
 
     LaunchedEffect(typeId) {
         loading = true
@@ -1482,7 +1508,10 @@ fun TvBoxCategoryScreen(
                 modifier = Modifier.fillMaxWidth().padding(36.dp)
             )
 
-            else -> LazyColumn(contentPadding = PaddingValues(bottom = 28.dp)) {
+            else -> LazyColumn(
+                state = gridState,
+                contentPadding = PaddingValues(bottom = 28.dp)
+            ) {
                 items(items.chunked(columns)) { row ->
                     Row(
                         modifier = Modifier

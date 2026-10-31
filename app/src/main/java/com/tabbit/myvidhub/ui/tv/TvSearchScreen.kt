@@ -57,6 +57,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.ReturnSpot
+import com.tabbit.myvidhub.ui.StandTarget
+import com.tabbit.myvidhub.ui.cardStand
+import com.tabbit.myvidhub.ui.gridState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
@@ -182,13 +186,21 @@ fun TvSearchScreen(
         }
     }
 
-    // 进页自动聚焦输入框；从详情返回（已有搜索结果）时把焦点交给第一张海报
+    // 从详情返回时结果子树被重建：落点卡在组合时把新生成的 requester 交回 stand，
+    // 网格滚动位置由 resultsGridState 按同一份记录起滚。
+    val stand = remember { StandTarget() }
+    val resultsGridState = ReturnSpot.gridState("tv_search/results")
+    val firstResultId = state.results.firstOrNull()?.id
+
+    // 进页自动聚焦输入框；从详情返回（已有搜索结果）时把焦点交给结果卡而不是输入框
     LaunchedEffect(Unit) {
         if (state.submittedKeyword.isEmpty()) runCatching { fieldFocus.requestFocus() }
     }
     LaunchedEffect(state.submittedKeyword, state.results.isNotEmpty()) {
-        if (state.submittedKeyword.isNotEmpty() && state.results.isNotEmpty()) {
-            runCatching { firstResultFocus.requestFocus() }
+        if (state.submittedKeyword.isEmpty()) return@LaunchedEffect
+        if (state.results.isNotEmpty()) {
+            // 离开时站在哪张结果卡就还给那张，没有记录才落第一张
+            tvMoveFocus(*listOfNotNull(stand.requester, firstResultFocus).toTypedArray())
         }
     }
 
@@ -276,6 +288,7 @@ fun TvSearchScreen(
                     modifier = Modifier.padding(start = TvPagePadding, bottom = 10.dp)
                 )
                 LazyVerticalGrid(
+                    state = resultsGridState,
                     columns = GridCells.Fixed(tvGridColumns()),
                     contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 32.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -300,13 +313,18 @@ fun TvSearchScreen(
                             )
                         }
                         items(itemsOfSource, key = { "tv_s_${it.id}" }) { item ->
+                            val ownFocus = remember(item.id) { FocusRequester() }
                             TvPosterCard(
                                 item = item,
                                 onClick = { onDetail(item.id) },
                                 fillCell = true,
-                                modifier = Modifier.then(
-                                    if (item.id == state.results.first().id) Modifier.focusRequester(firstResultFocus)
-                                    else Modifier
+                                // 首张卡同时是这一页的入口锚点，落点记账复用它的 requester
+                                modifier = ReturnSpot.cardStand(
+                                    pageKey = "tv_search",
+                                    rowKey = "results",
+                                    mediaId = item.id,
+                                    target = stand,
+                                    requester = if (item.id == firstResultId) firstResultFocus else ownFocus
                                 )
                             )
                         }

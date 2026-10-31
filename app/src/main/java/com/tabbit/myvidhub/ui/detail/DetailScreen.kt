@@ -113,6 +113,14 @@ fun DetailScreen(
 ) {
     var media by remember { mutableStateOf<MediaEntity?>(null) }
     var episodes by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+
+    /**
+     * 从「继续观看」进来、页面改绑到剧集壳之后，记住用户真正在看的那条分集。
+     * 剧集壳自己没有可播地址，主按钮的播放目标仍要落回这一集。
+     * 其他入口进来时恒为 null，播放目标照旧由 playTarget 从选集里挑。
+     */
+    var resumeEpisode by remember(mediaId) { mutableStateOf<MediaEntity?>(null) }
+
     var loading by remember { mutableStateOf(true) }
     var selectedSeason by remember { mutableStateOf(0) }
 
@@ -182,6 +190,18 @@ fun DetailScreen(
             if (realId != null && realId > 0) {
                 id = realId
                 m = vm.mediaOf(id)
+            }
+        }
+        // 「继续观看」进来的是 EPISODE 行：海报/年份/简介/选集全都挂在剧集壳上，
+        // 绑分集行整页几乎是空的。seriesKey 里已经带 sourceId + siteKey + vodId，
+        // 查到的壳就是这条记录所属的那个数据源的整部剧，不存在跨源歧义，直接换绑、不用问。
+        // 壳不在库里（换源重入库、老数据）时保持分集行渲染。
+        if (m != null && m.kind == MediaKind.EPISODE) {
+            val shell = vm.shellOf(m.seriesKey)
+            if (shell != null) {
+                resumeEpisode = m.takeIf { it.positionMs > 0 }
+                id = shell.id
+                m = shell
             }
         }
         media = m
@@ -500,7 +520,9 @@ fun DetailScreen(
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        val target = playTarget(item, visibleEpisodes)
+                        // resumeEpisode 只在「继续观看」进来改绑到剧集壳之后有值：壳自己没有可播地址，
+                        // 播放目标要落回用户真正在看的那一集（它可能属于另一条云盘，visibleEpisodes 未必含它）
+                        val target = resumeEpisode ?: playTarget(item, visibleEpisodes)
                         Button(
                             onClick = { if (target != null) onPlay(target.id) },
                             enabled = target != null,
@@ -518,7 +540,8 @@ fun DetailScreen(
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 if (item.kind == MediaKind.SERIES) {
-                                    val ep = visibleEpisodes.firstOrNull { it.positionMs > 0 }
+                                    val ep = resumeEpisode
+                                        ?: visibleEpisodes.firstOrNull { it.positionMs > 0 }
                                         ?: visibleEpisodes.firstOrNull()
                                     ep?.let { "继续观看  ${it.title}" } ?: "开始播放"
                                 } else "播放"

@@ -1,6 +1,8 @@
 package com.tabbit.myvidhub.data
 
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import com.tabbit.myvidhub.MyVidHubApp
 import com.tabbit.myvidhub.data.db.AppDatabase
 import com.tabbit.myvidhub.data.db.HotTitleEntity
@@ -304,6 +306,10 @@ class MediaRepository(private val context: Context) {
     suspend fun getMedia(id: Long): MediaEntity? = mediaDao.get(id)
     suspend fun byRemoteId(remoteId: String): MediaEntity? = mediaDao.byRemoteId(remoteId)
     suspend fun episodes(seriesKey: String): List<MediaEntity> = mediaDao.episodes(seriesKey)
+
+    /** 分集行所属的剧集壳；壳不在库里时返回 null */
+    suspend fun shellOf(seriesKey: String): MediaEntity? =
+        if (seriesKey.isBlank()) null else mediaDao.shellOf(seriesKey)
     suspend fun seasons(seriesKey: String): List<Int> = mediaDao.seasons(seriesKey)
 
     /** TVBox 多播放源：取某剧的全部播放源（云盘/线路）名称，按入库顺序 */
@@ -597,6 +603,35 @@ class MediaRepository(private val context: Context) {
             }
             saveTvBoxVods(source, list, onProgress).size
         }
+
+    /**
+     * 启动预热：把启用中的 TVBox 来源的 spider 包准备到能调用（落盘 → 壳 Init → 起本地代理），
+     * 不请求任何站点数据、失败静默。
+     *
+     * 加密壳的 Init 是纯本地单核计算，电视上实测要二十多秒。放在这里跑，是为了让首页/分类/详情
+     * 那几条链路走到 SpiderLoader 时直接命中进程级缓存，不再当着我的面初始化；跑完远程搜索
+     * 也就有可用 loader（搜索走 cachedLoaderKeyOrNull，只认缓存不触发加载）。
+     *
+     * 逐个来源串行执行：壳 Init 吃满一个核，和首页渲染并发会互相抢 CPU，反而双双变慢。
+     * 多个来源共用同一个 spider 包时，第二个来源在 SpiderLoader 缓存上瞬时返回，不重复解密。
+     *
+     * @param preferredSourceId 首页当前来源，排在最前面预热 —— 用户第一眼要用的那条链路不能被别的来源挡在后面
+     */
+    suspend fun warmUpTvBoxSpiders(preferredSourceId: Long = -1L): Unit = withContext(Dispatchers.IO) {
+        val tvboxSources = runCatching { enabledSources().filter { it.kind == SourceKind.TVBOX } }
+            .getOrDefault(emptyList())
+            .sortedByDescending { it.id == preferredSourceId }
+        for (source in tvboxSources) {
+            val t0 = SystemClock.elapsedRealtime()
+            val result = runCatching { TvBoxClient(source.location, context).prepareSpider() }
+            val cost = SystemClock.elapsedRealtime() - t0
+            if (result.getOrDefault(false)) {
+                Log.w("SpiderLoader", "预热完成 ${source.name} 用时 ${cost}ms")
+            } else {
+                Log.w("SpiderLoader", "预热未就绪 ${source.name} 用时 ${cost}ms：${result.exceptionOrNull()?.message ?: "配置无 spider 字段"}")
+            }
+        }
+    }
 
     /** 拉取 TVBox 配置里的站点（线路）列表，供首页线路切换 */
     suspend fun tvBoxSites(source: SourceEntity): List<TvBoxSite> = withContext(Dispatchers.IO) {

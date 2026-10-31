@@ -16,7 +16,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -28,26 +27,29 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.ReturnSpot
+import com.tabbit.myvidhub.ui.StandTarget
+import com.tabbit.myvidhub.ui.cardStand
 import com.tabbit.myvidhub.ui.components.ShimmerCard
+import com.tabbit.myvidhub.ui.gridState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
-import kotlinx.coroutines.launch
 
 private const val TV_PAGE_SIZE = 60
+
+/** 题材页在 [ReturnSpot] 里的页面标识：滚动位置按「页 + 筛选」分键，落点按页记录 */
+private const val TvGenrePageKey = "tv_genre"
 
 /**
  * 电视端分类/浏览页。
@@ -73,9 +75,12 @@ fun TvGenreScreen(
     var loadingMore by remember { mutableStateOf(false) }
     var endReached by remember { mutableStateOf(false) }
 
-    val scope = rememberCoroutineScope()
-    val gridState = rememberLazyGridState()
+    // 落点记录按「页 + 当前筛选」分键：换题材后各算各的位置，回来才不会被别的筛选的记录带偏
+    val filterKey = "$TvGenrePageKey/${kind ?: "all"}/${genre ?: "all"}"
+    val gridState = ReturnSpot.gridState(filterKey)
     val firstCardFocus = remember { FocusRequester() }
+    val stand = remember { StandTarget() }
+    val firstId = items.firstOrNull()?.id
 
     LaunchedEffect(Unit) {
         tags = runCatching { vm.genreTags() }.getOrDefault(emptyList())
@@ -91,8 +96,9 @@ fun TvGenreScreen(
         loading = false
     }
 
-    // 接近底部时增量加载
-    val shouldLoadMore by remember {
+    // 接近底部时增量加载。state 按筛选分键，换筛选会换成另一个实例，
+    // 所以 derivedStateOf 也必须跟着重建，否则一直读旧 state 的 layoutInfo、翻页永远不触发。
+    val shouldLoadMore by remember(gridState) {
         derivedStateOf {
             val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             val total = gridState.layoutInfo.totalItemsCount
@@ -108,14 +114,14 @@ fun TvGenreScreen(
         loadingMore = false
     }
 
-    // 首屏数据到位后把焦点交给第一张卡片。这一页原本没有任何抢焦，进页后焦点落在
+    // 首屏数据到位后把焦点交给卡片。这一页原本没有任何抢焦，进页后焦点落在
     // 谁身上完全交给默认焦点搜索（同文件的分类页是主动抢的），表现就是第一下方向键像没反应。
-    // 等一帧是为了让卡片先完成组合，否则 requester 还没有可挂载的节点。
-    LaunchedEffect(items.isNotEmpty()) {
-        if (items.isEmpty()) return@LaunchedEffect
-        withFrameNanos { }
-        runCatching { firstCardFocus.requestFocus() }
-    }
+    // 离开时站在哪张卡上就还给那张卡（落点由卡片在组合时交出 requester），
+    // 没有记录（首次进入 / 换了筛选）才退回第一张。
+    tvClaimFocusOnEnter(
+        tick = items.isNotEmpty(),
+        anchorsProvider = { listOfNotNull(stand.requester, firstCardFocus) }
+    )
 
     // 题材标签：全部 / 电影 / 剧集 / 动漫 + 库内高频题材
     //
@@ -180,10 +186,11 @@ fun TvGenreScreen(
                     TvFilterChip(
                         text = label,
                         selected = k == kind && g == genre,
+                        // 滚动状态按筛选分键：换一个筛选就是一个新的 state，
+                        // 没走过的筛选自然从顶部起，走过的回到自己上次的位置。
                         onClick = {
                             kind = k
                             genre = g
-                            scope.launch { gridState.scrollToItem(0) }
                         }
                     )
                 }
@@ -202,12 +209,19 @@ fun TvGenreScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 items(items, key = { "tv_g_${it.id}" }) { item ->
+                    val ownFocus = remember(item.id) { FocusRequester() }
                     TvPosterCard(
                         item = item,
                         onClick = { onDetail(item.id) },
-                        modifier = if (item.id == items.firstOrNull()?.id) {
-                            Modifier.focusRequester(firstCardFocus)
-                        } else Modifier,
+                        // 首卡同时是这一页的入口锚点，落点记账复用它自己的 requester：
+                        // 同一节点挂第二个 requester 在 1.6.8 上不可靠。
+                        modifier = ReturnSpot.cardStand(
+                            pageKey = TvGenrePageKey,
+                            rowKey = filterKey,
+                            mediaId = item.id,
+                            target = stand,
+                            requester = if (item.id == firstId) firstCardFocus else ownFocus
+                        ),
                         fillCell = true
                     )
                 }
@@ -256,8 +270,12 @@ fun TvCategoryScreen(
     var loadingMore by remember { mutableStateOf(false) }
     var exhausted by remember { mutableStateOf(false) }
 
-    val gridState = rememberLazyGridState()
+    // 每个分类各记一份位置与落点：页标识直接带上 typeId
+    val pageKey = "tv_cat/$typeId"
+    val gridState = ReturnSpot.gridState(pageKey)
     val firstFocus = remember { FocusRequester() }
+    val stand = remember { StandTarget() }
+    val firstId = items.firstOrNull()?.id
 
     LaunchedEffect(typeId) {
         loading = true
@@ -268,10 +286,11 @@ fun TvCategoryScreen(
         loading = false
     }
 
-    // 首屏数据到位后把焦点交给第一张卡片，遥控器立刻可用
-    LaunchedEffect(items.isNotEmpty()) {
-        if (items.isNotEmpty()) runCatching { firstFocus.requestFocus() }
-    }
+    // 首屏数据到位后把焦点交给卡片，遥控器立刻可用；离开时站在哪张卡就还给哪张
+    tvClaimFocusOnEnter(
+        tick = items.isNotEmpty(),
+        anchorsProvider = { listOfNotNull(stand.requester, firstFocus) }
+    )
 
     // 接近底部自动翻页
     val shouldLoadMore by remember {
@@ -342,12 +361,18 @@ fun TvCategoryScreen(
                 modifier = Modifier.fillMaxSize()
             ) {
                 items(items, key = { "tv_cat_${it.id}" }) { item ->
+                    val ownFocus = remember(item.id) { FocusRequester() }
                     TvPosterCard(
                         item = item,
                         onClick = { onDetail(item.id) },
                         fillCell = true,
-                        modifier = Modifier.then(
-                            if (item.id == items.first().id) Modifier.focusRequester(firstFocus) else Modifier
+                        // 首卡就是这一页的入口锚点，落点记账复用它的 requester，不再挂第二个
+                        modifier = ReturnSpot.cardStand(
+                            pageKey = pageKey,
+                            rowKey = "grid",
+                            mediaId = item.id,
+                            target = stand,
+                            requester = if (item.id == firstId) firstFocus else ownFocus
                         )
                     )
                 }

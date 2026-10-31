@@ -695,11 +695,12 @@ class PhonePlayerActivity : ComponentActivity() {
             (subtitleBgAlpha.coerceIn(0f, 1f) * 255f).toInt(), 0, 0, 0
         )
         sv.setStyle(
+            // 形参顺序是 (前景, 字底, 窗口底, 描边类型, 描边色, 字体) —— 与 TV 端同一处笔误，一起修。
             androidx.media3.ui.CaptionStyleCompat(
                 android.graphics.Color.WHITE,
                 bg,
-                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
                 bg,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
                 android.graphics.Color.TRANSPARENT,
                 null
             )

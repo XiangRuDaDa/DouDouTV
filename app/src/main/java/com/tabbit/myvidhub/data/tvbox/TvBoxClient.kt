@@ -300,6 +300,23 @@ class TvBoxClient(
     }
 
     /**
+     * 只把 spider 包准备到能调用（JAR 落盘 → 壳 Init → 起本地代理），不请求任何站点数据。
+     *
+     * 加密壳的 Init 是纯本地计算（实测电视上要二十多秒），首页/分类/详情都得先过这一步。
+     * 放在刷新链路里等 = 用户白等一轮，所以给启动预热用：跑完后 SpiderLoader 的进程级缓存命中，
+     * 后续 homeContent / detail 直接复用，不会再触发一次壳初始化。
+     */
+    suspend fun prepareSpider(): Boolean = withContext(Dispatchers.IO) {
+        val loader = spiderLoader ?: return@withContext false
+        if (configSpiderUrl.isBlank()) {
+            val root = baseConfig() ?: return@withContext false
+            rememberSpiderUrl(root.optString("spider"))
+        }
+        if (configSpiderUrl.isBlank()) return@withContext false
+        runCatching { loader.ensureLoaded(configSpiderUrl) }.isSuccess
+    }
+
+    /**
      * 当前配置的 spider 站点（线路）列表。
      * 结果缓存，重复调用不会重复请求。
      */
@@ -506,12 +523,45 @@ class TvBoxClient(
         val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: return null
         val json = proxy.detailContent(listOf(vodId)) ?: return null
         Log.d("SpiderProxy", "detailContent($vodId) raw = $json")
+        dumpDetailFields(vodId, json)
         val vod = CatVodResultParser.parseDetail(json, site.key, site.name) ?: return null
 
         // 注意：不再在这里对所有非 http 地址统一调 playerContent 解析。
         // 网盘线路一部剧动辄几十上百集、多条云盘，逐个 playerContent 会让详情加载卡死。
         // 云盘 scheme 地址（quark://、aliyundrive:// 等）原样保留，播放时再按需解析。
         return vod
+    }
+
+    /**
+     * 把 detailContent 返回的字段清单打到 W 级：这台 VIDAA 电视的 ROM 只放行 W 以上，
+     * 原来那条 D 级的 raw 日志在真机上根本不出现，没法核对线路到底给了哪些字段。
+     * 值只取样（长文本截断、数组记长度），整包 JSON 仍然留给 D 级那条。
+     */
+    private fun dumpDetailFields(vodId: String, json: String) {
+        val root = runCatching { JSONObject(json) }.getOrNull() ?: return
+        val topKeys = root.keys().asSequence().sorted().joinToString(",")
+        Log.w("SpiderFields", "detail($vodId) 顶层键=$topKeys")
+        val vod = root.optJSONArray("list")?.optJSONObject(0) ?: return
+        val pairs = StringBuilder()
+        for (k in vod.keys().asSequence().sorted()) {
+            if (pairs.isNotEmpty()) pairs.append(" | ")
+            val shown = when (val v = vod.opt(k)) {
+                is JSONArray -> "[${v.length()}]"
+                is JSONObject -> "{${v.keys().asSequence().sorted().joinToString(",")}}"
+                else -> v?.toString()?.replace('\n', ' ')?.take(60) ?: "null"
+            }
+            pairs.append(k).append('=').append(shown)
+        }
+        // 单条 logcat 上限约 4k 字符，按 3500 切开发
+        val text = pairs.toString()
+        var i = 0
+        var part = 1
+        while (i < text.length) {
+            val end = minOf(i + 3500, text.length)
+            Log.w("SpiderFields", "detail($vodId) 字段#$part ${text.substring(i, end)}")
+            i = end
+            part++
+        }
     }
 
     /** playerContent 解析结果：视频直链 + 所需 HTTP 请求头 */
@@ -618,9 +668,10 @@ class TvBoxClient(
             ?: throw IllegalStateException("playerContent 返回空")
 
         val resolved = parsePlayerContentResult(json)
-        // 分两行打，避免 logcat 单行截断看不到 URL
-        Log.d("SpiderProxy", "playerContent($playSource) → url=${resolved.url}")
-        Log.d(
+        // 分两行打，避免 logcat 单行截断看不到 URL。
+        // 用 W 级：这台电视 ROM 吞掉 app 的 D 级日志，播放链路取证只能靠 W 才抓得到。
+        Log.w("SpiderProxy", "playerContent($playSource) → url=${resolved.url}")
+        Log.w(
             "SpiderProxy",
             "playerContent($playSource) → headers=${resolved.headers.keys} parse=${resolved.parse}"
         )
@@ -722,7 +773,19 @@ class TvBoxClient(
         return runCatching {
             val uri = android.net.Uri.parse(url)
             val cdnUrl = uri.getQueryParameter("url")
-            if (cdnUrl.isNullOrBlank()) url else cdnUrl
+            if (cdnUrl.isNullOrBlank()) {
+                // 本地代理形态但没带 url 参数：整条视频流都会经 127.0.0.1 中转，
+                // 单连接吞吐受代理本身限制 —— 网盘播放慢的第一嫌疑，必须留痕。
+                Log.w("SpiderProxy", "本地代理地址无 url 参数，播放器将直连 127.0.0.1：$url")
+                url
+            } else {
+                Log.w(
+                    "SpiderProxy",
+                    "已从本地代理地址解出真实直链：${uri.host}:${uri.port}${uri.path} → " +
+                        android.net.Uri.parse(cdnUrl).host
+                )
+                cdnUrl
+            }
         }.getOrDefault(url)
     }
 

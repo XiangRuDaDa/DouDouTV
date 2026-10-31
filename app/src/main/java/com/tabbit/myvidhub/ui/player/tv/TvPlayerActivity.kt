@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.core.view.WindowCompat
@@ -64,6 +65,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.tabbit.myvidhub.data.MediaRepository
@@ -115,9 +117,25 @@ class TvPlayerActivity : ComponentActivity() {
     /**
      * 缓冲提示（非空 = 正在「想播但没数据」）。
      * 高码率原码资源在低带宽下会长时间不起播，画面看着就是「卡死」；
-     * 把已缓冲秒数和这条流需要的码率摊出来，用户才能分辨是网速不够还是片子坏了。
+     * 把此刻的实际下载速率和这条流需要的码率摊出来，用户才能分辨是网速不够还是片子坏了。
      */
     private var bufferHint by mutableStateOf<String?>(null)
+
+    /**
+     * 实测下载速率（字节/秒）；-1 = 还没攒满第一个 1 秒窗口。
+     *
+     * 取「累计已收字节」的 1 秒差分，而不是直接把 DefaultBandwidthMeter 的估算值摆上去：
+     * 后者单个样本最长可跨 2 秒、还会跨请求平滑，屏幕上看着像数字半天不动。
+     * 累计值由 speedBytesTotal 提供，差分窗口固定 1 秒，所以这个数字一秒跳一次。
+     */
+    private var downloadBps by mutableStateOf(-1L)
+
+    /** 经 TransferListener 累计的实收字节（每个带宽样本带自己那段窗口的字节数，逐条相加） */
+    private var speedBytesTotal = 0L
+
+    /** 上一个网速窗口的起点（累计字节 + 时刻）；speedWindowAt=0 表示还没建立基线 */
+    private var speedWindowBytes = 0L
+    private var speedWindowAt = 0L
     private var positionMs by mutableStateOf(0L)
     private var durationMs by mutableStateOf(0L)
     private var speed by mutableStateOf(1f)
@@ -143,6 +161,7 @@ class TvPlayerActivity : ComponentActivity() {
                 positionMs = p.currentPosition.coerceAtLeast(0L)
                 durationMs = p.duration.takeIf { it > 0L } ?: 0L
                 isPlaying = p.isPlaying
+                sampleDownloadSpeed()
                 bufferHint = buildBufferHint(p)
                 // 缓冲时把进度层叫回来：不然后台在缓冲、屏幕上什么都看不到。
                 // 功能面板开着时不抢它的位子。
@@ -157,14 +176,72 @@ class TvPlayerActivity : ComponentActivity() {
     private fun buildBufferHint(p: Player): String? {
         if (p.playbackState != Player.STATE_BUFFERING) return null
         if (!p.playWhenReady) return null
-        val bufferedSec = (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L) / 1000
+        val speedText = if (downloadBps < 0L) "测速中" else fmtSpeed(downloadBps)
         val bps = videoBitrateBps(p)
         return if (bps > 0) {
-            "缓冲中 · 已缓冲 ${bufferedSec}s · 这条流 ${"%.1f".format(bps / 1_000_000.0)} Mbps"
+            "缓冲中 · 下载 $speedText · 这条流 ${"%.1f".format(bps / 1_000_000.0)} Mbps"
         } else {
-            "缓冲中 · 已缓冲 ${bufferedSec}s"
+            "缓冲中 · 下载 $speedText"
         }
     }
+
+    /** 下载速率文本：≥1MB/s 显示 MB，否则 KB（按 1024 折算，和文件管理器里的口径一致） */
+    private fun fmtSpeed(bytesPerSec: Long): String =
+        if (bytesPerSec >= 1024L * 1024L) {
+            "%.1f MB/s".format(bytesPerSec / 1048576.0)
+        } else {
+            "%.0f KB/s".format(bytesPerSec / 1024.0)
+        }
+
+    /**
+     * 每攒满 1 秒刷新一次实测网速，让缓冲提示里的数字一秒一跳。
+     *
+     * 挂在 500ms 的进度 ticker 上而不是单开一个定时器：ticker 已经在跑，多一个定时器
+     * 就多一条要跟着播放器生命周期收的路。窗口长度按实际经过时间折算，不受 ticker 抖动影响。
+     */
+    private fun sampleDownloadSpeed() {
+        val now = SystemClock.elapsedRealtime()
+        val total = speedBytesTotal
+        if (speedWindowAt == 0L) {
+            speedWindowAt = now
+            speedWindowBytes = total
+            return
+        }
+        val elapsed = now - speedWindowAt
+        if (elapsed < 1_000L) return
+        downloadBps = ((total - speedWindowBytes) * 1000L / elapsed).coerceAtLeast(0L)
+        speedWindowAt = now
+        speedWindowBytes = total
+    }
+
+    /**
+     * 创建电视端播放器，并接上网速采样。
+     *
+     * 两处创建点（首次进入 / 换云盘源重建）都要走这里，否则换源后旧的累计值会和新播放器的
+     * 字节数混在一起，第一秒跳出一个离谱数字。
+     *
+     * 字节来源是 DefaultBandwidthMeter 的 onBandwidthEstimate：它每个样本带自己那段窗口的
+     * totalBytesLoaded，逐条累加就是「播放器实际收到的网络字节」。这个回调由播放器内部 handler
+     * 触发，而 speedBytesTotal 只在主线程（进度 ticker）读，所以回主线程再累。
+     */
+    private fun newTvPlayer(headers: Map<String, String>): ExoPlayer =
+        PlayerFactory.createTvPlayer(this, headers).also { p ->
+            downloadBps = -1L
+            speedBytesTotal = 0L
+            speedWindowAt = 0L
+            speedWindowBytes = 0L
+            p.addAnalyticsListener(object : AnalyticsListener {
+                override fun onBandwidthEstimate(
+                    eventTime: AnalyticsListener.EventTime,
+                    totalLoadTimeMs: Int,
+                    totalBytesLoaded: Long,
+                    bitrateEstimate: Long
+                ) {
+                    if (totalBytesLoaded <= 0L) return
+                    runOnUiThread { speedBytesTotal += totalBytesLoaded }
+                }
+            })
+        }
 
     /** 当前视频轨的声明码率（bit/s）；容器没写或还拿不到轨信息时返回 0 */
     private fun videoBitrateBps(p: Player): Int {
@@ -211,7 +288,7 @@ class TvPlayerActivity : ComponentActivity() {
             player?.release()
             baseHeaders = headers
             currentPlayHeaders = headers
-            player = PlayerFactory.createTvPlayer(this@TvPlayerActivity, headers)
+            player = newTvPlayer(headers)
 
             current = item
             titleText = displayTitle(item)
@@ -241,7 +318,7 @@ class TvPlayerActivity : ComponentActivity() {
                 player?.release()
                 player = null
                 currentPlayHeaders = mergedHeaders
-                val np = PlayerFactory.createTvPlayer(this@TvPlayerActivity, mergedHeaders)
+                val np = newTvPlayer(mergedHeaders)
                 player = np
                 playerView?.player = np
                 np
@@ -261,6 +338,8 @@ class TvPlayerActivity : ComponentActivity() {
             p.addListener(object : androidx.media3.common.Player.Listener {
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     val causeMsg = error.cause?.message
+                    // W 级 + 带上出错地址：这台电视 ROM 吞 D 级日志，播放失败时没有这行就只能靠猜
+                    Log.w("TvPlayer", "播放失败 ${error.errorCodeName} url=${resolved.url.take(160)} cause=${error.cause?.javaClass?.name} msg=$causeMsg")
                     toast = when {
                         causeMsg?.startsWith("HTTP 404") == true -> causeMsg
                         causeMsg?.startsWith("HTTP 403") == true ||
@@ -358,11 +437,13 @@ class TvPlayerActivity : ComponentActivity() {
             (subtitleBgAlpha.coerceIn(0f, 1f) * 255f).toInt(), 0, 0, 0
         )
         sv.setStyle(
+            // 形参顺序是 (前景, 字底, 窗口底, 描边类型, 描边色, 字体) —— 不是「描边类型排第三」。
+            // 排错时窗口底会收到 EDGE_TYPE_NONE(=0) 永远透明，描边类型反而收到背景色。
             androidx.media3.ui.CaptionStyleCompat(
                 android.graphics.Color.WHITE,
                 bg,
-                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
                 bg,
+                androidx.media3.ui.CaptionStyleCompat.EDGE_TYPE_NONE,
                 android.graphics.Color.TRANSPARENT,
                 null
             )
@@ -730,9 +811,10 @@ private fun TvProgressBar(
         }
 
         Text(
-            // 缓冲提示优先占这一行：它旁边的进度条停着不动，配上「已缓冲 X 秒」才知道是在等数据
+            // 缓冲提示优先占这一行：它旁边的进度条停着不动，配上「下载 X MB/s」才知道是在等数据、
+            // 还是网速追不上码率。字体用主题品牌色，和进度条已播部分同一支色。
             text = buffering ?: if (playing) "播放中 · OK 暂停 · ↓ 功能" else "已暂停 · OK 继续 · ↓ 功能",
-            color = if (buffering != null) Color(0xFFFFC46B) else Color.White.copy(alpha = 0.6f),
+            color = if (buffering != null) AppColors.Brand else Color.White.copy(alpha = 0.6f),
             style = MaterialTheme.typography.labelMedium,
             fontWeight = if (buffering != null) FontWeight.SemiBold else FontWeight.Normal
         )

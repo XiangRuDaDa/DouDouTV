@@ -142,17 +142,19 @@ object PlayerFactory {
                     // 无 Range（HLS/DASH 分片、清单）或已带完整 end → 原样透传
                     original
                 }
-                Log.d("PlayerHttp", ">>> ${request.method} ${request.url}")
+                // 播放链路取证日志一律用 W 级：部分电视 ROM（已实测 VIDAA/MT9653）会丢掉 app 的
+                // D 级日志，用 D 打等于在电视上什么都抓不到。
+                Log.w("PlayerHttp", ">>> ${request.method} ${request.url}")
                 val range = request.header("Range")
-                if (range != null) Log.d("PlayerHttp", "    Range: $range")
+                if (range != null) Log.w("PlayerHttp", "    Range: $range")
                 val response = chain.proceed(request)
                 val ct = response.header("Content-Type", "")
                 val ar = response.header("Accept-Ranges", "")
                 val cr = response.header("Content-Range")
                 val code = response.code
                 val cl = response.body?.contentLength() ?: -1L
-                Log.d("PlayerHttp", "<<< $code ${response.message} size=$cl contentType=$ct acceptRanges=$ar")
-                if (!cr.isNullOrBlank()) Log.d("PlayerHttp", "    Content-Range: $cr")
+                Log.w("PlayerHttp", "<<< $code ${response.message} size=$cl contentType=$ct acceptRanges=$ar")
+                if (!cr.isNullOrBlank()) Log.w("PlayerHttp", "    Content-Range: $cr")
 
                 // ===== 404 资源失效拦截：提前抛出带明确消息的 IOException =====
                 // Media3 的 ERROR_CODE_IO_BAD_HTTP_STATUS 只给错误码，用户看不懂。
@@ -185,7 +187,7 @@ object PlayerFactory {
             httpFactory.setDefaultRequestProperties(headers)
         }
 
-        Log.d("PlayerFactory", "build OkHttpDataSource headers=${headers.keys} connect=${connectTimeout}ms read=${readTimeout}ms")
+        Log.w("PlayerFactory", "build OkHttpDataSource headers=${headers.keys} connect=${connectTimeout}ms read=${readTimeout}ms")
 
         // ===== 永远禁用 CacheDataSource =====
         // 原因：OkHttp Interceptor 会拦截 ExoPlayer 的 Range 请求并改写（首次探测、固定块等），

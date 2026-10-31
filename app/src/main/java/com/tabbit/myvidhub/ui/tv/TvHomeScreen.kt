@@ -44,7 +44,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -97,9 +96,13 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.ui.LibraryViewModel
+import com.tabbit.myvidhub.ui.ReturnSpot
+import com.tabbit.myvidhub.ui.StandTarget
+import com.tabbit.myvidhub.ui.cardStand
 import com.tabbit.myvidhub.ui.components.PosterArt
 import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.components.ShimmerCard
+import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.themeSeamFade
@@ -122,6 +125,10 @@ import kotlin.math.roundToInt
  *   通过 onPreviewKeyEvent 拦截 KEYCODE_DPAD_DOWN → 手动把焦点交给 TvHero 播放按钮，
  *   让 LazyColumn 内的嵌套 LazyRow 继续处理后续的上下方向键。
  */
+
+/** [ReturnSpot] 的页面标识：首页的落点记录、页面滚动、各行的滚动都挂在它下面 */
+private const val TvHomeKey = "tv_home"
+
 @Composable
 fun TvHomeScreen(
     vm: LibraryViewModel,
@@ -150,14 +157,13 @@ fun TvHomeScreen(
             .take(5)
     }
 
-    // 继续观看：与手机端同一份数据源（vm.continueWatching 直接读 positionMs>5s 的 MOVIE/EPISODE 行）。
-    // 以前是从 filteredLibrary 里筛的，而 observeLibrary() 只返回 MOVIE/SERIES，
-    // 进度又写在 EPISODE 行上、剧集壳永远不带进度 —— 结果电视端只显示电影，
-    // 一整季的追看记录都看不见；来源过滤还会把别的源看过的内容一并砍掉。
+    // 继续观看：记录取全库（vm.continueWatching 直接读 positionMs>5s 的 MOVIE/EPISODE 行，
+    // observeLibrary() 只有 MOVIE/SERIES，进度却写在 EPISODE 行上、剧集壳永远不带进度），
+    // 但只展示当前来源/线路那一份 —— 换来源就看到另一份追看记录。
     val continueWatching by vm.continueWatching.collectAsStateWithLifecycle()
-    val continueItems = remember(continueWatching) {
+    val continueItems = remember(continueWatching, vm.homeSourceId, vm.homeSiteKey) {
         val cutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
-        continueWatching.filter { it.lastPlayedAt > cutoff }.take(8)
+        vm.filterForHome(continueWatching).filter { it.lastPlayedAt > cutoff }.take(8)
     }
 
     var heroIndex by remember { mutableStateOf(0) }
@@ -183,7 +189,7 @@ fun TvHomeScreen(
     }
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
 
-    val listState = rememberLazyListState()
+    val listState = ReturnSpot.listState(TvHomeKey)
     val scope = rememberCoroutineScope()
     // 滚动距离驱动顶栏透明度 —— 注意：**不要用 animateFloatAsState + 直接读 listState**（那会让 LazyColumn 每次
     // scroll 都触发整个 Box 重组）。把计算延后到 TvTopBar 内部 graphicsLayer 的 draw phase 执行：
@@ -245,6 +251,22 @@ fun TvHomeScreen(
     // Hero 空态（没有轮播数据）里的第一颗 CTA：顶栏的 ↓ 在没有播放按钮时落到它
     val heroEmptyFocus = remember { FocusRequester() }
 
+    /**
+     * 「离开时站在那张卡，回来还站在那张卡」的交接点：各行的卡片在拿到焦点、
+     * 或重建后确认自己就是落点时，把自己的 requester 交进来。
+     */
+    val standTarget = remember { StandTarget() }
+
+    /**
+     * 焦点来到非卡片元件（顶栏、Hero 两颗按钮）时清掉卡片落点。
+     * 卡片落点是唯一一个跨组合存活的记录，不清的话「站在 Hero 进详情再返回」
+     * 会被上一次路过的那张卡抢走焦点，回到一个用户根本没站过的地方。
+     */
+    val forgetCardStand: () -> Unit = {
+        ReturnSpot.saveStand(TvHomeKey, "")
+        standTarget.requester = null
+    }
+
     // 顶栏不再常驻：滚出首屏后会完全淡出。一旦焦点落到顶栏（遥控器按上键），
     // 把列表回滚到顶部，让顶栏边淡入边进入视野，避免「焦点在看不见的按钮上」。
     val revealTopBar: () -> Unit = {
@@ -276,9 +298,14 @@ fun TvHomeScreen(
     val resumeTick = tvResumeTick()
     // key 带上「Hero 有没有数据」：库数据晚到时抢焦目标从空态 CTA 换成播放按钮，
     // 否则首屏会停在没人抢焦的状态（原来只在首次组合抢一次，那时通常还没数据）。
+    // 离开时站在某张卡片上 → 先抢那张卡（requester 由卡片交进 [standTarget]），卡片没挂上
+    // （行不在恢复后的视口里）就按 R3 退回入口锚点 Hero，不会出现「没人持焦、按一下才亮」。
     tvClaimFocusOnEnter(
         tick = listOf(resumeTick, hero != null),
-        *arrayOf(if (hero != null) heroPlayFocus else heroEmptyFocus)
+        anchorsProvider = {
+            val heroAnchor = if (hero != null) heroPlayFocus else heroEmptyFocus
+            listOfNotNull(standTarget.requester, heroAnchor)
+        }
     )
 
     // 顶层不再拦 ↑/↓：交棒改由 Hero 按钮自己的按键拦截（goTopBar）和顶栏的显式 down 承担。
@@ -308,7 +335,8 @@ fun TvHomeScreen(
                         playFocusRequester = heroPlayFocus,
                         onPlay = { onPlay(hero) },
                         onDetail = { onDetail(hero.id) },
-                        onNavigateUp = goTopBar
+                        onNavigateUp = goTopBar,
+                        onButtonFocus = forgetCardStand
                     )
                 } else {
                     TvHeroEmpty(
@@ -319,7 +347,8 @@ fun TvHomeScreen(
                         firstFocusRequester = heroEmptyFocus,
                         onNavigateUp = goTopBar,
                         onAddSource = onSources,
-                        onRefresh = { vm.refreshHome() }
+                        onRefresh = { vm.refreshHome() },
+                        onButtonFocus = forgetCardStand
                     )
                 }
             }
@@ -334,7 +363,9 @@ fun TvHomeScreen(
             // 收藏是用户主动留下的内容，优先级高于「继续观看」，双端都排在它上面
             if (favorites.isNotEmpty()) {
                 item(key = "fav_title") { TvSectionTitle("★ 我的收藏") }
-                item(key = "fav_row") { TvPosterRow(items = favorites, onDetail = onDetail) }
+                item(key = "fav_row") {
+                    TvPosterRow(items = favorites, onDetail = onDetail, rowKey = "fav", stand = standTarget)
+                }
             }
 
             // ---------- 继续观看 ----------
@@ -343,6 +374,8 @@ fun TvHomeScreen(
                 item {
                     TvContinueRow(
                         items = continueItems,
+                        rowKey = "continue",
+                        stand = standTarget,
                         onDetail = onDetail,
                         onPlay = onPlay,
                         onMenu = { media, cardFocus -> continueMenu = media to cardFocus }
@@ -371,7 +404,12 @@ fun TvHomeScreen(
                 item(key = "cat_row_${cat.typeId}") {
                     // 分类数据（categoryVods / loading）在这个子组合里读取：
                     // 某个分类加载完成只重组它自己那一行，不会把整个首页的 item 列表重建一遍。
-                    TvCategoryPreview(typeId = cat.typeId, vm = vm, onDetail = onDetail)
+                    TvCategoryPreview(
+                        typeId = cat.typeId,
+                        vm = vm,
+                        stand = standTarget,
+                        onDetail = onDetail
+                    )
                 }
             }
 
@@ -381,7 +419,12 @@ fun TvHomeScreen(
                     TvSectionTitle(section.title) { TvMoreButton { onGenre(section.kind, section.genre) } }
                 }
                 item(key = "sec_row_${section.title}") {
-                    TvPosterRow(items = section.items, onDetail = onDetail)
+                    TvPosterRow(
+                        items = section.items,
+                        onDetail = onDetail,
+                        rowKey = "sec_${section.title}",
+                        stand = standTarget
+                    )
                 }
             }
         }
@@ -405,7 +448,10 @@ fun TvHomeScreen(
             // 这两个 requester 在顶栏可见时（firstVisibleItemIndex == 0）一定挂得上。
             belowFocusRequester = if (hero != null) heroPlayFocus else heroEmptyFocus,
             // 焦点进顶栏就先把列表滚回顶部，保证高亮看得见（这是视觉补偿，不是跳转校验）
-            onGainFocus = revealTopBar,
+            onGainFocus = {
+                forgetCardStand()
+                revealTopBar()
+            },
             onSearch = onSearch,
             onHomeSource = { showSourceDialog = true },
             onHomeSite = if (showSiteButton) ({ showSiteDialog = true }) else null,
@@ -630,10 +676,13 @@ private const val HERO_DWELL_SECONDS = 9f
 /**
  * Hero 与页面背景之间的收色带：把两者共用的那条接缝挪进渐变中段。
  * 画法与手机端首页的轮播同款，见 [themeSeamFade]。
+ *
+ * 高度就是 Hero 与下面第一行之间的额外空白：这条带子本身是纯 Bg 淡出到透明，
+ * 底下并没有内容，40dp 时它和标题行的上间距叠起来，把轮播和分类推得很开，收到 20dp。
  */
 @Composable
 private fun TvHeroSeamFade(modifier: Modifier = Modifier) {
-    Box(modifier.themeSeamFade(40.dp))
+    Box(modifier.themeSeamFade(20.dp))
 }
 
 /**
@@ -671,7 +720,9 @@ private fun TvHero(
     onPlay: () -> Unit,
     onDetail: () -> Unit,
     /** ↑ 交棒给顶栏来源按钮；两颗按钮都要，之前只有播放键接了 ↑，详情键按上没反应 */
-    onNavigateUp: () -> Unit
+    onNavigateUp: () -> Unit,
+    /** 两颗按钮任一颗拿到焦点：首页已经不站在卡片上了 */
+    onButtonFocus: () -> Unit
 ) {
     val imageUrl = item.backdropUrl.ifBlank { item.posterUrl }
 
@@ -752,17 +803,19 @@ private fun TvHero(
             )
         }
         val bottomVignette = remember {
-            // 起点从 0.55 提前到 0.28：渐隐摊到 Hero 高度的七成上，明暗不再在中段陡然起步；
-            // 中间补三段 stops 走近似 smoothstep，收尾放平，避免线性尾巴在暗部出现可见台阶。
-            // 0.90 起收到不透明纯色，底边留出一条横贯整宽的纯色着陆带 ——
+            // 暗化的起点从 0.28 后移到 0.45：原来画面刚过中线就开始压黑，整块下半截糊成一片，
+            // 看着不像渐隐而像被截断。中段（0.45~0.82）只铺到四成透明度，画面还认得出；
+            // 左半边另有 horizVignette 的 0.88 黑压着，两片叠加后标题/按钮的对比度不受影响。
+            // 0.96 起收到不透明纯色，底边留出一条横贯整宽的纯色着陆带 ——
             // 下面的收色带要跟它接，接的必须是一条确定的色，不能是还在渐变的段。
             // 收色仍然是纯 Bg：与下方背景的衔接交给 TvHeroSeamFade，不在这里配品牌色 ——
             // 页面背景横着是不均匀的（左浓右淡），配出来的色只在那一个点准，这就是上一版还留条黑线的原因。
             Brush.verticalGradient(
-                0.28f to Color.Transparent,
-                0.55f to AppColors.Bg.copy(alpha = 0.26f),
-                0.78f to AppColors.Bg.copy(alpha = 0.62f),
-                0.90f to AppColors.Bg,
+                0.45f to Color.Transparent,
+                0.66f to AppColors.Bg.copy(alpha = 0.14f),
+                0.82f to AppColors.Bg.copy(alpha = 0.42f),
+                0.92f to AppColors.Bg.copy(alpha = 0.80f),
+                0.96f to AppColors.Bg,
                 1f to AppColors.Bg
             )
         }
@@ -777,7 +830,7 @@ private fun TvHero(
         Column(
             Modifier
                 .align(Alignment.BottomStart)
-                .padding(start = TvPagePadding, end = 320.dp, bottom = 44.dp)
+                .padding(start = TvPagePadding, end = 320.dp, bottom = 30.dp)
         ) {
             // 文字块换页时淡出旧、淡入新，底边对齐保证不会上下跳
             AnimatedContent(
@@ -815,14 +868,16 @@ private fun TvHero(
             // ↑ 交棒挂在按钮自己身上（规范 R2），两颗都接 ——
             // 之前是顶层看 heroFocused 这个页面级布尔位判断，只有播放键喂得动它，
             // 详情键按 ↑ 就什么都不发生。
-            val heroUpKey: Modifier = Modifier.onPreviewKeyEvent { e ->
-                if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
-                    e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP
-                ) {
-                    onNavigateUp()
-                    true
-                } else false
-            }
+            val heroUpKey: Modifier = Modifier
+                .onFocusChanged { if (it.hasFocus) onButtonFocus() }
+                .onPreviewKeyEvent { e ->
+                    if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+                        e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP
+                    ) {
+                        onNavigateUp()
+                        true
+                    } else false
+                }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TvPillButton(
                     text = if (item.positionMs > 5_000L) "▶ 继续播放" else "▶ 播放",
@@ -846,7 +901,7 @@ private fun TvHero(
             Row(
                 Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = TvPagePadding, bottom = 44.dp),
+                    .padding(end = TvPagePadding, bottom = 30.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -887,7 +942,9 @@ private fun TvHeroEmpty(
     firstFocusRequester: FocusRequester,
     onNavigateUp: () -> Unit,
     onAddSource: () -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    /** CTA 拿到焦点：首页已经不站在卡片上了 */
+    onButtonFocus: () -> Unit
 ) {
     val text: String
     val hint: String?
@@ -931,14 +988,16 @@ private fun TvHeroEmpty(
             Triple("＋ 切换来源", false, onAddSource)
         )
     }
-    val heroUpKey: Modifier = Modifier.onPreviewKeyEvent { e ->
-        if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
-            e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP
-        ) {
-            onNavigateUp()
-            true
-        } else false
-    }
+    val heroUpKey: Modifier = Modifier
+        .onFocusChanged { if (it.hasFocus) onButtonFocus() }
+        .onPreviewKeyEvent { e ->
+            if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+                e.nativeKeyEvent.keyCode == KeyEvent.KEYCODE_DPAD_UP
+            ) {
+                onNavigateUp()
+                true
+            } else false
+        }
 
     Box(
         Modifier
@@ -976,6 +1035,7 @@ private fun TvHeroEmpty(
 private fun TvCategoryPreview(
     typeId: String,
     vm: LibraryViewModel,
+    stand: StandTarget,
     onDetail: (Long) -> Unit
 ) {
     val items = vm.categoryVods[typeId].orEmpty()
@@ -988,6 +1048,8 @@ private fun TvCategoryPreview(
         items.isNotEmpty() -> TvPosterRow(
             items = items.take(visible),
             onDetail = onDetail,
+            rowKey = "cat_$typeId",
+            stand = stand,
             onNearEnd = { vm.loadMoreCategoryPreview(typeId) }
         )
     }
@@ -1013,7 +1075,7 @@ private fun TvShimmerRow(count: Int = 6) {
     val w = Prefs.posterSize.tvDp.dp
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(count) {
@@ -1028,9 +1090,13 @@ private fun TvPosterRow(
     items: List<MediaEntity>,
     onDetail: (Long) -> Unit,
     cardWidth: androidx.compose.ui.unit.Dp = Prefs.posterSize.tvDp.dp,
-    onNearEnd: (() -> Unit)? = null
+    onNearEnd: (() -> Unit)? = null,
+    /** 这一行在 [ReturnSpot] 里的标识，同时用作横向滚动记录和卡片落点的一部分 */
+    rowKey: String,
+    /** 落点卡片 requester 的交接点，由首页传入 */
+    stand: StandTarget
 ) {
-    val rowState = rememberLazyListState()
+    val rowState = ReturnSpot.listState("$TvHomeKey/$rowKey")
     if (onNearEnd != null) {
         val nearEnd by remember(items.size) {
             derivedStateOf {
@@ -1043,14 +1109,16 @@ private fun TvPosterRow(
     LazyRow(
         state = rowState,
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 10.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(items, key = { "tv_${it.id}" }) { item ->
+            val cardFocus = remember(item.id) { FocusRequester() }
             TvPosterCard(
                 item = item,
                 onClick = { onDetail(item.id) },
-                width = cardWidth
+                width = cardWidth,
+                modifier = ReturnSpot.cardStand(TvHomeKey, rowKey, item.id, stand, cardFocus)
             )
         }
     }
@@ -1062,11 +1130,15 @@ private fun TvContinueRow(
     items: List<MediaEntity>,
     onDetail: (Long) -> Unit,
     onPlay: (MediaEntity) -> Unit,
-    onMenu: (MediaEntity, FocusRequester) -> Unit
+    onMenu: (MediaEntity, FocusRequester) -> Unit,
+    rowKey: String,
+    stand: StandTarget
 ) {
+    val rowState = ReturnSpot.listState("$TvHomeKey/$rowKey")
     LazyRow(
+        state = rowState,
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 8.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         items(items, key = { "continue_${it.id}" }) { item ->
@@ -1074,13 +1146,12 @@ private fun TvContinueRow(
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
             val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
-            val cardFocus = remember { FocusRequester() }
+            val cardFocus = remember(item.id) { FocusRequester() }
             // OK 键按下的时间戳（elapsedRealtime，0 表示当前没有按下中）
             var centerDownAt by remember { mutableLongStateOf(0L) }
             // 必须排在 clickable 之前：按键点击发生在 clickable 自己的 preview 处理里，
             // 同一节点上外层的 preview 先拿到事件，长按才能把 KeyUp 吃掉、不让它起播。
-            val longPressMenu: Modifier = Modifier
-                .focusRequester(cardFocus)
+            val longPressMenu: Modifier = ReturnSpot.cardStand(TvHomeKey, rowKey, item.id, stand, cardFocus)
                 .onPreviewKeyEvent { e ->
                     val native = e.nativeKeyEvent
                     val isCenter = native.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || native.keyCode == KeyEvent.KEYCODE_ENTER

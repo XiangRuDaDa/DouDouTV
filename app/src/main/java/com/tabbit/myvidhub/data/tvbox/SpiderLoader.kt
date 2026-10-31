@@ -5,6 +5,8 @@ import android.util.Log
 import dalvik.system.DexClassLoader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -54,8 +56,21 @@ object SpiderLoader {
         .callTimeout(45, TimeUnit.SECONDS)
         .build()
 
-    /** key → 可加载 Guard 的 classloader（可能是重建后的） */
-    private val loaders = ConcurrentHashMap<String, DexClassLoader>()
+    /** key → 可加载 Guard 的 classloader（由 spider jar + 扫到的解密 dex 自己组） */
+    private val loaders = ConcurrentHashMap<String, ClassLoader>()
+
+    /**
+     * key → 壳 Init.loader() 返回的 classloader，仅作补充尝试、不当主 loader。
+     *
+     * 真机证据：新牛二壳 loader() 返回的 DexClassLoader 里只有一个
+     * code_cache/sharedb/config.db，没有解密出来的爬虫代码，拿它当主 loader
+     * 会直接 ClassNotFoundException、播放整条链路失败。
+     */
+    private val shellLoaders = ConcurrentHashMap<String, ClassLoader>()
+
+    /** key → 这个包跑壳 Init 的时刻：解密 dex 的新鲜度按它算，不能写死窗口 */
+    private val initStartedAt = ConcurrentHashMap<String, Long>()
+
     private val instances = ConcurrentHashMap<String, SpiderProxy>()
 
     /** key → jar 路径 */
@@ -124,16 +139,28 @@ object SpiderLoader {
         return if (loaders.containsKey(key)) key else null
     }
 
+    /**
+     * 同一个 spider 包同时只允许跑一个加载流程。
+     *
+     * 启动预热和首页刷新会各自走到这里（两条链路都持有自己的 TvBoxClient 实例，
+     * 实例级的 configSpiderUrl 互不知情）。并发跑两遍壳 Init 的后果不是浪费时间那么简单：
+     * 壳会重复起本地代理、重复弹「正在初始化本地代理」，正是这套加载要消灭的症状。
+     * 缓存检查因此必须挪进锁内，否则后进入的那个会重复执行 prepareLoader。
+     */
+    private val loadMutex = Mutex()
+
     suspend fun ensureLoaded(spiderRaw: String): String = withContext(Dispatchers.IO) {
         val (url, md5) = parseSpider(spiderRaw)
         check(url.isNotBlank()) { "配置里没有 spider 字段（此类配置需要 spider 包才能解析）" }
+        loadMutex.withLock { ensureLoadedLocked(md5.ifBlank { md5Hex(url) }, url, md5) }
+    }
 
-        val key = md5.ifBlank { md5Hex(url) }
+    private suspend fun ensureLoadedLocked(key: String, url: String, md5: String): String {
         loaders[key]?.let {
             // 缓存命中：spider 已加载，但 LocalServer 可能未启动（进程重启后缓存还在但本地代理已死）。
             // LocalServer 是端口 9978 的视频代理，云盘播放依赖它，必须确保启动。
-            if (localServerStarted.add(key)) startLocalServer(it)
-            return@withContext key
+            if (localServerStarted.add(key)) startLocalServerWithFallback(key, it)
+            return key
         }
 
         // 上次初始化失败过的包：先尝试用已落盘的解密 dex 恢复（Init 可能在超时后于后台完成），
@@ -143,8 +170,8 @@ object SpiderLoader {
                 failedInit.remove(key)
                 loaders[key] = recovered
                 // 恢复路径跳过了 prepareLoader，这里也要启动本地视频代理
-                if (localServerStarted.add(key)) startLocalServer(recovered)
-                return@withContext key
+                if (localServerStarted.add(key)) startLocalServerWithFallback(key, recovered)
+                return key
             }
             fail(err)
         }
@@ -155,7 +182,7 @@ object SpiderLoader {
             failedInit[key] = e.message ?: "spider 包加载失败"
             throw e
         }
-        key
+        return key
     }
 
     private suspend fun prepareLoader(key: String, url: String, md5: String) {
@@ -180,6 +207,8 @@ object SpiderLoader {
         //    另外壳的 Init 会回连本地代理（127.0.0.1:8964）确认就绪，代理慢启动时首次
         //    Init 会抛 ConnectException，需隔几秒重试直到代理起来。
         val initStarted = System.currentTimeMillis()
+        // 记在调用之前：Init 超时抛异常时这个时刻也要留下，恢复路径靠它算解密 dex 的新鲜度
+        initStartedAt[key] = initStarted
         val initClazz = runCatching { stubLoader.loadClass("com.github.catvod.spider.Init") }
             .getOrElse {
                 fail("spider 包缺少 Init 类：${it.message}")
@@ -190,16 +219,24 @@ object SpiderLoader {
             fail("spider 壳初始化失败：${e.message}")
         }
 
-        // 4) 扫描 Init 写出的解密 dex，重组 classpath
+        // 4) 主 loader 一律用「jar + 扫到的解密 dex」自己组，壳 Init.loader() 只收进备用表。
+        //    真机证据（旧版把壳 loader 当主 loader，结果整条链路 CNFE、播放全挂）：
+        //    新牛二壳 loader() 返回的 DexClassLoader 的 DexPathList 里只有
+        //    code_cache/sharedb/config.db，压根不含解密出来的爬虫代码；壳是把解密 dex
+        //    挂回 jar 自己那个 loader 的 pathList，所以 jar 组的 loader 才加载得到 Guard 类。
+        val shellLoader = tryGetShellLoader(initClazz)
+        shellLoader?.let { shellLoaders[key] = it }
         val decrypted = scanDecryptedDex(initStarted)
-        Log.d(TAG, "Init 完成，解密 dex ${decrypted.size} 个：${decrypted.joinToString { File(it).name }}")
-
-        // 解密出的 dex 同样必须只读，否则 Android 14 拒载
+        Log.w(
+            TAG,
+            "扫描解密 dex ${decrypted.size} 个：${decrypted.joinToString { File(it).name }} " +
+                "（壳 loader=${shellLoader?.javaClass?.name ?: "无"}，仅作备用）"
+        )
         decrypted.forEach { runCatching { File(it).takeIf { f -> f.canWrite() }?.setReadOnly() } }
-
         val classpath = (listOf(jarFile.absolutePath) + decrypted).joinToString(File.pathSeparator)
-        val loader = if (classpath == jarFile.absolutePath) stubLoader
-        else DexClassLoader(classpath, optDir.absolutePath, null, ctx().classLoader)
+        val loader: ClassLoader =
+            if (classpath == jarFile.absolutePath) stubLoader
+            else DexClassLoader(classpath, optDir.absolutePath, null, ctx().classLoader)
 
         loaders[key] = loader
 
@@ -207,7 +244,8 @@ object SpiderLoader {
         //    playerContent 返回的视频地址形如 http://127.0.0.1:9978/proxy?...，
         //    需要 LocalServer（NanoHTTPD）监听该端口、代理视频流并注入 Cookie。
         //    标准 TVBox 在 Application.onCreate 里启动，这里在 spider Init 成功后启动。
-        if (localServerStarted.add(key)) startLocalServer(loader)
+        //    jar 组的 loader 找不到 LocalServer 类时，再拿壳 loader 试一次（两种壳各放一边）。
+        if (localServerStarted.add(key)) startLocalServerWithFallback(key, loader)
     }
 
     /**
@@ -219,9 +257,9 @@ object SpiderLoader {
      *
      * 用反射加载并调用，因为 LocalServer 在 spider JAR（加密壳）里，类名可能是
      * com.github.catvod.crawler.LocalServer 或 com.github.catvod.spider.LocalServer。
-     * 启动失败不致命（不影响列表/详情爬取），仅记录日志。
+     * 启动失败不致命（不影响列表/详情爬取），返回 false 让调用方换另一个 loader 再试。
      */
-    private fun startLocalServer(loader: DexClassLoader) {
+    private fun startLocalServer(loader: ClassLoader): Boolean {
         val classNames = listOf(
             "com.github.catvod.crawler.LocalServer",
             "com.github.catvod.spider.LocalServer"
@@ -244,14 +282,33 @@ object SpiderLoader {
                         .invoke(instance, 5000, false)
                 }.isSuccess
                 if (started) {
-                    Log.d(TAG, "LocalServer($name) 已启动（视频代理端口 9978）")
-                    return
+                    Log.w(TAG, "LocalServer($name) 已启动（视频代理端口 9978）")
+                    return true
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "启动 LocalServer($name) 失败：${e.message}")
             }
         }
-        Log.w(TAG, "未找到或无法启动 LocalServer（云盘视频代理可能不可用）")
+        // 带上 loader 身份和它真正看得见的搜索路径：这是判断「壳解密后的类到底在不在这个
+        // loader 里」的唯一证据（新牛二壳在 native 内存解密，光看类名猜不出来）。
+        Log.w(TAG, "未找到或无法启动 LocalServer（云盘视频代理可能不可用）；loader=${loader.javaClass.name} 搜索路径=${dumpSearchPath(loader)}")
+        return false
+    }
+
+    /**
+     * 让 loader 去加载一个必然不存在的类，把 ClassNotFoundException 里的 DexPathList 打出来。
+     * 反射 getURLs() 在这套壳给的 loader 上取不到（实测只会拿到空/异常），别再用；
+     * CNFE 的 message 由系统拼好，一定包含 zip 路径和 nativeLibraryDirectories。
+     */
+    private fun dumpSearchPath(loader: ClassLoader): String = runCatching {
+        loader.loadClass("com.tabbit.myvidhub.SpiderProbe")
+        "(探针类意外加载成功，说明 loader 里有 App 自身的 dex)"
+    }.getOrElse { it.message ?: "(异常无 message)" }
+
+    /** 先拿主 loader 起 LocalServer，起不来再用壳 loader 兜一次（两类壳各把 LocalServer 放一边） */
+    private fun startLocalServerWithFallback(key: String, primary: ClassLoader) {
+        if (startLocalServer(primary)) return
+        shellLoaders[key]?.let { startLocalServer(it) }
     }
 
     /**
@@ -284,7 +341,7 @@ object SpiderLoader {
                 "壳初始化失败：Go 代理未启动（监听端口中未找到响应 {\"state\":\"ok\"} 的服务）"
             )
         }
-        Log.d(TAG, "Go 代理就绪：127.0.0.1:$proxyPort，重试 Init.init")
+        Log.w(TAG, "Go 代理就绪：127.0.0.1:$proxyPort，重试 Init.init")
         return callInit(initClazz, INIT_TIMEOUT_MS)
     }
 
@@ -335,11 +392,11 @@ object SpiderLoader {
     /** 扫描本机所有监听端口，找 Go 代理（GET /health 返回 {"state":"ok"}） */
     private fun findGoProxyPort(): Int? {
         val ports = scanListeningPorts()
-        Log.d(TAG, "扫描到监听端口 ${ports.size} 个：$ports")
+        Log.w(TAG, "扫描到监听端口 ${ports.size} 个：$ports")
         for (port in ports) {
             val ok = isGoProxy(port)
             if (ok) {
-                Log.d(TAG, "找到 Go 代理端口：$port")
+                Log.w(TAG, "找到 Go 代理端口：$port")
                 return port
             }
         }
@@ -405,7 +462,8 @@ object SpiderLoader {
     /** 不触发壳 Init，直接用已落盘的解密 dex 重建 classloader（兼容 Init 超时后于后台完成的情况） */
     private fun tryRecoverLoader(key: String): DexClassLoader? {
         val jarPath = jars[key] ?: return null
-        val decrypted = scanDecryptedDex(System.currentTimeMillis() - 10 * 60_000)
+        // 同 loadGuardClass：按这个包跑 Init 的时刻算新鲜度，没有记录才退回 10 分钟窗口
+        val decrypted = scanDecryptedDex(initStartedAt[key] ?: (System.currentTimeMillis() - 10 * 60_000))
         if (decrypted.isEmpty()) return null
         decrypted.forEach { runCatching { File(it).takeIf { f -> f.canWrite() }?.setReadOnly() } }
         val classpath = (listOf(jarPath) + decrypted).joinToString(File.pathSeparator)
@@ -424,6 +482,25 @@ object SpiderLoader {
         return runCatching {
             initClazz.getDeclaredMethod("init", Context::class.java, String::class.java).invoke(null, appCtx, "")
         }.getOrElse { throw it }
+    }
+
+    /**
+     * 从壳 Init 暴露的静态方法拿 ClassLoader，存进 [shellLoaders] 作补充尝试。
+     *
+     * 注意：这**不是**主 loader。真机日志证明新牛二壳 loader() 返回的 DexClassLoader
+     * 里只有 code_cache/sharedb/config.db，不含解密出来的爬虫代码，拿它去 loadClass
+     * Guard 会 ClassNotFoundException。主路径仍然是「jar + 扫描到的解密 dex」自己组的
+     * loader（壳把解密 dex 挂回的是 jar loader 的 pathList）。
+     */
+    private fun tryGetShellLoader(initClazz: Class<*>): ClassLoader? {
+        for (name in listOf("loader", "getLoader")) {
+            val method = runCatching { initClazz.getDeclaredMethod(name).apply { isAccessible = true } }.getOrNull()
+                ?: continue
+            val cl = runCatching { method.invoke(null) as? ClassLoader }.getOrNull() ?: continue
+            Log.w(TAG, "壳 Init.$name() 返回 ClassLoader：${cl.javaClass.name}（收作备用，不作主 loader）")
+            return cl
+        }
+        return null
     }
 
     /** 递归扫描 cacheDir 里以 dex 魔数开头的文件（Init 解密产物） */
@@ -495,8 +572,17 @@ object SpiderLoader {
             timedClass { l.loadClass(api) }?.let { return it }
         }
 
+        // 主 loader 里没有，再拿壳 Init.loader() 返回的那个试一次：个别壳确实只把解密类放进它。
+        // 这里只作补充尝试 —— 真机实测这套壳的 loader 里只有 config.db，不能当主 loader。
+        shellLoaders[loaderKey]?.let { l ->
+            timedClass { l.loadClass(className) }?.let { return it }
+            timedClass { l.loadClass(api) }?.let { return it }
+        }
+
         val jarPath = jars[loaderKey] ?: return null
-        val decrypted = scanDecryptedDex(System.currentTimeMillis() - 60_000)
+        // 新鲜度按「这个包什么时候跑的 Init」算，不能写死 60 秒：
+        // 启动预热跑完 Init 后可能几分钟才播放，固定窗口那时必然扫空。
+        val decrypted = scanDecryptedDex(initStartedAt[loaderKey] ?: (System.currentTimeMillis() - 60_000))
         if (decrypted.isEmpty()) return null
         decrypted.forEach { runCatching { File(it).takeIf { f -> f.canWrite() }?.setReadOnly() } }
 

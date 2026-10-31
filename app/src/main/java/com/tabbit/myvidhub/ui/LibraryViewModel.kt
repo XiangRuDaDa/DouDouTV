@@ -211,6 +211,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 repo.enabledSources().firstOrNull()?.let { selectHomeSource(it.id) }
             }
         }
+        // spider 预热：加密壳 Init 在电视上要二十多秒纯本地计算，且和首页刷新抢同一把加载锁。
+        // 后台先把它跑完，首页/切线路/详情页再走到 SpiderLoader 时直接命中进程级缓存，
+        // 不再重复解密、重复弹「正在初始化本地代理」。首页当前来源排最前，别把用户要用的那条挡在后面。
+        viewModelScope.launch {
+            repo.warmUpTvBoxSpiders(Prefs.homeSourceId)
+        }
     }
 
     // ---------- 首页来源 / 站点（线路）选择 ----------
@@ -771,6 +777,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun episodesOf(seriesKey: String): List<MediaEntity> = repo.episodes(seriesKey)
+
+    /** 分集行所属的剧集壳：详情页把「继续观看」的分集记录换成整部剧来展示 */
+    suspend fun shellOf(seriesKey: String): MediaEntity? = repo.shellOf(seriesKey)
     suspend fun seasonsOf(seriesKey: String): List<Int> = repo.seasons(seriesKey)
 
     /** TVBox 多播放源：某剧的全部云盘/线路名称 */

@@ -173,17 +173,31 @@ fun tvClaimFocusOnEnter(
     scrollToTop: suspend () -> Unit = {},
     settleMillis: Long = 0L,
 ) {
+    tvClaimFocusOnEnter(tick, { anchors.toList() }, scrollToTop, settleMillis)
+}
+
+/**
+ * [tvClaimFocusOnEnter] 的按需取锚点版本：落点由子树里的卡片在组合/拿焦点时才交出来，
+ * 页面组合那一刻还读不到，所以这里传的是取值函数，效果启动时才读。
+ */
+@Composable
+fun tvClaimFocusOnEnter(
+    tick: Any,
+    anchorsProvider: () -> List<FocusRequester>,
+    scrollToTop: suspend () -> Unit = {},
+    settleMillis: Long = 0L,
+) {
     LaunchedEffect(tick) {
         runCatching { scrollToTop() }
         if (settleMillis > 0) delay(settleMillis)
         // 等一帧：requester 要等节点组合完成才挂得上
         withFrameNanos { }
-        tvMoveFocus(*anchors)
+        tvMoveFocus(*anchorsProvider().toTypedArray())
         // 再补一次：路由淡入淡出、刚从播放器 resume 回来时，锚点节点这一帧可能还没挂上，
         // 而 requestFocus 是否成功在 1.6.8 里读不到返回值。对已经持有焦点的节点重复请求是空操作，
         // 所以补一次只会「把没抢到的焦点抢上」，不会把用户已经走到位的焦点拽回来。
         delay(120)
-        tvMoveFocus(*anchors)
+        tvMoveFocus(*anchorsProvider().toTypedArray())
     }
 }
 
@@ -470,14 +484,17 @@ private fun posterMetaLine(item: MediaEntity): String {
 
 private val TvGenreSplit = Regex("[,，、/\\s]+")
 
-/** 分区标题：电视上字要大、留白要多，右侧可挂「更多」 */
+/** 分区标题：电视上字要大，右侧可挂「更多」 */
 @Composable
 fun TvSectionTitle(
     text: String,
     modifier: Modifier = Modifier,
     // 默认走页面左轴；详情页等信息列更宽的区域由调用方覆写。
+    // 上下留白从 22/10 收到 13/6：首页一屏最多叠 7 个分类行，原来单行的间距合计 52dp，
+    // 七行就是半屏多的纯空白，标题和它下面那排海报被推得像是两个分区。
+    // 行内左右仍保持页面左轴不动，只收纵向。
     contentPadding: PaddingValues = PaddingValues(
-        start = TvPagePadding, end = TvPagePadding, top = 22.dp, bottom = 10.dp
+        start = TvPagePadding, end = TvPagePadding, top = 13.dp, bottom = 6.dp
     ),
     trailing: (@Composable () -> Unit)? = null
 ) {

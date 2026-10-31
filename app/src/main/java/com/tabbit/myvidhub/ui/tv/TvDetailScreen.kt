@@ -89,6 +89,7 @@ import androidx.compose.ui.zIndex
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
+import com.tabbit.myvidhub.ui.StandTarget
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
 import com.tabbit.myvidhub.ui.theme.TvText
 import androidx.compose.runtime.collectAsState
@@ -133,6 +134,13 @@ fun TvDetailScreen(
 ) {
     var media by remember { mutableStateOf<MediaEntity?>(null) }
     var episodes by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+
+    /**
+     * 从「继续观看」进来、页面改绑到剧集壳之后，记住用户真正在看的那条分集。
+     * 剧集壳自己没有可播地址也不带进度，主按钮要续播的仍是这条分集。
+     * 其他入口进来时恒为 null，按钮行为不变。
+     */
+    var resumeEpisode by remember(mediaId) { mutableStateOf<MediaEntity?>(null) }
     var scraped by remember { mutableStateOf<EmbyClient.ItemDetail?>(null) }
 
     /** TVBox 多播放源（云盘/线路） */
@@ -175,6 +183,16 @@ fun TvDetailScreen(
     val controlsFocusRequester = remember { FocusRequester() }
     val firstEpFocusRequester = remember { FocusRequester() }
 
+    /**
+     * 离开时焦点站在哪个元件上（播放 / 收藏 / 控制条 / 某一集），回来就还站在它上面。
+     * 详情页的子树在进播放器时不销毁，所以这份记录只要活过一次组合就够了，
+     * 不用像首页那样按页面 key 持久化。
+     */
+    val stand = remember { StandTarget() }
+    /** 谁拿到焦点谁就把自己交给 [stand]；一个节点只交它自己已经挂着的那个 requester */
+    fun publishStand(target: FocusRequester): Modifier =
+        Modifier.onFocusChanged { if (it.hasFocus) stand.requester = target }
+
     /** 界面每次回到前台（进出播放器）都要重新站好焦点，见 [tvResumeTick] */
     val resumeTick = tvResumeTick()
 
@@ -213,15 +231,33 @@ fun TvDetailScreen(
                 m = vm.mediaOf(id)
             }
         }
-        media = m
+        if (m == null) media = null
         if (m != null) {
+            // 「继续观看」进来的是 EPISODE 行：海报/年份/简介/选集全都挂在剧集壳上，
+            // 绑分集行整页几乎是空的。seriesKey 里已经带 sourceId + siteKey + vodId，
+            // 查到的壳就是这条记录所属那个数据源的整部剧，不存在跨源歧义，直接换绑、不用问。
+            // 壳不在库里（换源重入库、老数据）时保持分集行渲染。
+            if (m.kind == MediaKind.EPISODE) {
+                val shell = vm.shellOf(m.seriesKey)
+                if (shell != null) {
+                    resumeEpisode = m.takeIf { it.positionMs > 5_000L }
+                    id = shell.id
+                    m = shell
+                }
+            }
+            media = m
             val src = vm.sourceOf(m.sourceId)
             if (src?.kind == SourceKind.EMBY) {
                 scraped = runCatching { vm.embyDetailOf(m.sourceId, m.remoteId) }.getOrNull()
                 if (m.kind == MediaKind.SERIES) {
                     runCatching { vm.loadEmbyEpisodes(m.sourceId, m.remoteId) }
                 }
-            } else if (src?.kind == SourceKind.TVBOX && m.kind == MediaKind.SERIES) {
+            } else if (src?.kind == SourceKind.TVBOX && m.kind == MediaKind.SERIES &&
+                vm.episodesOf(m.seriesKey).isEmpty()
+            ) {
+                // 与手机端同一口径：只在库里还没有分集时才拉详情。loadTvBoxDetail 会把该剧
+                // 分集全删重插（新行、新 id），无条件调用会顺手清掉「继续观看」的进度，
+                // 并让主按钮正要播的那条分集行失效。
                 runCatching { vm.loadTvBoxDetail(m.sourceId, m.remoteId) }
             }
             val latest = vm.mediaOf(id) ?: m
@@ -290,13 +326,15 @@ fun TvDetailScreen(
     }
 
     /**
-     * 进页与「界面每次回到前台」都把焦点站回播放键（规范 R7），进页即可直接按 OK 播放。
+     * 进页与「界面每次回到前台」都要把焦点站好（规范 R7）：
+     * 离开时站在某一集 / 控制条上，从播放器回来就还站在那里；这一页第一次进来（没有落点记录）
+     * 才落到播放键，进页即可直接按 OK 播放。
      * key 只带「数据到位与否 + resume 次数」：刮削回填会换掉 media 实例，
      * 但 id 不变，所以不会把用户已经站好的焦点从选集抢走（等价于原来的 initialFocusDone 只落一次）。
      */
     tvClaimFocusOnEnter(
         tick = listOf(resumeTick, if (loading) null else media?.id),
-        anchors = *arrayOf(playFocusRequester),
+        anchorsProvider = { listOfNotNull(stand.requester, playFocusRequester) },
         settleMillis = 120
     )
 
@@ -520,6 +558,7 @@ fun TvDetailScreen(
                                     .focusRequester(favoriteFocusRequester)
                                     // 焦点走到这一层 = 用户已经按回到顶，构图跟着回首屏（规范 R7）
                                     .onFocusChanged { if (it.hasFocus) restoreHeaderComposition() }
+                                    .then(publishStand(favoriteFocusRequester))
                                     .onPreviewKeyEvent { e ->
                                         if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionUp) {
                                             restoreHeaderComposition()
@@ -556,7 +595,11 @@ fun TvDetailScreen(
 
                         // 操作按钮行：只出一个主按钮，三种内容状态各自对应一个明确动词。
                         // 没看过的剧先选集，看过的直接续播。
-                        val seriesUnwatched = item.kind == MediaKind.SERIES && item.positionMs <= 5_000L
+                        // resumeEp 只从「继续观看」进来时有值：那类入口给的是分集行，
+                        // 页面换成剧集壳后壳自身不带进度，主按钮仍要落回那集才能一键接上。
+                        val resumeEp = resumeEpisode
+                        val seriesUnwatched = item.kind == MediaKind.SERIES &&
+                            item.positionMs <= 5_000L && resumeEp == null
                         // 操作按钮的下键进选集区：只读的简介 / 主演不接收焦点，
                         // 所以不会出现「按几次才滚到剧集」。
                         // 下键：先把内容块滚到顶部再交给落点（默认控制条首颗）；预览阶段消费，
@@ -578,6 +621,7 @@ fun TvDetailScreen(
                         val playFocusModifier = Modifier
                             .focusRequester(playFocusRequester)
                             .then(restoreHeaderOnFocus)
+                            .then(publishStand(playFocusRequester))
                             .focusProperties {
                                 up = favoriteFocusRequester
                                 down = belowPlay
@@ -606,17 +650,20 @@ fun TvDetailScreen(
                                 // 看过 / 电影：主按钮直接播放，剧集带上集号
                                 TvPlayButton(
                                     text = run {
-                                        if (item.kind == MediaKind.SERIES && item.episode > 0) {
-                                            "继续观看 S${item.season}E${item.episode}"
-                                        } else {
-                                            if (item.positionMs > 5_000L) "继续播放" else "立即播放"
+                                        when {
+                                            resumeEp != null ->
+                                                "继续观看 S${resumeEp.season}E${resumeEp.episode}"
+                                            item.kind == MediaKind.SERIES && item.episode > 0 ->
+                                                "继续观看 S${item.season}E${item.episode}"
+                                            else ->
+                                                if (item.positionMs > 5_000L) "继续播放" else "立即播放"
                                         }
                                     },
                                     size = TvButtonSize.Lg,
                                     modifier = playFocusModifier,
-                                    onClick = { onPlay(item.id) }
+                                    onClick = { onPlay(resumeEp?.id ?: item.id) }
                                 )
-                                if (item.positionMs > 5_000L) {
+                                if (item.positionMs > 5_000L || resumeEp != null) {
                                     TvPillButton(
                                         text = "从头开始",
                                         primary = false,
@@ -630,8 +677,11 @@ fun TvDetailScreen(
                                             }
                                             .then(episodeDownModifier),
                                         onClick = {
-                                            vm.resetPosition(item.id)
-                                            onPlay(item.id)
+                                            // 「从头开始」归零的必须是真正要播的那条：
+                                            // 从「继续观看」进来时 item 是剧集壳，进度写在分集行上
+                                            val target = resumeEp ?: item
+                                            vm.resetPosition(target.id)
+                                            onPlay(target.id)
                                         }
                                     )
                                 }
@@ -718,7 +768,7 @@ fun TvDetailScreen(
                                     val pillFocus = Modifier.focusProperties {
                                         up = playFocusRequester
                                         down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
-                                    }
+                                    }.then(publishStand(controlsFocusRequester))
                                     // 播放源 / 云盘切换：多条源时展示，默认第一条
                                     if (playSources.size > 1) {
                                         playSources.forEachIndexed { index, src ->
@@ -811,13 +861,17 @@ fun TvDetailScreen(
                                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
                                     rowEps.forEachIndexed { idx, ep ->
+                                        // 每格自己的 requester：焦点停在哪一格，从播放器回来就还落回那一格。
+                                        // 首行首格已经把 controlsFocusRequester 那个位置让给了
+                                        // firstEpFocusRequester（换季/翻页的固定落点），不能两个节点挂同一个。
+                                        val cellFocus = remember(ep.id) { FocusRequester() }
+                                        val cellTarget =
+                                            if (rowIdx == 0 && idx == 0) firstEpFocusRequester else cellFocus
                                         TvEpisodeCard(
                                             episode = ep,
-                                            modifier = Modifier.weight(1f),
+                                            modifier = Modifier.weight(1f).then(publishStand(cellTarget)),
                                             // 首行第一格挂焦点器，「选择剧集」与换季/翻页后直接落这里
-                                            focusRequester = if (rowIdx == 0 && idx == 0) {
-                                                firstEpFocusRequester
-                                            } else null,
+                                            focusRequester = cellTarget,
                                             // 首行再按上：回控制条（没有就回播放）
                                             focusUp = if (rowIdx == 0) {
                                                 if (hasControlAnchor) controlsFocusRequester

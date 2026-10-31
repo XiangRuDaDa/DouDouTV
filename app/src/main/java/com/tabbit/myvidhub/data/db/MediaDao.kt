@@ -76,6 +76,13 @@ interface MediaDao {
     @Query("SELECT * FROM media WHERE remoteId = :remoteId LIMIT 1")
     suspend fun byRemoteId(remoteId: String): MediaEntity?
 
+    /**
+     * 分集行回查剧集壳。
+     * 海报、简介、选集这些内容都挂在壳行上，而「继续观看」记录的是 EPISODE 行。
+     */
+    @Query("SELECT * FROM media WHERE seriesKey = :seriesKey AND kind = 'SERIES' LIMIT 1")
+    suspend fun shellOf(seriesKey: String): MediaEntity?
+
     @Query(
         "SELECT * FROM media WHERE seriesKey = :seriesKey AND kind = 'EPISODE' " +
             "ORDER BY season ASC, episode ASC"
