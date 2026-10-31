@@ -399,7 +399,14 @@ fun TvPosterCard(
      * 固定 [width] 原本只适合首页横排，放进 LazyVerticalGrid 会溢出格子或留白，
      * 所以网格页（分类/查看全部/搜索）统一用这个模式。
      */
-    fillCell: Boolean = false
+    fillCell: Boolean = false,
+    /**
+     * 这一行/列的第一张卡：放大时把左缘补回原位。
+     *
+     * 默认绕中心放大，首卡会往左吃掉 5% 卡宽的左边距，于是它比下面各行、
+     * 各列的首卡都更靠左 —— 焦点一走到行首就「越界、对不齐」。
+     */
+    anchorStart: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -422,6 +429,14 @@ fun TvPosterCard(
             .graphicsLayer {
                 scaleX = scale.value
                 scaleY = scale.value
+                // 首卡往右扩：绕中心放大 10% 会把左缘往左推掉 5% 卡宽，于是行首卡比
+                // 下面各行更靠左，左轴第二条就出现了。
+                // 这里用 translationX 精确补回这半个增量，而不是改 transformOrigin ——
+                // 平移是 layer 最基础的一项，任何 API 档位都确定生效；真机上上一版改
+                // transformOrigin 后仍报「超出」，换成补偿就不依赖那条属性的实现了。
+                if (anchorStart) {
+                    translationX = (scale.value - 1f) * size.width / 2f
+                }
                 shape = cardShape
                 clip = true
             }

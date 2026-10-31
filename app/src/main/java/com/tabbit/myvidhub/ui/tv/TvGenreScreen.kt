@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -24,7 +25,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -79,10 +79,15 @@ fun TvGenreScreen(
 
     // 落点记录按「页 + 当前筛选」分键：换题材后各算各的位置，回来才不会被别的筛选的记录带偏
     val filterKey = "$TvGenrePageKey/${kind ?: "all"}/${genre ?: "all"}"
+    // 记录先读出来再建 gridState：首屏只有一页数据时位置会被 clamp 到末尾并写回记录，
+    // 之后就拿不到离开时的真实位置了。
+    val savedScroll = remember(filterKey) { ReturnSpot.scrollOf(filterKey) }
     val gridState = ReturnSpot.gridState(filterKey)
     val firstCardFocus = remember { FocusRequester() }
     val stand = remember { StandTarget() }
     val firstId = items.firstOrNull()?.id
+    /** 落点是否已解析完（该补的页补到位）；补页期间不抢焦点，免得焦点先落到首卡再跳。 */
+    var spotReady by remember(filterKey) { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         tags = runCatching { vm.genreTags() }.getOrDefault(emptyList())
@@ -92,10 +97,26 @@ fun TvGenreScreen(
     LaunchedEffect(kind, genre) {
         loading = true
         endReached = false
+        spotReady = false
         items = runCatching { vm.browseGenre(kind, genre, TV_PAGE_SIZE, 0) }
             .getOrDefault(emptyList())
         if (items.size < TV_PAGE_SIZE) endReached = true
+        // 从详情页返回：离开时那张卡可能在后面的页里，不补到它出现，
+        // 它就不在组合树里、没人交出 requester，焦点只能退回第一张卡。
+        val targetId = ReturnSpot.standCard(TvGenrePageKey, filterKey)
+        while (targetId != null && items.none { it.id == targetId } && !endReached) {
+            val more = runCatching { vm.browseGenre(kind, genre, TV_PAGE_SIZE, items.size) }
+                .getOrDefault(emptyList())
+            if (more.isEmpty()) {
+                endReached = true
+                break
+            }
+            items = items + more
+            if (more.size < TV_PAGE_SIZE) endReached = true
+        }
+        savedScroll?.let { runCatching { gridState.scrollToItem(it.index, it.offset) } }
         loading = false
+        spotReady = true
     }
 
     // 接近底部时增量加载。state 按筛选分键，换筛选会换成另一个实例，
@@ -130,7 +151,7 @@ fun TvGenreScreen(
     // 离开时站在哪张卡上就还给那张卡（落点由卡片在组合时交出 requester），
     // 没有记录（首次进入 / 换了筛选）才退回第一张。
     tvClaimFocusOnEnter(
-        tick = items.isNotEmpty(),
+        tick = spotReady,
         anchorsProvider = { listOfNotNull(stand.requester, firstCardFocus) }
     )
 
@@ -219,11 +240,13 @@ fun TvGenreScreen(
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(items, key = { "tv_g_${it.id}" }, contentType = { "poster" }) { item ->
+                itemsIndexed(items, key = { _, it -> "tv_g_${it.id}" }, contentType = { _, _ -> "poster" }) { index, item ->
                     val ownFocus = remember(item.id) { FocusRequester() }
                     TvPosterCard(
                         item = item,
                         onClick = { onDetail(item.id) },
+                        // 每行首格放大时锚住左缘，否则越过左边距与首页各行的首列对不齐
+                        anchorStart = index % tvGridColumns() == 0,
                         // 首卡同时是这一页的入口锚点，落点记账复用它自己的 requester：
                         // 同一节点挂第二个 requester 在 1.6.8 上不可靠。
                         modifier = ReturnSpot.cardStand(
@@ -283,37 +306,43 @@ fun TvCategoryScreen(
     val categories = vm.homeCategories
     val currentName = categories.firstOrNull { it.typeId == currentTypeId }?.typeName ?: typeName
 
-    var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
-    var page by remember { mutableIntStateOf(1) }
-    var loading by remember { mutableStateOf(true) }
-    var loadingMore by remember { mutableStateOf(false) }
-    var exhausted by remember { mutableStateOf(false) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var retryTick by remember { mutableIntStateOf(0) }
+    /**
+     * 数据、页码、到底/失败状态全部住在 ViewModel 的分类缓存里（browseItems 那组接口）。
+     *
+     * 原来这些数据记在本页的 remember 里，而进详情页会把这一页的子树整个销毁重建 ——
+     * 返回即重新请求源站，同一部影片还会被分配一个新的内存负 id，于是落点记录对不上、
+     * 焦点退回首卡、滚动位置也被 clamp。改成缓存复用之后：只有第一次进入（以及刷新 /
+     * 换线路）请求第 1 页，往下滚请求下一页，返回上层一个请求都不发。
+     */
+    val items = vm.browseItems(currentTypeId)
+    val loadError = vm.browseItemsError(currentTypeId)
+    val exhausted = vm.browseItemsEnded(currentTypeId)
+    val loadingMore = items.isNotEmpty() && vm.browseItemsLoading(currentTypeId)
+    // 来源/线路还没选中（冷启动直接进这一页）时不该画骨架屏，否则永远转圈
+    val browseReady = vm.homeSourceId != null && vm.homeSiteKey != null
+    val firstLoading = items.isEmpty() && loadError == null && !exhausted && browseReady
 
     // 每个分类各记一份位置与落点：页标识直接带上 typeId
     val pageKey = "tv_cat/$currentTypeId"
+    // 记录要在建 gridState 之前读出来：数据还没补齐时 LazyGrid 会把位置 clamp 到末尾，
+    // 并通过 gridState 的写回把原记录改小，之后就再也回不到离开时那一屏。
+    val savedScroll = remember(pageKey) { ReturnSpot.scrollOf(pageKey) }
     val gridState = ReturnSpot.gridState(pageKey)
     val firstFocus = remember { FocusRequester() }
     val stand = remember { StandTarget() }
     val firstId = items.firstOrNull()?.id
 
-    LaunchedEffect(currentTypeId, retryTick) {
-        loading = true
-        loadError = null
-        exhausted = false
-        items = emptyList()
-        page = 1
-        try {
-            items = vm.tvBoxCategoryPage(currentTypeId, 1)
-            page = 2
-        } catch (e: CancellationException) {
-            // 切分类 / 退出页面时的取消不是「加载失败」
-            throw e
-        } catch (e: Exception) {
-            loadError = e.message ?: "网络或接口异常"
-        }
-        loading = false
+    LaunchedEffect(currentTypeId, vm.homeRefreshEpoch) {
+        vm.ensureBrowsePage(currentTypeId)
+    }
+
+    // 离开时那一屏的位置只在「本页第一次拿到数据」时补一次；
+    // 之后追加下一页不能再滚回去，否则用户会被拽回上一页。
+    var scrollRestored by remember(pageKey) { mutableStateOf(false) }
+    LaunchedEffect(pageKey, items.size) {
+        if (scrollRestored || items.isEmpty()) return@LaunchedEffect
+        savedScroll?.let { runCatching { gridState.scrollToItem(it.index, it.offset) } }
+        scrollRestored = true
     }
 
     // 首屏数据到位后把焦点交给卡片，遥控器立刻可用；离开时站在哪张卡就还给哪张
@@ -330,43 +359,13 @@ fun TvCategoryScreen(
             total > 0 && last >= total - 12
         }
     }
-    // 翻页触发条件**不能写进 LaunchedEffect 的 key**：
-    // 追加一页会让它立刻变 false，key 变化把自己的协程取消掉；被取消的请求只要被当成
-    // 「空结果」或「无新增」，就会误判到底 —— 表现就是每个分类只加载两页（80 条）。
-    // 这里用一个不随数据变化的长期协程盯住条件，请求不会被自己重启掉。
+    // 请求发在 viewModelScope 里，本页只负责「盯着条件喊一嗓子」：
+    // 条件翻转会把自己的协程取消掉、被取消的请求又被当成「没有下一页」，
+    // 那正是之前「每个分类只加载两页」的成因。VM 侧对同分类的并发请求有 loading 门禁。
     LaunchedEffect(currentTypeId) {
-        snapshotFlow { shouldLoadMore.value && !loading && !exhausted && loadError == null }
-            .collect { canLoad ->
-                if (!canLoad) return@collect
-                while (shouldLoadMore.value && !exhausted && loadError == null) {
-                    loadingMore = true
-                    val more = try {
-                        vm.tvBoxCategoryPage(currentTypeId, page)
-                    } catch (e: CancellationException) {
-                        loadingMore = false
-                        throw e
-                    } catch (e: Exception) {
-                        loadError = e.message ?: "网络或接口异常"
-                        loadingMore = false
-                        break
-                    }
-                    loadingMore = false
-                    if (more.isEmpty()) {
-                        exhausted = true
-                        break
-                    }
-                    val seen = items.mapTo(HashSet(items.size)) { it.id }
-                    val fresh = more.filter { seen.add(it.id) }
-                    // 源站忽略 page 参数时会反复返回同一页：没有新增就当到底，
-                    // 否则 page 一直加、列表永远停在原地。
-                    if (fresh.isEmpty()) {
-                        exhausted = true
-                        break
-                    }
-                    items = items + fresh
-                    page += 1
-                }
-            }
+        snapshotFlow { shouldLoadMore.value }.collect { nearEnd ->
+            if (nearEnd) vm.loadMoreBrowsePage(currentTypeId)
+        }
     }
 
     Column(
@@ -386,7 +385,7 @@ fun TvCategoryScreen(
                 style = MaterialTheme.typography.headlineMedium
             )
             Spacer(Modifier.width(16.dp))
-            if (!loading) {
+            if (!firstLoading) {
                 Text(
                     "${items.size} 个条目",
                     color = TvText.Meta,
@@ -417,7 +416,7 @@ fun TvCategoryScreen(
         }
 
         when {
-            loading -> LazyVerticalGrid(
+            firstLoading -> LazyVerticalGrid(
                 columns = GridCells.Fixed(tvGridColumns()),
                 contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = 14.dp, bottom = 32.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -431,7 +430,7 @@ fun TvCategoryScreen(
                 text = if (loadError != null) "加载失败：$loadError" else "这个分类下还没有内容",
                 hint = if (loadError != null) null else "换个线路，或先在来源里同步媒体库",
                 action = if (loadError != null) {
-                    { TvFilterChip(text = "重试", selected = false, onClick = { retryTick++ }) }
+                    { TvFilterChip(text = "重试", selected = false, onClick = { vm.retryBrowsePage(currentTypeId) }) }
                 } else null
             )
 
@@ -443,12 +442,14 @@ fun TvCategoryScreen(
                 verticalArrangement = Arrangement.spacedBy(20.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(items, key = { "tv_cat_${it.id}" }, contentType = { "poster" }) { item ->
+                itemsIndexed(items, key = { _, it -> "tv_cat_${it.id}" }, contentType = { _, _ -> "poster" }) { index, item ->
                     val ownFocus = remember(item.id) { FocusRequester() }
                     TvPosterCard(
                         item = item,
                         onClick = { onDetail(item.id) },
                         fillCell = true,
+                        // 每行首格放大时锚住左缘，否则越过左边距与首页各行的首列对不齐
+                        anchorStart = index % tvGridColumns() == 0,
                         // 首卡就是这一页的入口锚点，落点记账复用它的 requester，不再挂第二个
                         modifier = ReturnSpot.cardStand(
                             pageKey = pageKey,
@@ -480,7 +481,7 @@ fun TvCategoryScreen(
                             loadError != null -> TvFilterChip(
                                 text = "加载失败，按 OK 重试",
                                 selected = false,
-                                onClick = { loadError = null }
+                                onClick = { vm.retryBrowsePage(currentTypeId) }
                             )
                             exhausted -> Text(
                                 "没有更多了 · 共 ${items.size} 部",

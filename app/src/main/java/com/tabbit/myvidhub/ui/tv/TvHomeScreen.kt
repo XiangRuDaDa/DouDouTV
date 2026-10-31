@@ -1143,12 +1143,14 @@ private fun TvPosterRow(
         contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        items(items, key = { "tv_${it.id}" }, contentType = { "poster" }) { item ->
+        itemsIndexed(items, key = { _, it -> "tv_${it.id}" }, contentType = { _, _ -> "poster" }) { index, item ->
             val cardFocus = remember(item.id) { FocusRequester() }
             TvPosterCard(
                 item = item,
                 onClick = { onDetail(item.id) },
                 width = cardWidth,
+                // 行首卡放大时锚住左缘，否则它会越过 40dp 左边距，跟下面各行错位
+                anchorStart = index == 0,
                 modifier = ReturnSpot.cardStand(TvHomeKey, rowKey, item.id, stand, cardFocus)
             )
         }
@@ -1172,7 +1174,7 @@ private fun TvContinueRow(
         contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        items(items, key = { "continue_${it.id}" }, contentType = { "continue" }) { item ->
+        itemsIndexed(items, key = { _, it -> "continue_${it.id}" }, contentType = { _, _ -> "continue" }) { index, item ->
             val progress = if (item.durationMs > 0L) (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f) else 0f
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
@@ -1213,6 +1215,11 @@ private fun TvContinueRow(
                     .graphicsLayer {
                         scaleX = scale.value
                         scaleY = scale.value
+                        // 首张横卡放大 8% 会往左吃掉 12.8dp，跟上面各行首卡错位 ——
+                        // 用平移把这一半增量补回去（和 TvPosterCard 同一套做法）
+                        if (index == 0) {
+                            translationX = (scale.value - 1f) * size.width / 2f
+                        }
                         shape = cardShape
                         clip = true
                     }

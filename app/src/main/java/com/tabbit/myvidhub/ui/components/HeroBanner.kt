@@ -36,11 +36,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -106,45 +104,43 @@ fun HeroBanner(
             Box(Modifier.fillMaxSize()) {
                 val art = item.backdropUrl.ifBlank { item.posterUrl }
                 if (art.isNotBlank()) {
+                    // 直接 Crop：手机这一格接近正方（宽 × 392dp），竖版海报裁掉的是
+                    // 海报自身的上下留白，主体还在画面里。
+                    // 之前整块 blur 是因为误把它当电视端 16:9 大图处理 —— 源站的
+                    // backdropUrl 填的本来就是竖海报（vod.pic），于是每张都被糊成毛玻璃。
                     AsyncImage(
                         model = art,
                         contentDescription = item.title,
                         contentScale = ContentScale.Crop,
-                        // 轮播数据来自源站首页，多数只给竖版海报：放大后铺满 + 模糊，
-                        // 避免竖图硬拉伸的细节抢文字的注意力（Android 11 及以下自动忽略模糊）
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .graphicsLayer {
-                                scaleX = 1.12f
-                                scaleY = 1.12f
-                            }
-                            .blur(22.dp)
+                        modifier = Modifier.fillMaxSize()
                     )
                 } else {
                     Box(Modifier.fillMaxSize().background(AppColors.Surface))
                 }
 
                 // 纵向遮罩：顶部只轻微压暗保住白字，底部平滑融入页面底色。
+                // 图恢复清晰后这里要跟着收一档，否则压暗叠在实图上就是「蒙了一层灰膜」。
                 Box(
                     Modifier
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                0f to Color.Black.copy(alpha = 0.10f),
-                                0.42f to Color.Black.copy(alpha = 0.28f),
-                                0.78f to Color.Black.copy(alpha = 0.58f),
+                                0f to Color.Black.copy(alpha = 0.06f),
+                                0.42f to Color.Black.copy(alpha = 0.16f),
+                                0.78f to Color.Black.copy(alpha = 0.40f),
                                 1f to AppColors.Bg
                             )
                         )
                 )
-                // 横向遮罩：只在左侧给标题留一层薄纱，右侧完全放开，避免压死画面
+                // 横向遮罩：只在左侧给标题留一层薄纱，右侧完全放开，避免压死画面。
+                // 标题与按钮都是居中排版，左侧这条纱不需要承担可读性，数值越低越透。
                 Box(
                     Modifier
                         .fillMaxSize()
                         .background(
                             Brush.horizontalGradient(
-                                0f to AppColors.Bg.copy(alpha = 0.62f),
-                                0.45f to AppColors.Bg.copy(alpha = 0.14f),
+                                0f to AppColors.Bg.copy(alpha = 0.40f),
+                                0.45f to AppColors.Bg.copy(alpha = 0.10f),
                                 1f to Color.Transparent
                             )
                         )

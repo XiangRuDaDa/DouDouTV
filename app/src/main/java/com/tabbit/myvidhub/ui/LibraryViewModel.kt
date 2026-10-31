@@ -2,6 +2,8 @@ package com.tabbit.myvidhub.ui
 
 import android.app.Application
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -236,6 +238,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         _categoryVisibleCount.clear()
         _categoryLoadedPage.clear()
         _categoryEnded.clear()
+        // 「查看全部」的分页缓存同源同线路：换线路/刷新后旧内容就不该再出现在列表里
+        _browseCache.clear()
         categoryError = null
         homeRefreshEpoch++
     }
@@ -365,6 +369,112 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         val site = activeSite ?: return emptyList()
         val src = repo.getSource(sourceId) ?: return emptyList()
         return repo.tvBoxCategory(src, site, typeId, page)
+    }
+
+    // ---------- 分类「查看全部」分页缓存（TV 端） ----------
+
+    /**
+     * 一条分类浏览游标：已加载的条目 + 翻到第几页。
+     *
+     * 放在 ViewModel 而不是页面里，是因为 TV 端进详情会把这一页的子树整个销毁重建：
+     * 页面自己记的数据随组合一起没了，返回就只能重新请求 —— 而源站每一页返回的同一条影片
+     * 会拿到一个新的内存负 id（MediaRepository.browseEntity），旧的落点记录再也对不上，
+     * 焦点与滚动位置双双失效。数据留在这儿，id 就留着，返回时原样恢复。
+     */
+    private class BrowsePaging {
+        val items = mutableStateListOf<MediaEntity>()
+        var loadedPage by mutableIntStateOf(0)
+        var loading by mutableStateOf(false)
+        var ended by mutableStateOf(false)
+        var error by mutableStateOf<String?>(null)
+    }
+
+    private val _browseCache = mutableStateMapOf<String, BrowsePaging>()
+
+    /** 缓存按「来源 + 线路 + 分类」分键：换任何一个维度都是另一份内容 */
+    private fun browseKey(typeId: String): String? {
+        val sourceId = homeSourceId ?: return null
+        val siteKey = homeSiteKey ?: return null
+        return "$sourceId|$siteKey|$typeId"
+    }
+
+    private fun browseState(typeId: String): BrowsePaging? =
+        browseKey(typeId)?.let { _browseCache[it] }
+
+    /** 已加载到内存的全部条目（页面直接渲染这个，不需要自己再攒） */
+    fun browseItems(typeId: String): List<MediaEntity> = browseState(typeId)?.items.orEmpty()
+
+    fun browseItemsLoading(typeId: String): Boolean = browseState(typeId)?.loading ?: false
+
+    fun browseItemsEnded(typeId: String): Boolean = browseState(typeId)?.ended ?: false
+
+    fun browseItemsError(typeId: String): String? = browseState(typeId)?.error
+
+    /**
+     * 确保第 1 页在内存里：已经有数据就直接返回，一个请求都不发。
+     * 只有「从没拉过 / 刚被刷新清掉」才会真的去请求第 1 页。
+     */
+    fun ensureBrowsePage(typeId: String) {
+        val key = browseKey(typeId) ?: return
+        val st = _browseCache.getOrPut(key) { BrowsePaging() }
+        if (st.loadedPage > 0 || st.loading) return
+        loadBrowsePage(typeId, st, 1)
+    }
+
+    /** 触底翻页 */
+    fun loadMoreBrowsePage(typeId: String) {
+        val st = browseState(typeId) ?: return
+        if (st.loading || st.ended || st.error != null || st.loadedPage == 0) return
+        loadBrowsePage(typeId, st, st.loadedPage + 1)
+    }
+
+    /** 失败后重试：已经拿到过条目就接着往下翻，否则重新拉第 1 页 */
+    fun retryBrowsePage(typeId: String) {
+        val st = browseState(typeId) ?: return
+        if (st.loading) return
+        st.error = null
+        loadBrowsePage(typeId, st, if (st.loadedPage > 0) st.loadedPage + 1 else 1)
+    }
+
+    private fun loadBrowsePage(typeId: String, st: BrowsePaging, page: Int) {
+        val sourceId = homeSourceId ?: return
+        val site = activeSite ?: run {
+            // 线路还没选中（冷启动直接进这一页）：和改造前一样按「没有内容」收口，
+            // 不能把 loading 留着，否则页面永久转圈
+            st.ended = true
+            return
+        }
+        viewModelScope.launch {
+            st.loading = true
+            val src = repo.getSource(sourceId)
+            if (src == null) {
+                st.error = "来源已不可用"
+                st.loading = false
+                return@launch
+            }
+            val more = runCatching { repo.tvBoxCategory(src, site, typeId, page) }
+                .getOrElse {
+                    st.error = it.message ?: "网络或接口异常"
+                    st.loading = false
+                    return@launch
+                }
+            when {
+                // 按 remoteId 而不是内存 id 去重：源站翻页会把上一页尾部的条目再带一遍
+                more.isEmpty() -> st.ended = true
+                else -> {
+                    val seen = st.items.mapTo(HashSet(st.items.size)) { it.remoteId }
+                    val fresh = more.filter { seen.add(it.remoteId) }
+                    if (fresh.isEmpty()) {
+                        // 源站忽略 page 参数、反复返回同一页：没有新增就当到底
+                        st.ended = true
+                    } else {
+                        st.items.addAll(fresh)
+                        st.loadedPage = page
+                    }
+                }
+            }
+            st.loading = false
+        }
     }
 
     /** 点选站点分类：加载该分类的内容并展开为分区（对应 TVBox 的 categoryContent） */
