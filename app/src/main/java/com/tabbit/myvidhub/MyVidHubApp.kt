@@ -6,6 +6,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.db.AppDatabase
+import com.tabbit.myvidhub.data.image.PicHeaderInterceptor
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 
 class MyVidHubApp : Application(), ImageLoaderFactory {
@@ -46,11 +47,15 @@ class MyVidHubApp : Application(), ImageLoaderFactory {
     /**
      * Coil 全局 ImageLoader：开启淡入，
      * 让「先出占位、再到清晰图」的切换更平滑，不闪白也不闪黑。
+     *
+     * [PicHeaderInterceptor] 负责拆 TVBox 海报直链末尾的 @Referer= / @User-Agent= 后缀，
+     * 否则豆瓣图床会把整串当路径并返回 418（表现为大量卡片没有封面）。
      */
     override fun newImageLoader(): ImageLoader =
         ImageLoader.Builder(this)
             .crossfade(true)
             .crossfade(220)
+            .components { add(PicHeaderInterceptor()) }
             .build()
 
     companion object {
