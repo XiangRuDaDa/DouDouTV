@@ -210,9 +210,9 @@ object SpiderLoader {
         // 记在调用之前：Init 超时抛异常时这个时刻也要留下，恢复路径靠它算解密 dex 的新鲜度
         initStartedAt[key] = initStarted
 
-        // 必须在 Init 之前把 9978 占上：壳 native 初始化会从 8964 起逐个端口探测本地代理，
-        // 扫到 39009 还没找到才回退到默认 9978（实测 24 秒，就是冷启动卡的那段）。
-        // 端口先监听，探测在 9978 即命中；命中结果与壳自身的兜底一致，不改变后续行为。
+        // 必须在 Init 之前把 8964/9978 占上：壳 native 初始化会从 8964 起逐个端口递增探测
+        // 本地代理，一直扫到 9978 才结束（实测 1014 个端口 × 23ms ≈ 24 秒，就是冷启动卡的那段）。
+        // 8964 有监听时第一步探测即命中，扫描整段被跳过。
         val localProxyUp = LocalProxyServer.start()
 
         val initClazz = runCatching { stubLoader.loadClass("com.github.catvod.spider.Init") }

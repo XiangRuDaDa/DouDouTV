@@ -134,6 +134,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     var homeCategories by mutableStateOf<List<CatVodResultParser.ClassItem>>(emptyList())
         private set
 
+    /**
+     * 当前线路 homeContent 的条目，**保持源站返回顺序**。
+     * 首页轮播取它的前 N 条：源站推荐顺序才有意义，库里按 addedAt 排的是同步批次顺序。
+     * 切换线路 / 刷新时更新，切走时清空，回退到本地库的兜底逻辑。
+     */
+    var siteHomeItems by mutableStateOf<List<MediaEntity>>(emptyList())
+        private set
+
     /** 当前展开的站点分类 typeId；null = 未选择分类（首页按原来的动态分区展示） */
     var activeCategoryId by mutableStateOf<String?>(null)
         private set
@@ -239,23 +247,28 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         homeSourceId = sourceId
-        homeSiteKey = null
+        // 线路按来源各自记忆：切走再切回时恢复该来源上次选的线路（空 = 全部站点）
+        homeSiteKey = sourceId?.let { Prefs.homeSiteKeyOf(it).takeIf { key -> key.isNotBlank() } }
         homeSitesError = null
         homeCategories = emptyList()
+        siteHomeItems = emptyList()
         activeCategoryId = null
         clearCategoryState()
         activeSite = null
         Prefs.homeSourceId = sourceId ?: -1L
-        Prefs.homeSiteKey = ""
+        Prefs.homeSiteKey = homeSiteKey.orEmpty()
         if (sourceId != null) loadHomeSites(sourceId)
     }
 
     fun selectHomeSite(siteKey: String?, site: TvBoxSite? = null) {
         homeSiteKey = siteKey
         Prefs.homeSiteKey = siteKey.orEmpty()
+        // 记到来源名下：切到别的来源再切回来，恢复这条线路
+        homeSourceId?.let { Prefs.setHomeSiteKeyOf(it, siteKey.orEmpty()) }
         homeSitesError = null
         // 切线路后重置分类状态
         homeCategories = emptyList()
+        siteHomeItems = emptyList()
         activeCategoryId = null
         clearCategoryState()
         activeSite = site
@@ -266,9 +279,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             // 每次切线路都拉一次首页：取 homeContent 的 class 分类名
             // 分类内容（categoryContent）按需懒加载，每个分类的 section 在 UI 首次可见时触发
             try {
-                val result = repo.syncTvBoxSite(src, s)
-                homeCategories = result.categories
+                val sync = repo.syncTvBoxSite(src, s)
+                // 请求期间用户可能又切了线路：旧结果不能盖掉新线路的分类/轮播
+                if (homeSiteKey != s.key) return@launch
+                homeCategories = sync.result.categories
+                siteHomeItems = sync.entities.filter {
+                    it.posterUrl.isNotBlank() || it.backdropUrl.isNotBlank()
+                }
             } catch (e: Exception) {
+                if (homeSiteKey != s.key) return@launch
                 homeSitesError = "线路「${s.name}」加载失败：${e.message ?: "网络或接口异常"}"
             }
         }
@@ -281,6 +300,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun ensureCategoryPreview(typeId: String) {
         if (_categoryVods.containsKey(typeId)) return
+        // 同一分类可能被「预载」和「行进入可见区」两处同时触发，请求中直接返回
+        if (_categoryPreviewLoading[typeId] == true) return
         val sourceId = homeSourceId ?: return
         val site = activeSite ?: return
         viewModelScope.launch {
@@ -388,6 +409,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             val restored = homeSiteKey?.let { key -> sites.firstOrNull { it.key == key } }
             when {
                 restored != null && activeSite == null -> selectHomeSite(restored.key, restored)
+                // 记录的线路在配置里已不存在（站点被删/改 key）：清掉，否则首页会按不存在的 key
+                // 过滤成空白
+                homeSiteKey != null && restored == null && sites.isNotEmpty() ->
+                    selectHomeSite(null, null)
                 // 只有一条线路的来源：自动选中，避免首页空白又没按钮可点。
                 // 多线路（如 38 个站点的配置）保持「全部站点」聚合视图，由用户自己挑线路。
                 homeSiteKey == null && homeSourceId == sourceId && sites.size == 1 ->
@@ -676,11 +701,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 val site = if (src.kind == SourceKind.TVBOX && homeSiteKey != null) activeSite else null
                 val added = if (site != null) {
                     scanMessage = "正在刷新「${site.name}」…"
-                    val result = repo.syncTvBoxSite(src, site)
+                    val sync = repo.syncTvBoxSite(src, site)
                     // 分类行内容不落库，刷新时要连带重拉：先清缓存再自增轮次触发 UI 重新 ensure
                     clearCategoryState()
-                    homeCategories = result.categories
-                    result.vods.size
+                    homeCategories = sync.result.categories
+                    siteHomeItems = sync.entities.filter {
+                        it.posterUrl.isNotBlank() || it.backdropUrl.isNotBlank()
+                    }
+                    sync.result.vods.size
                 } else {
                     scanMessage = "正在刷新 ${src.name}…"
                     runSync(src)

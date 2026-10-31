@@ -138,11 +138,19 @@ fun HomeScreen(
         vm.filterForHome(continueList)
     }
 
-    // 优先用有背景图的条目做精选，不足时用有海报的补
-    val heroItems = remember(filteredFeatured, filteredLibrary) {
-        val primary = filteredFeatured.filter { it.backdropUrl.isNotBlank() }
-        if (primary.size >= 3) primary.take(6)
-        else (primary + filteredLibrary.filter { it.posterUrl.isNotBlank() }).distinctBy { it.id }.take(6)
+    // 轮播取当前线路 homeContent 的前 6 条（源站推荐顺序），来源与线路一致；
+    // 没拉到线路数据时回退精选/本地库
+    val heroItems = remember(filteredFeatured, filteredLibrary, vm.siteHomeItems) {
+        val fromSite = vm.siteHomeItems
+            .filter { it.posterUrl.isNotBlank() || it.backdropUrl.isNotBlank() }
+            .distinctBy { it.id }
+        if (fromSite.isNotEmpty()) {
+            fromSite.take(6)
+        } else {
+            val primary = filteredFeatured.filter { it.backdropUrl.isNotBlank() }
+            if (primary.size >= 3) primary.take(6)
+            else (primary + filteredLibrary.filter { it.posterUrl.isNotBlank() }).distinctBy { it.id }.take(6)
+        }
     }
 
     // 来源/站点（线路）选择器数据：选了 TVBox 源且站点列表已拉取 → 顶栏动态显示「线路」按钮
@@ -241,15 +249,18 @@ fun HomeScreen(
             // ---------- TVBox 线路动态分类 section：每个分类纵向一个 section，跟 Emby 动态分区风格一致 ----------
             val homeCategories = vm.homeCategories
             if (homeCategories.isNotEmpty()) {
-                homeCategories.take(7).forEach { cat ->
+                homeCategories.take(7).forEachIndexed { index, cat ->
                     val catItems = vm.categoryVods[cat.typeId].orEmpty()
                     val isLoading = vm.categoryPreviewLoading[cat.typeId] ?: false
-                    // 首次进入 composition 时懒加载前 LAZY_TAKE=10 条（不阻塞）
-                    item(key = "cat_ensure_${cat.typeId}") {
-                        // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行会一直是旧缓存
-                        LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
+                    // 首屏只预载前 2 个分类，其余等 section 真正滚进可见区再拉（见下面的 item）
+                    if (index < 2) {
+                        // 首次进入 composition 时懒加载前 LAZY_TAKE=10 条（不阻塞）
+                        item(key = "cat_ensure_${cat.typeId}") {
+                            // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行会一直是旧缓存
+                            LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
+                        }
                     }
-                    item {
+                    item(key = "cat_title_${cat.typeId}") {
                         SectionTitle(
                             cat.typeName,
                             trailing = {
@@ -258,7 +269,9 @@ fun HomeScreen(
                             }
                         )
                     }
-                    item {
+                    item(key = "cat_row_${cat.typeId}") {
+                        // 这一行滚进可见区才触发加载（首屏 2 个分类已由上面的 ensure 预载）
+                        LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
                         LazyRow(
                             state = ReturnSpot.listState("$PhoneHomeKey/cat_${cat.typeId}"),
                             contentPadding = PaddingValues(horizontal = 18.dp),
@@ -1421,8 +1434,11 @@ private fun HintText(text: String) {
 /**
  * TVBox 线路分类全量浏览页。
  * 入口：首页 TVBox 动态分类 section 的「查看全部」MoreLink。
- * 分页策略：先拉 page=1（最多 72 条/页），到底后点「加载更多」继续 page++，直到 Guard 返回空 list 停止。
- * 布局跟 GenreScreen 保持一致（顶栏返回 + 3 列网格 + 加载更多）。
+ * 分页策略：先拉 page=1（最多 72 条/页），到底后点「加载更多」继续 page++；
+ * 源站若忽略 page 参数反复返回同一页，去重后没有新增即判定到底，避免「点加载更多永远不涨」。
+ *
+ * 顶部带当前线路的分类切换（来自 homeCategories）：进页后不用退回首页就能换分类，
+ * 分类内容不落库，换分类即重新拉第一页。
  */
 @Composable
 fun TvBoxCategoryScreen(
@@ -1440,22 +1456,64 @@ fun TvBoxCategoryScreen(
     }
     val hSpacing = 9.dp
 
-    var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+    // 进页时带着首页的那个分类，之后在页内原地切换
+    var currentTypeId by remember(typeId) { mutableStateOf(typeId) }
+    val categories = vm.homeCategories
+    val currentName = categories.firstOrNull { it.typeId == currentTypeId }?.typeName ?: typeName
+
+    var vods by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
     var page by remember { mutableIntStateOf(1) }
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     var exhausted by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var retryTick by remember { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
-    val gridState = ReturnSpot.listState("phone_cat_$typeId")
+    // 每个分类各记一份滚动位置
+    val gridState = ReturnSpot.listState("phone_cat_$currentTypeId")
 
-    LaunchedEffect(typeId) {
+    LaunchedEffect(currentTypeId, retryTick) {
         loading = true
-        page = 1
+        loadingMore = false
+        loadError = null
         exhausted = false
-        val first = runCatching { vm.tvBoxCategoryPage(typeId, page) }.getOrDefault(emptyList())
-        items = first
+        vods = emptyList()
+        page = 1
+        val result = runCatching { vm.tvBoxCategoryPage(currentTypeId, 1) }
+        result.onFailure { loadError = it.message ?: "网络或接口异常" }
+        vods = result.getOrDefault(emptyList())
         page = 2
         loading = false
+    }
+
+    val loadMore: () -> Unit = {
+        if (!loadingMore) {
+            loadingMore = true
+            val reqTypeId = currentTypeId
+            scope.launch {
+                val result = runCatching { vm.tvBoxCategoryPage(reqTypeId, page) }
+                if (reqTypeId != currentTypeId) {
+                    loadingMore = false
+                    return@launch
+                }
+                result.onFailure { loadError = it.message ?: "网络或接口异常" }
+                val more = result.getOrDefault(emptyList())
+                if (more.isEmpty()) {
+                    exhausted = true
+                } else {
+                    val seen = vods.mapTo(HashSet(vods.size)) { it.id }
+                    val fresh = more.filter { seen.add(it.id) }
+                    // 源站忽略 page 时每页都相同：没有新增就当到底，
+                    // 否则 page 一直加、列表永远停在原地（用户看到的就是「只有 40 部」）。
+                    if (fresh.isEmpty()) exhausted = true
+                    else {
+                        vods = vods + fresh
+                        page += 1
+                    }
+                }
+                loadingMore = false
+            }
+        }
     }
 
     // 同 GenreScreen：根容器不滚动，统一背景直接挂在它上，替掉原来那条写死的顶部渐变
@@ -1479,11 +1537,45 @@ fun TvBoxCategoryScreen(
                 )
             }
             Text(
-                typeName,
+                currentName,
                 style = MaterialTheme.typography.titleLarge,
                 color = AppColors.TextPrimary,
                 fontWeight = FontWeight.Bold
             )
+        }
+
+        // ---------- 分类切换（当前线路 homeContent 的 class 数组） ----------
+        if (categories.size > 1) {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp, bottom = 4.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(categories, key = { "phone_cat_chip_${it.typeId}" }) { cat ->
+                    FilterChip(
+                        selected = cat.typeId == currentTypeId,
+                        onClick = {
+                            if (cat.typeId != currentTypeId) currentTypeId = cat.typeId
+                        },
+                        label = {
+                            Text(
+                                cat.typeName,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AppColors.Brand,
+                            selectedLabelColor = Color.White,
+                            containerColor = AppColors.SurfaceHi,
+                            labelColor = AppColors.TextSecondary
+                        )
+                    )
+                }
+            }
         }
 
         // ---------- 网格 ----------
@@ -1502,18 +1594,33 @@ fun TvBoxCategoryScreen(
                 }
             }
 
-            items.isEmpty() -> Text(
-                "该分类下暂无内容",
-                style = MaterialTheme.typography.bodyMedium,
-                color = AppColors.TextTertiary,
-                modifier = Modifier.fillMaxWidth().padding(36.dp)
-            )
+            vods.isEmpty() -> Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(36.dp)
+            ) {
+                Text(
+                    text = if (loadError != null) "加载失败：$loadError" else "该分类下暂无内容",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = AppColors.TextTertiary
+                )
+                if (loadError != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = { retryTick++ },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = AppColors.SurfaceHi,
+                            contentColor = AppColors.TextPrimary
+                        )
+                    ) { Text("重试") }
+                }
+            }
 
             else -> LazyColumn(
                 state = gridState,
                 contentPadding = PaddingValues(bottom = 28.dp)
             ) {
-                items(items.chunked(columns)) { row ->
+                items(vods.chunked(columns)) { row ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1529,36 +1636,39 @@ fun TvBoxCategoryScreen(
                     }
                 }
 
-                // 分页加载更多（Guard 每页默认 72 条，到底了才停）
-                if (!exhausted) {
-                    item {
-                        Box(
-                            Modifier.fillMaxWidth().padding(top = 12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (loadingMore) CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
-                            else Button(
-                                onClick = {
-                                    if (loadingMore) return@Button
-                                    loadingMore = true
-                                    scope.launch {
-                                        val more = runCatching { vm.tvBoxCategoryPage(typeId, page) }
-                                            .getOrDefault(emptyList())
-                                        if (more.isEmpty()) exhausted = true
-                                        else {
-                                            items = items + more.filterNot { next -> items.any { it.id == next.id } }
-                                            page++
-                                        }
-                                        loadingMore = false
-                                    }
-                                },
+                // 分页状态行：加载中 / 失败重试 / 加载更多 / 已到底
+                item {
+                    Box(
+                        Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        when {
+                            loadingMore -> CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = AppColors.Brand
+                            )
+
+                            loadError != null -> Button(
+                                onClick = { loadError = null; loadMore() },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = AppColors.SurfaceHi,
                                     contentColor = AppColors.TextPrimary
                                 )
-                            ) {
-                                Text("加载更多")
-                            }
+                            ) { Text("加载失败，点击重试") }
+
+                            exhausted -> Text(
+                                "没有更多了 · 共 ${vods.size} 部",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AppColors.TextTertiary
+                            )
+
+                            else -> Button(
+                                onClick = loadMore,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AppColors.SurfaceHi,
+                                    contentColor = AppColors.TextPrimary
+                                )
+                            ) { Text("加载更多") }
                         }
                     }
                 }

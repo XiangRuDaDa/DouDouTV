@@ -585,9 +585,14 @@ fun TvMenuRow(
     }
 }
 
-/** 空状态提示 —— 主文 headlineSmall，下面补一条更弱的 hint */
+/** 空状态提示 —— 主文 headlineSmall，下面补一条更弱的 hint；可选挂一个可聚焦操作（如重试） */
 @Composable
-fun TvEmptyState(text: String, hint: String? = null, modifier: Modifier = Modifier) {
+fun TvEmptyState(
+    text: String,
+    hint: String? = null,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null
+) {
     Column(
         modifier
             .fillMaxSize()
@@ -608,6 +613,10 @@ fun TvEmptyState(text: String, hint: String? = null, modifier: Modifier = Modifi
                 color = TvText.Meta,
                 style = MaterialTheme.typography.bodyMedium
             )
+        }
+        if (action != null) {
+            Spacer(Modifier.height(20.dp))
+            action()
         }
     }
 }

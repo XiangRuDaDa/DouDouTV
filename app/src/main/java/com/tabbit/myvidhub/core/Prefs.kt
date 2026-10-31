@@ -17,6 +17,7 @@ object Prefs {
     private const val KEY_TONE_PREFIX = "detail_tone_"
     private const val KEY_HOME_SOURCE_ID = "home_source_id"
     private const val KEY_HOME_SITE_KEY = "home_site_key"
+    private const val KEY_HOME_SITE_OF_SOURCE = "home_site_of_source_"
     private const val KEY_SOURCE_LAST_SYNC = "source_last_sync_"
     private const val KEY_SEARCH_HISTORY = "search_history_list"
     private const val KEY_PINYIN_VERSION = "pinyin_version"
@@ -135,6 +136,17 @@ object Prefs {
         set(value) {
             sp.edit().putString(KEY_HOME_SITE_KEY, value).apply()
         }
+
+    /**
+     * 某个来源上次选中的站点（线路）key；切走再切回时恢复，空字符串表示当时选的是「全部站点」。
+     * 和全局的 [homeSiteKey] 并存：全局值只对「当前来源」有意义，跨来源要靠这份按 id 的记录。
+     */
+    fun homeSiteKeyOf(sourceId: Long): String =
+        sp.getString(KEY_HOME_SITE_OF_SOURCE + sourceId, "").orEmpty()
+
+    fun setHomeSiteKeyOf(sourceId: Long, siteKey: String) {
+        sp.edit().putString(KEY_HOME_SITE_OF_SOURCE + sourceId, siteKey).apply()
+    }
 
     /**
      * 搜索历史：最多 10 条，新的排最前。

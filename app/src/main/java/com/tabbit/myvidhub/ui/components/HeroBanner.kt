@@ -36,9 +36,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -108,7 +110,15 @@ fun HeroBanner(
                         model = art,
                         contentDescription = item.title,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
+                        // 轮播数据来自源站首页，多数只给竖版海报：放大后铺满 + 模糊，
+                        // 避免竖图硬拉伸的细节抢文字的注意力（Android 11 及以下自动忽略模糊）
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = 1.12f
+                                scaleY = 1.12f
+                            }
+                            .blur(22.dp)
                     )
                 } else {
                     Box(Modifier.fillMaxSize().background(AppColors.Surface))
@@ -120,9 +130,9 @@ fun HeroBanner(
                         .fillMaxSize()
                         .background(
                             Brush.verticalGradient(
-                                0f to Color.Black.copy(alpha = 0.08f),
-                                0.42f to Color.Black.copy(alpha = 0.20f),
-                                0.78f to Color.Black.copy(alpha = 0.46f),
+                                0f to Color.Black.copy(alpha = 0.10f),
+                                0.42f to Color.Black.copy(alpha = 0.28f),
+                                0.78f to Color.Black.copy(alpha = 0.58f),
                                 1f to AppColors.Bg
                             )
                         )

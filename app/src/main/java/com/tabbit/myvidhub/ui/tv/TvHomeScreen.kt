@@ -149,13 +149,21 @@ fun TvHomeScreen(
     // 首页内容按选中的来源/站点（线路）过滤；未选择来源时原样返回
     val filteredLibrary = remember(library, vm.homeSourceId, vm.homeSiteKey) { vm.filterForHome(library) }
 
-    // 优先用有横版背景图的条目做精选，不足时用海报补位
-    val heroItems = remember(filteredLibrary) {
-        val primary = filteredLibrary.filter { it.backdropUrl.isNotBlank() }
-        if (primary.size >= 3) primary.take(5)
-        else (primary + filteredLibrary.filter { it.posterUrl.isNotBlank() })
+    // 轮播取当前线路 homeContent 的前 5 条（源站推荐顺序），来源与线路永远一致；
+    // 还没拉到线路数据（或选的是「全部站点」）时才回退本地库。
+    val heroItems = remember(filteredLibrary, vm.siteHomeItems) {
+        val fromSite = vm.siteHomeItems
+            .filter { it.posterUrl.isNotBlank() || it.backdropUrl.isNotBlank() }
             .distinctBy { it.id }
-            .take(5)
+        if (fromSite.isNotEmpty()) {
+            fromSite.take(5)
+        } else {
+            val primary = filteredLibrary.filter { it.backdropUrl.isNotBlank() }
+            if (primary.size >= 3) primary.take(5)
+            else (primary + filteredLibrary.filter { it.posterUrl.isNotBlank() })
+                .distinctBy { it.id }
+                .take(5)
+        }
     }
 
     // 继续观看：记录取全库（vm.continueWatching 直接读 positionMs>5s 的 MOVIE/EPISODE 行，
@@ -388,10 +396,14 @@ fun TvHomeScreen(
             // 电视端去掉了「分类 chip 横条」（单独占一行、把海报往下挤），
             // 分类内容直接以海报行呈现，遥控器上下就是换分类。
             val homeCategories = vm.homeCategories
-            homeCategories.take(7).forEach { cat ->
-                item(key = "cat_ensure_${cat.typeId}") {
-                    // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行仍是旧缓存
-                    LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
+            homeCategories.take(7).forEachIndexed { index, cat ->
+                // 首屏只预载前 2 个分类（视口内可见的那些），其余由 cat_row 在真正滚到可见时触发，
+                // 避免一进首页就把 7 个分类的请求全打出去、和首屏渲染抢网络和 CPU。
+                if (index < 2) {
+                    item(key = "cat_ensure_${cat.typeId}") {
+                        // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行仍是旧缓存
+                        LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
+                    }
                 }
                 item(key = "cat_title_${cat.typeId}") {
                     // 「查看全部」挂在标题右侧，和手机端 MoreLink 一致（有内容时才出现）
@@ -1039,6 +1051,8 @@ private fun TvCategoryPreview(
     stand: StandTarget,
     onDetail: (Long) -> Unit
 ) {
+    // 行真正进入组合（滚到可见）时才拉这一行：首屏只预载前 2 个分类，其余靠这里按需触发
+    LaunchedEffect(typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(typeId) }
     val items = vm.categoryVods[typeId].orEmpty()
     val loading = vm.categoryPreviewLoading[typeId] ?: false
     // 首屏只铺一行（10 条），横向滚到尾部再从内存/下一页追加，避免一次渲染 70+ 张海报

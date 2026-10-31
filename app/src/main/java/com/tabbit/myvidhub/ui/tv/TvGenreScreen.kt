@@ -255,6 +255,9 @@ fun TvGenreScreen(
  * 和手机端 TvBoxCategoryScreen 的分页语义一致：page 从 1 开始，
  * 滚到底部自动取下一页，返回空页即视为到底。
  * 差异只有排版：6 列大卡网格 + 首屏 shimmer 骨架（电视上不用转圈，避免整屏空转）。
+ *
+ * 顶部带整行分类切换（来自当前线路 homeContent 的 class 数组）：
+ * 查看全部后想换分类不用退回首页；分类内容不落库，换分类即重新拉第一页。
  */
 @Composable
 fun TvCategoryScreen(
@@ -264,24 +267,35 @@ fun TvCategoryScreen(
     onBack: () -> Unit,
     onDetail: (Long) -> Unit
 ) {
+    // 进页时带着首页的那个分类，之后在页内原地切换
+    var currentTypeId by remember(typeId) { mutableStateOf(typeId) }
+    val categories = vm.homeCategories
+    val currentName = categories.firstOrNull { it.typeId == currentTypeId }?.typeName ?: typeName
+
     var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
     var page by remember { mutableIntStateOf(1) }
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     var exhausted by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var retryTick by remember { mutableIntStateOf(0) }
 
     // 每个分类各记一份位置与落点：页标识直接带上 typeId
-    val pageKey = "tv_cat/$typeId"
+    val pageKey = "tv_cat/$currentTypeId"
     val gridState = ReturnSpot.gridState(pageKey)
     val firstFocus = remember { FocusRequester() }
     val stand = remember { StandTarget() }
     val firstId = items.firstOrNull()?.id
 
-    LaunchedEffect(typeId) {
+    LaunchedEffect(currentTypeId, retryTick) {
         loading = true
-        page = 1
+        loadError = null
         exhausted = false
-        items = runCatching { vm.tvBoxCategoryPage(typeId, page) }.getOrDefault(emptyList())
+        items = emptyList()
+        page = 1
+        val result = runCatching { vm.tvBoxCategoryPage(currentTypeId, 1) }
+        result.onFailure { loadError = it.message ?: "网络或接口异常" }
+        items = result.getOrDefault(emptyList())
         page = 2
         loading = false
     }
@@ -293,24 +307,43 @@ fun TvCategoryScreen(
     )
 
     // 接近底部自动翻页
-    val shouldLoadMore by remember {
+    val shouldLoadMore by remember(gridState) {
         derivedStateOf {
             val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             val total = gridState.layoutInfo.totalItemsCount
             total > 0 && last >= total - 12
         }
     }
-    LaunchedEffect(shouldLoadMore, loading, loadingMore, exhausted) {
-        if (!shouldLoadMore || loading || loadingMore || exhausted) return@LaunchedEffect
-        loadingMore = true
-        val more = runCatching { vm.tvBoxCategoryPage(typeId, page) }.getOrDefault(emptyList())
-        if (more.isEmpty()) {
-            exhausted = true
-        } else {
-            items = items + more.filterNot { next -> items.any { it.id == next.id } }
-            page += 1
+    // 注意：key 里不能放 loadingMore —— 协程内把它置 true 会重启自身、把在途请求取消，
+    // runCatching 会把取消当失败吞成空列表，于是「明明请求到了下一页却判定到底」。
+    LaunchedEffect(shouldLoadMore, loading, exhausted, loadError, currentTypeId) {
+        if (!shouldLoadMore || loading || loadingMore || exhausted || loadError != null) return@LaunchedEffect
+        while (true) {
+            loadingMore = true
+            val result = runCatching { vm.tvBoxCategoryPage(currentTypeId, page) }
+            result.onFailure { loadError = it.message ?: "网络或接口异常" }
+            val more = result.getOrDefault(emptyList())
+            if (more.isEmpty()) {
+                exhausted = true
+            } else {
+                val seen = items.mapTo(HashSet(items.size)) { it.id }
+                val fresh = more.filter { seen.add(it.id) }
+                // 源站忽略 page 参数时会反复返回同一页：没有新增就当到底，
+                // 否则 page 一直加、列表永远停在原地（用户看到的就是「只有 40 部」）。
+                if (fresh.isEmpty()) {
+                    exhausted = true
+                } else {
+                    items = items + fresh
+                    page += 1
+                }
+            }
+            loadingMore = false
+            if (exhausted || loadError != null) break
+            // 还是贴在底部就继续要下一页，离开底部就等下一次滚动触发
+            val last = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val total = gridState.layoutInfo.totalItemsCount
+            if (total <= 0 || last < total - 12) break
         }
-        loadingMore = false
     }
 
     Column(
@@ -325,7 +358,7 @@ fun TvCategoryScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                typeName,
+                currentName,
                 color = TvText.Title,
                 style = MaterialTheme.typography.headlineMedium
             )
@@ -336,6 +369,27 @@ fun TvCategoryScreen(
                     color = TvText.Meta,
                     style = MaterialTheme.typography.bodyMedium
                 )
+            }
+        }
+
+        // 分类切换横条：和题材页同一套 chip，遥控器左右移动即可换分类
+        if (categories.size > 1) {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp, bottom = 6.dp),
+                contentPadding = PaddingValues(horizontal = TvPagePadding),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(categories, key = { "tv_cat_chip_${it.typeId}" }) { cat ->
+                    TvFilterChip(
+                        text = cat.typeName,
+                        selected = cat.typeId == currentTypeId,
+                        onClick = {
+                            if (cat.typeId != currentTypeId) currentTypeId = cat.typeId
+                        }
+                    )
+                }
             }
         }
 
@@ -350,7 +404,13 @@ fun TvCategoryScreen(
                 items(18) { ShimmerCard() }
             }
 
-            items.isEmpty() -> TvEmptyState("这个分类下还没有内容", "换个线路，或先在来源里同步媒体库")
+            items.isEmpty() -> TvEmptyState(
+                text = if (loadError != null) "加载失败：$loadError" else "这个分类下还没有内容",
+                hint = if (loadError != null) null else "换个线路，或先在来源里同步媒体库",
+                action = if (loadError != null) {
+                    { TvFilterChip(text = "重试", selected = false, onClick = { retryTick++ }) }
+                } else null
+            )
 
             else -> LazyVerticalGrid(
                 state = gridState,
@@ -376,16 +436,34 @@ fun TvCategoryScreen(
                         )
                     )
                 }
-                if (loadingMore) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(56.dp),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("正在加载更多…", color = TvText.Meta)
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        when {
+                            loadingMore -> {
+                                CircularProgressIndicator(
+                                    color = AppColors.Brand,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.width(22.dp)
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Text("加载更多…", color = TvText.Meta)
+                            }
+                            loadError != null -> TvFilterChip(
+                                text = "加载失败，按 OK 重试",
+                                selected = false,
+                                onClick = { loadError = null }
+                            )
+                            exhausted -> Text(
+                                "没有更多了 · 共 ${items.size} 部",
+                                color = TvText.Meta,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
                         }
                     }
                 }

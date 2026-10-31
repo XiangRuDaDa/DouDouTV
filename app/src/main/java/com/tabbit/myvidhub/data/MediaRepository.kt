@@ -817,18 +817,27 @@ class MediaRepository(private val context: Context) {
     /**
      * 按单个站点（线路）同步首页：切换线路时按需拉取该站点内容入库。
      * 返回影片列表 + 该线路 homeContent 的分类（class），分类供首页按动态分区展示。
+     *
+     * [SiteHomeSync.entities] 保持源站 homeContent 的原始顺序，供首页轮播使用
+     * （轮播要的是源站推荐顺序，不是库里的入库时间顺序）。
      */
     suspend fun syncTvBoxSite(
         source: SourceEntity,
         site: TvBoxSite,
         onProgress: (Int) -> Unit = {}
-    ): TvBoxClient.SiteHomeResult = withContext(Dispatchers.IO) {
+    ): SiteHomeSync = withContext(Dispatchers.IO) {
         val client = TvBoxClient(source.location, context)
         // 不吞异常：把站点加载失败的真实原因（壳初始化超时等）透出到 UI
         val result = client.siteHome(site)
-        saveTvBoxVods(source, result.vods, onProgress)
-        result
+        val entities = saveTvBoxVods(source, result.vods, onProgress)
+        SiteHomeSync(result, entities)
     }
+
+    /** 单线路首页同步结果：spider 原始结果 + 已入库实体（保持源站顺序） */
+    data class SiteHomeSync(
+        val result: TvBoxClient.SiteHomeResult,
+        val entities: List<MediaEntity>
+    )
 
     /**
      * 拉取某站点某分类的内容（categoryContent）。
