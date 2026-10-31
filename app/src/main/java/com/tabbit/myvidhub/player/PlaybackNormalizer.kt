@@ -95,14 +95,19 @@ internal class PlaybackNormalizer {
      * 把「播放器坐标」的 Range 平移成「文件坐标」。
      *
      * 伪装头占 [prefixBytes] 字节，播放器看到的第 0 字节其实是文件的第 prefixBytes 字节。
-     * [chunk] 非空时把开区间切成固定块（正常播放）；重发首个请求时传 null，
-     * 让服务器返回真实剩余长度，避免播放器把总长算成 8MB。
+     * [chunk] 非空时把开区间切成固定块（正常播放），请求原本没有 Range 时同样生效；
+     * 重发首个请求时需要服务器报出真实剩余长度就传 null，
+     * 避免播放器把总长算成 8MB。
      */
     fun shiftRange(request: Request, prefixBytes: Long, chunk: Long?): Request {
         val range = request.header("Range")
         if (range == null) {
-            // 前缀为 0 的正常文件也要加：调用方用它把「整文件 200」强制改走 Range 通道
-            return request.newBuilder().header("Range", "bytes=$prefixBytes-").build()
+            // 前缀为 0 的正常文件也要加：调用方用它把「整文件 200」强制改走 Range 通道。
+            // chunk 非空时同样要补结尾，否则这一路会读到文件 EOF，连接被彻底拖住。
+            val end = chunk?.let { size -> prefixBytes + size - 1 }
+            return request.newBuilder()
+                .header("Range", if (end == null) "bytes=$prefixBytes-" else "bytes=$prefixBytes-$end")
+                .build()
         }
         OPEN_RANGE_REGEX.find(range)?.let {
             val start = it.groupValues[1].toLong() + prefixBytes

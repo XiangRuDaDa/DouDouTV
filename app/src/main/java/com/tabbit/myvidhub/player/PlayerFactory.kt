@@ -36,9 +36,12 @@ import androidx.media3.extractor.ts.TsExtractor
 import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.EOFException
 import java.io.File
 import java.io.IOException
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -148,6 +151,20 @@ object PlayerFactory {
         // 每个播放器一份「防和谐」归一化器：记录哪些直链带伪装前缀、真实容器是什么。
         // 按完整 URL 记录：同一次播放里的签名参数不变，映射生命周期刚好覆盖一次播放。
         val normalizer = PlaybackNormalizer()
+        // 「整文件 200」被限速、改走 Range 通道的网盘直链。
+        // 这类 CDN 按「连接」累计限速：同一条 keep-alive 连接越读越慢
+        // （实测 32MB 一块从 12.5 秒劣化到 21 秒、32 秒，最后彻底停摆，
+        //  字节还在 trickle，所以 60 秒 socket 读超时永远不触发，只有用户手动 seek 才恢复）。
+        // 给这些 URL 的每个分块请求加 Connection: close，逼 OkHttp 每块重新建连，
+        // 等于把「用户手动 seek」自动化。
+        // 边界：只覆盖被切过通道的网盘大文件；Emby 直链、HLS/DASH 分片不进这个集合，
+        //       行为完全不变。HTTP/2 下 OkHttp 会丢弃 connection 头（无副作用），
+        //       夸克这类下载 CDN 走 HTTP/1.1，正好生效。
+        val rotateConnection = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+        fun freshConnectionPerChunk(request: Request, urlKey: String): Request =
+            if (rotateConnection.contains(urlKey))
+                request.newBuilder().header("Connection", "close").build()
+            else request
         val client = OkHttpClient.Builder()
             .connectTimeout(connectTimeout.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(readTimeout.toLong(), TimeUnit.MILLISECONDS)
@@ -161,16 +178,22 @@ object PlayerFactory {
 
                 // 已知带伪装头：请求坐标整体右移前缀字节数
                 normalizer.planOf(urlKey)?.takeIf { it.shifted }?.let { plan ->
-                    val shifted = normalizer.shiftRange(original, plan.prefixBytes, chunkSize)
+                    val shifted = freshConnectionPerChunk(
+                        normalizer.shiftRange(original, plan.prefixBytes, chunkSize),
+                        urlKey
+                    )
                     return@Interceptor chain.proceed(shifted)
                 }
 
                 val rangeHeader = original.header("Range")
                 val openEnded = rangeHeader != null && OPEN_RANGE_REGEX.containsMatchIn(rangeHeader)
                 val request = if (openEnded) {
-                    // 有 start 无 end（"bytes=X-"）→ 8MB 固定块，避免读到 EOF 拖住连接
+                    // 有 start 无 end（"bytes=X-"）→ 32MB 固定块，避免读到 EOF 拖住连接
                     val start = OPEN_RANGE_REGEX.find(rangeHeader!!)!!.groupValues[1].toLong()
-                    original.newBuilder().header("Range", "bytes=$start-${start + chunkSize - 1}").build()
+                    freshConnectionPerChunk(
+                        original.newBuilder().header("Range", "bytes=$start-${start + chunkSize - 1}").build(),
+                        urlKey
+                    )
                 } else {
                     // 无 Range（HLS/DASH 分片、清单）或已带完整 end → 原样透传
                     original
@@ -215,16 +238,25 @@ object PlayerFactory {
                     //   容器未识别时也保守走开区间。
                     val needRetry = rangeHeader == null && code == 200 && cl > 8L * 1024 * 1024
                     if (needRetry) {
+                        val observedProtocol = response.protocol
                         response.close()
                         val prefix = plan?.prefixBytes ?: 0L
                         val retryChunk =
                             if (plan?.container == PlaybackNormalizer.Container.MATROSKA) chunkSize else null
-                        val retry = normalizer.shiftRange(original, prefix, retryChunk)
+                        // 这条直链之后被 CDN 按连接累计限速，每个分块都换新连接
+                        rotateConnection.add(urlKey)
+                        val retry = freshConnectionPerChunk(
+                            normalizer.shiftRange(original, prefix, retryChunk),
+                            urlKey
+                        )
                         // 只留这一条决策日志：切换通道是一次性的，分片级流水账已删
+                        // 协议是能不能真的换连接的证据：http/1.1 才认 Connection: close，
+                        // h2 下 OkHttp 会直接丢掉这个头（此时日志里会显示 h2，说明得换别的招）
                         Log.w(
                             "PlayerHttp",
                             "整文件 200（${cl / 1024 / 1024}MB，${plan?.evidence ?: "容器未识别"}）" +
-                                "改走 Range 通道：${retry.header("Range")}"
+                                "改走 Range 通道：${retry.header("Range")}，" +
+                                "分块换连接=$observedProtocol"
                         )
                         return@Interceptor chain.proceed(retry)
                     }
