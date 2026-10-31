@@ -475,9 +475,6 @@ class PhonePlayerActivity : ComponentActivity() {
             val resolved = resolvePlayUrl(item)
                 ?: return@launch // 失败时 toastState 已在 resolvePlayUrl 内设置
 
-            Log.d("PhonePlayer", "startPlayback url=${resolved.url.take(120)}")
-            Log.d("PhonePlayer", "startPlayback headers=${resolved.headers.map { "${it.key}=${it.value.take(30)}..." }}")
-
             // 必须先释放旧 player 再创建新的 —— SimpleCache 单例同一时刻只能被一个 player 引用
             player?.release()
             player = null
@@ -496,13 +493,11 @@ class PhonePlayerActivity : ComponentActivity() {
 
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
-                    Log.d("PhonePlayer", "player state=$state")
                     if (state == Player.STATE_ENDED) playNext()
                     watchBuffering()
                 }
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    Log.d("PhonePlayer", "isPlaying=$isPlaying")
                     updatePlayPauseLabel()
                 }
 

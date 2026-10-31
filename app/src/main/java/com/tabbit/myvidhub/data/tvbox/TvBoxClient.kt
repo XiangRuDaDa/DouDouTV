@@ -526,56 +526,12 @@ class TvBoxClient(
         val loaderKey = runCatching { loader.ensureLoaded(configSpiderUrl) }.getOrNull() ?: return null
         val proxy = loader.getSpider(loaderKey, site.api, site.ext) ?: return null
         val json = proxy.detailContent(listOf(vodId)) ?: return null
-        Log.d("SpiderProxy", "detailContent($vodId) raw = $json")
-        dumpDetailFields(vodId, json)
         val vod = CatVodResultParser.parseDetail(json, site.key, site.name) ?: return null
 
         // 注意：不再在这里对所有非 http 地址统一调 playerContent 解析。
         // 网盘线路一部剧动辄几十上百集、多条云盘，逐个 playerContent 会让详情加载卡死。
         // 云盘 scheme 地址（quark://、aliyundrive:// 等）原样保留，播放时再按需解析。
         return vod
-    }
-
-    /**
-     * 把 detailContent 返回的字段清单打到 W 级：这台 VIDAA 电视的 ROM 只放行 W 以上，
-     * 原来那条 D 级的 raw 日志在真机上根本不出现，没法核对线路到底给了哪些字段。
-     * 值只取样（长文本截断、数组记长度），整包 JSON 仍然留给 D 级那条。
-     */
-    private fun dumpDetailFields(vodId: String, json: String) {
-        val root = runCatching { JSONObject(json) }.getOrNull() ?: return
-        val topKeys = root.keys().asSequence().sorted().joinToString(",")
-        Log.w("SpiderFields", "detail($vodId) 顶层键=$topKeys")
-        val vod = root.optJSONArray("list")?.optJSONObject(0) ?: return
-        val pairs = StringBuilder()
-        for (k in vod.keys().asSequence().sorted()) {
-            if (pairs.isNotEmpty()) pairs.append(" | ")
-            val shown = when (val v = vod.opt(k)) {
-                is JSONArray -> "[${v.length()}]"
-                is JSONObject -> "{${v.keys().asSequence().sorted().joinToString(",")}}"
-                else -> {
-                    val s = v?.toString()?.replace('\n', ' ')
-                    if (k == "vod_play_url" && s != null) {
-                        // 分集名单独列出来：源改名是「刷新拿不到地址」最常见的原因
-                        s.split("\$\$\$").joinToString(" || ") { line ->
-                            line.split('#').map { it.substringBefore('$') }.joinToString("|")
-                        }
-                    } else {
-                        s?.take(60) ?: "null"
-                    }
-                }
-            }
-            pairs.append(k).append('=').append(shown)
-        }
-        // 单条 logcat 上限约 4k 字符，按 3500 切开发
-        val text = pairs.toString()
-        var i = 0
-        var part = 1
-        while (i < text.length) {
-            val end = minOf(i + 3500, text.length)
-            Log.w("SpiderFields", "detail($vodId) 字段#$part ${text.substring(i, end)}")
-            i = end
-            part++
-        }
     }
 
     /** playerContent 解析结果：视频直链 + 所需 HTTP 请求头 */

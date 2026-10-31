@@ -103,27 +103,4 @@ class MainActivity : ComponentActivity() {
         }
         super.finish()
     }
-
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-        Log.d("MyVidHubNav", "onUserLeaveHint（用户按了 Home / 切换了应用）")
-    }
-
-    override fun onPause() {
-        super.onPause()
-        Log.d("MyVidHubNav", "onPause isFinishing=$isFinishing")
-    }
-
-    override fun onStop() {
-        super.onStop()
-        Log.d("MyVidHubNav", "onStop isFinishing=$isFinishing")
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        Log.d(
-            "MyVidHubNav",
-            "onDestroy isFinishing=$isFinishing isChangingConfigurations=$isChangingConfigurations"
-        )
-    }
 }

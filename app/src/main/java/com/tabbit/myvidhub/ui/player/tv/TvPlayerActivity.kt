@@ -282,26 +282,34 @@ class TvPlayerActivity : ComponentActivity() {
                     lifecycleScope0 { repo.savePlaybackFormat(item, info) }
                 }
 
+                /**
+                 * 出画后打一条画面几何证据：杜比视界片源「上下多出遮罩」时，
+                 * 靠这行区分是片源自带黑边（宽银幕）、像素比异常，还是 PlayerView 的适配问题。
+                 */
+                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                    val v = playerView
+                    val surface = v?.videoSurfaceView
+                    val dm = resources.displayMetrics
+                    val format = (player?.currentTracks?.groups?.firstOrNull {
+                        it.type == C.TRACK_TYPE_VIDEO
+                    }?.mediaTrackGroup?.let { g -> if (g.length > 0) g.getFormat(0) else null })
+                    Log.i(
+                        "TvPlayer",
+                        "videoSize=${videoSize.width}x${videoSize.height} par=${videoSize.pixelWidthHeightRatio} " +
+                            "frame=${surface?.width}x${surface?.height} view=${v?.width}x${v?.height} " +
+                            "screen=${dm.widthPixels}x${dm.heightPixels} density=${dm.density} " +
+                            "videoFormat=${format?.width}x${format?.height} " +
+                            "color=${format?.colorInfo?.colorSpace}/${format?.colorInfo?.colorTransfer} " +
+                            "codecs=${format?.codecs}"
+                    )
+                }
+
                 override fun onPlaybackStateChanged(state: Int) {
                     playerState = state
-                    val name = when (state) {
-                        Player.STATE_IDLE -> "IDLE"
-                        Player.STATE_BUFFERING -> "BUFFERING"
-                        Player.STATE_READY -> "READY"
-                        Player.STATE_ENDED -> "ENDED"
-                        else -> state.toString()
-                    }
-                    // 「转圈不出画面」时靠这行区分：还在 BUFFERING 就是没数据，
-                    // 到了 READY 说明数据齐了、问题在解码/渲染
-                    Log.w("TvPlayer", "状态=$name ep=${current?.title?.take(40)} pos=${p.currentPosition}")
                     // 兜底：纯音频流不触发首帧回调，不能让它一直转圈
                     if (state == Player.STATE_READY && loading) {
                         handler.postDelayed({ loading = false }, 1_200L)
                     }
-                }
-
-                override fun onIsLoadingChanged(isLoading: Boolean) {
-                    Log.w("TvPlayer", "loading=$isLoading pos=${p.currentPosition}")
                 }
 
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {

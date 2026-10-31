@@ -36,10 +36,6 @@ import androidx.media3.extractor.ts.TsExtractor
 import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.ResponseBody
-import okio.Buffer
-import okio.ForwardingSource
-import okio.buffer
 import java.io.EOFException
 import java.io.File
 import java.io.IOException
@@ -166,18 +162,7 @@ object PlayerFactory {
                 // 已知带伪装头：请求坐标整体右移前缀字节数
                 normalizer.planOf(urlKey)?.takeIf { it.shifted }?.let { plan ->
                     val shifted = normalizer.shiftRange(original, plan.prefixBytes, chunkSize)
-                    Log.w("PlayerHttp", ">>> ${shifted.method} ${shifted.url}")
-                    shifted.header("Range")?.let {
-                        Log.w("PlayerHttp", "    Range: $it（已跳过 ${plan.prefixBytes} 字节伪装头）")
-                    }
-                    val shiftedResponse = chain.proceed(shifted)
-                    Log.w(
-                        "PlayerHttp",
-                        "<<< ${shiftedResponse.code} ${shiftedResponse.message} " +
-                            "size=${shiftedResponse.body?.contentLength() ?: -1L} " +
-                            "contentType=${shiftedResponse.header("Content-Type", "")}"
-                    )
-                    return@Interceptor shiftedResponse
+                    return@Interceptor chain.proceed(shifted)
                 }
 
                 val rangeHeader = original.header("Range")
@@ -190,19 +175,9 @@ object PlayerFactory {
                     // 无 Range（HLS/DASH 分片、清单）或已带完整 end → 原样透传
                     original
                 }
-                // 播放链路取证日志一律用 W 级：部分电视 ROM（已实测 VIDAA/MT9653）会丢掉 app 的
-                // D 级日志，用 D 打等于在电视上什么都抓不到。
-                Log.w("PlayerHttp", ">>> ${request.method} ${request.url}")
-                val range = request.header("Range")
-                if (range != null) Log.w("PlayerHttp", "    Range: $range")
                 var response = chain.proceed(request)
-                val ct = response.header("Content-Type", "")
-                val ar = response.header("Accept-Ranges", "")
-                val cr = response.header("Content-Range")
                 val code = response.code
                 val cl = response.body?.contentLength() ?: -1L
-                Log.w("PlayerHttp", "<<< $code ${response.message} size=$cl contentType=$ct acceptRanges=$ar")
-                if (!cr.isNullOrBlank()) Log.w("PlayerHttp", "    Content-Range: $cr")
 
                 // ===== 伪装头识别 + 整文件限速规避 =====
                 // 两件事共用同一次头部探测：
@@ -217,26 +192,18 @@ object PlayerFactory {
                     val head = runCatching { response.peekBody(16).bytes() }.getOrNull()
                     var plan: PlaybackNormalizer.Plan? = null
                     if (head != null && normalizer.looksLikeImage(head)) {
-                        var scanned = 0L
                         for (limit in normalizer.scanWindowLimits) {
                             val window = runCatching { response.peekBody(limit).bytes() }
                                 .getOrNull() ?: break
-                            scanned = window.size.toLong()
                             plan = normalizer.detect(window, allowPrefix = true)
                             // 命中真实容器头，或已经读到流末尾（伪装图之外没有容器头）
                             if (plan != null || window.size < limit) break
                         }
-                        if (plan == null) {
-                            Log.w(
-                                "PlayerHttp",
-                                "头部像伪装图，但 ${scanned / 1024}KB 内没找到已知容器头，按原样继续"
-                            )
-                        }
+                        plan?.let { normalizer.remember(urlKey, it) }
                     } else if (head != null) {
                         // 正常文件头：只认第 0 字节，避免把 MP4 的 free/wide 前置 box 当成伪装前缀
                         plan = normalizer.detect(head, allowPrefix = false)
                     }
-                    plan?.let { normalizer.remember(urlKey, it) }
 
                     // 无 Range 的整文件 200 → 改用 Range 通道；伪装头顺带把坐标平移到真实容器起点。
                     // 只对已知 >8MB 的响应生效，HLS 分片/小文件完全不受影响。
@@ -253,68 +220,13 @@ object PlayerFactory {
                         val retryChunk =
                             if (plan?.container == PlaybackNormalizer.Container.MATROSKA) chunkSize else null
                         val retry = normalizer.shiftRange(original, prefix, retryChunk)
+                        // 只留这一条决策日志：切换通道是一次性的，分片级流水账已删
                         Log.w(
                             "PlayerHttp",
                             "整文件 200（${cl / 1024 / 1024}MB，${plan?.evidence ?: "容器未识别"}）" +
                                 "改走 Range 通道：${retry.header("Range")}"
                         )
-                        val retryResponse = chain.proceed(retry)
-                        val retryHead = runCatching {
-                            retryResponse.peekBody(16).bytes()
-                        }.getOrNull()
-                        Log.w(
-                            "PlayerHttp",
-                            "<<< ${retryResponse.code} ${retryResponse.message} " +
-                                "size=${retryResponse.body?.contentLength() ?: -1L} " +
-                                "contentType=${retryResponse.header("Content-Type", "")} " +
-                                "首16B=${retryHead?.joinToString("") { b -> "%02x".format(b) } ?: "?"}"
-                        )
-                        return@Interceptor retryResponse
-                    }
-                }
-
-                // ===== 大文件首包取证 =====
-                // 不带 Range 的首包是「整文件顺序读」。若它被 CDN 限速，现象就是长时间转圈、
-                // 却没有任何后续请求，必须靠读取速率区分「慢」和「卡死」；顺带打前 64 字节
-                // 确认容器真身。只对 >8MB 的响应生效，播放列表和小文件不受影响。
-                if (rangeHeader == null && (cl <= 0 || cl > 8L * 1024 * 1024)) {
-                    runCatching {
-                        val head = response.peekBody(64).bytes()
-                        Log.w("PlayerHttp", "首包64B=${head.joinToString("") { b -> "%02x".format(b) }}")
-                        val body = response.body
-                        if (body != null) {
-                            val counting = object : ForwardingSource(body.source()) {
-                                private var total = 0L
-                                private var lastTotal = 0L
-                                private var markNanos = System.nanoTime()
-
-                                override fun read(sink: Buffer, byteCount: Long): Long {
-                                    val n = super.read(sink, byteCount)
-                                    if (n != -1L) total += n
-                                    val now = System.nanoTime()
-                                    if (n == -1L || now - markNanos >= 2_000_000_000L) {
-                                        val sec = (now - markNanos) / 1e9
-                                        Log.w(
-                                            "PlayerHttp",
-                                            "首包读取 累计=${total / 1024}KB 近${"%.1f".format(sec)}s " +
-                                                "${((total - lastTotal) / 1024 / sec).toInt()}KB/s"
-                                        )
-                                        lastTotal = total
-                                        markNanos = now
-                                    }
-                                    return n
-                                }
-                            }
-                            response = response.newBuilder()
-                                .body(
-                                    ResponseBody.create(
-                                        body.contentType(),
-                                        body.contentLength(),
-                                        counting.buffer()
-                                    )
-                                )
-                                .build()
-                        }
+                        return@Interceptor chain.proceed(retry)
                     }
                 }
                 // ===== 404 资源失效拦截：提前抛出带明确消息的 IOException =====
@@ -347,8 +259,6 @@ object PlayerFactory {
         if (headers.isNotEmpty()) {
             httpFactory.setDefaultRequestProperties(headers)
         }
-
-        Log.w("PlayerFactory", "build OkHttpDataSource headers=${headers.keys} connect=${connectTimeout}ms read=${readTimeout}ms")
 
         // ===== 永远禁用 CacheDataSource =====
         // 原因：OkHttp Interceptor 会拦截 ExoPlayer 的 Range 请求并改写（首次探测、固定块等），
@@ -410,34 +320,6 @@ object PlayerFactory {
     @UnstableApi
     private fun attachDiagnostics(player: ExoPlayer) {
         player.addAnalyticsListener(object : AnalyticsListener {
-            override fun onLoadStarted(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData
-            ) {
-                Log.w(
-                    "PlayerDiag",
-                    "load开始 pos=${loadEventInfo.dataSpec.position} " +
-                        "请求长度=${loadEventInfo.dataSpec.length} dataType=${mediaLoadData.dataType}"
-                )
-            }
-
-            override fun onLoadCompleted(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData
-            ) {
-                Log.w("PlayerDiag", "load完成 实收=${loadEventInfo.bytesLoaded}B 耗时=${loadEventInfo.loadDurationMs}ms")
-            }
-
-            override fun onLoadCanceled(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData
-            ) {
-                Log.w("PlayerDiag", "load取消 实收=${loadEventInfo.bytesLoaded}B")
-            }
-
             override fun onLoadError(
                 eventTime: AnalyticsListener.EventTime,
                 loadEventInfo: LoadEventInfo,
@@ -451,18 +333,6 @@ object PlayerFactory {
                     "PlayerDiag",
                     "load失败 实收=${loadEventInfo.bytesLoaded}B wasCanceled=$wasCanceled " +
                         "${error.javaClass.simpleName}: ${error.message}"
-                )
-            }
-
-            override fun onDownstreamFormatChanged(
-                eventTime: AnalyticsListener.EventTime,
-                mediaLoadData: MediaLoadData
-            ) {
-                val f = mediaLoadData.trackFormat
-                Log.w(
-                    "PlayerDiag",
-                    "解出轨道 trackType=${mediaLoadData.trackType} mime=${f?.sampleMimeType} " +
-                        "codecs=${f?.codecs} ${f?.width}x${f?.height} bitrate=${f?.bitrate}"
                 )
             }
 

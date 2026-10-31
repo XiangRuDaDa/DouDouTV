@@ -96,7 +96,6 @@ internal object LocalProxyServer {
             }
             skipBody(input, head)
             val params = parseQuery(target.substringAfter('?', ""))
-            Log.w(TAG, "$method ${target.substringBefore('?')} 参数=$params")
 
             // 壳用 /proxy?do=ck 探测本地代理是否可用，只认响应体 "ok"（对照 OK影视 的 9978 实测）。
             // 这个检查发生在 native 初始化期间，那时壳的 proxyInvoke 还不能调（loader 为 null 会 JNI abort），

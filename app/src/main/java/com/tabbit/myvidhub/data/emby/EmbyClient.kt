@@ -285,14 +285,9 @@ class EmbyClient(
         // Emby API 结构兼容：老版本顶层 MediaStreams，新版本 MediaSources[].MediaStreams[]
         val streams = (json.optJSONArray("MediaSources")?.optJSONObject(0)?.optJSONArray("MediaStreams")
             ?: json.optJSONArray("MediaStreams"))
-            ?: runCatching {
-                android.util.Log.d("EmbyClient", "MediaSources/MediaStreams 均未返回，原始 JSON keys: ${json.keys().asSequence().toList()}")
-                null
-            }.getOrNull()
 
         if (streams != null) {
             runCatching {
-                android.util.Log.d("EmbyClient", "MediaStreams count=${streams.length()}")
                 for (i in 0 until streams.length()) {
                     val stream = streams.optJSONObject(i) ?: continue
                     if (stream.optString("Type") != "Video") continue
@@ -302,7 +297,6 @@ class EmbyClient(
                     val colorTransfer = stream.optString("ColorTransfer", "")
                     val hdrMode = stream.optString("HdrMode", "")
                     val title = stream.optString("Title", "")
-                    android.util.Log.d("EmbyClient", "VideoStream: height=$height codec=$codec range=$videoRange hdrMode=$hdrMode title=$title")
 
                     // 分辨率 → 标签
                     videoResolution = when {
@@ -339,8 +333,6 @@ class EmbyClient(
                     break
                 }
             }
-        } else {
-            android.util.Log.d("EmbyClient", "MediaStreams 为 null")
         }
 
         ItemDetail(

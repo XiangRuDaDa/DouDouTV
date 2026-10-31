@@ -484,14 +484,9 @@ object SpiderLoader {
                 flush()
             }
             val body = s.getInputStream().bufferedReader().readText()
-            val ok = body.contains("\"state\":\"ok\"")
-            if (!ok) Log.d(TAG, "端口 $port 探测失败 body=${body.take(80).replace("\n", "\\n")}")
-            ok
+            body.contains("\"state\":\"ok\"")
         }
-    }.getOrElse {
-        Log.d(TAG, "端口 $port 探测异常：${it.javaClass.simpleName}: ${it.message}")
-        false
-    }
+    }.getOrElse { false }
 
     /** 不触发壳 Init，直接用已落盘的解密 dex 重建 classloader（兼容 Init 超时后于后台完成的情况） */
     private fun tryRecoverLoader(key: String): DexClassLoader? {

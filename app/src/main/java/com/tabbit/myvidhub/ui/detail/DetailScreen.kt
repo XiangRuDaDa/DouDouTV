@@ -178,7 +178,6 @@ fun DetailScreen(
     }
 
     LaunchedEffect(mediaId) {
-        android.util.Log.d("MyVidHubNav", "detail enter mediaId=$mediaId")
         loading = true
         scraped = null
         tmdb = null
@@ -206,10 +205,6 @@ fun DetailScreen(
             }
         }
         media = m
-        android.util.Log.d(
-            "MyVidHubNav",
-            "detail resolved id=$id found=${m != null} title=${m?.title ?: "-"}"
-        )
         if (m != null) {
             // Emby 源：加载刮削信息（电影/剧集都支持）
             if (vm.sourceOf(m.sourceId)?.kind == SourceKind.EMBY) {
