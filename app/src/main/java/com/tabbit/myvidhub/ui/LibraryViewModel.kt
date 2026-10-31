@@ -765,6 +765,17 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * 补 TVBox 剧集壳的演员/导演/备注（新列在老库里是空的）。
+     * 失败或源不给这些字段时静默返回 false，详情页就不显示主演行；不弹提示。
+     */
+    suspend fun refreshTvBoxMeta(sourceId: Long, remoteId: String): Boolean =
+        try {
+            repo.refreshTvBoxMeta(sourceId, remoteId)
+        } catch (e: Exception) {
+            false
+        }
+
     /** Emby 分集按需拉取（列表同步只入库剧集壳，分集进详情时再取） */
     suspend fun loadEmbyEpisodes(sourceId: Long, remoteId: String): Boolean {
         val src = repo.getSource(sourceId) ?: return false

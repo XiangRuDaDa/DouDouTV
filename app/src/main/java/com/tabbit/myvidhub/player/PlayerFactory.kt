@@ -1,9 +1,11 @@
 package com.tabbit.myvidhub.player
 
 import android.content.Context
+import android.net.Uri
 import android.os.StatFs
 import android.util.Log
 import androidx.media3.common.C
+import androidx.media3.common.FileTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -16,13 +18,31 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.RenderersFactory
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.image.ImageRenderer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.Extractor
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.mkv.MatroskaExtractor
+import androidx.media3.extractor.mp4.FragmentedMp4Extractor
+import androidx.media3.extractor.mp4.Mp4Extractor
+import androidx.media3.extractor.ts.PsExtractor
+import androidx.media3.extractor.ts.TsExtractor
 import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody
+import okio.Buffer
+import okio.ForwardingSource
+import okio.buffer
+import java.io.EOFException
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -65,6 +85,9 @@ object PlayerFactory {
 
     /** 开区间 Range 头（bytes=X-）：只有这种请求才需要补一个结尾，防止一路读到 EOF */
     private val OPEN_RANGE_REGEX = Regex("bytes=(\\d+)-$")
+
+    /** 加载失败的重试次数（与之前 DefaultLoadErrorHandlingPolicy(8) 保持一致） */
+    private const val MIN_LOAD_RETRY_COUNT = 8
 
     @Volatile
     private var cache: SimpleCache? = null
@@ -116,13 +139,19 @@ object PlayerFactory {
         // Range 请求改写逻辑：
         // ExoPlayer 的进度式播放（MP4/MKV/AVI...）在 seek 后会发开区间 Range（"bytes=X-"），
         // 如果原样透传，CDN 会一直返回到文件 EOF（动辄几个 GB），OkHttp 连接被长时间占用，
-        // 后续 seek 抢不到连接就卡住。所以只对这种「开区间 Range」限制结尾（8MB 一块）。
+        // 后续 seek 抢不到连接就卡住。所以只对这种「开区间 Range」限制结尾。
         //
         // 关键：请求里本来就没有 Range 头时绝对不能再加！
         // HLS/DASH 的媒体分片（.ts / .m4s）请求就是不带 Range 的，强行改写成
         // "bytes=0-32767" 会把几 MB 的分片截成 32KB，分片数据不完整 → 解析失败 / 丢帧，
         // 表现为播放器每 0.2~0.3 秒就「缓冲→就绪→播放→暂停」循环、进度条一顿一顿往前跳。
-        val chunkSize = 8L * 1024 * 1024
+        //
+        // 块大小 32MB：每块结束都要重开一次请求（Media3 会报一次人为 EOF），块太小会让
+        // 这部分开销占比过高（8MB 时实测每 4 秒就空一下）。32MB 在 2MB/s 下约 16 秒一块。
+        val chunkSize = 32L * 1024 * 1024
+        // 每个播放器一份「防和谐」归一化器：记录哪些直链带伪装前缀、真实容器是什么。
+        // 按完整 URL 记录：同一次播放里的签名参数不变，映射生命周期刚好覆盖一次播放。
+        val normalizer = PlaybackNormalizer()
         val client = OkHttpClient.Builder()
             .connectTimeout(connectTimeout.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(readTimeout.toLong(), TimeUnit.MILLISECONDS)
@@ -132,6 +161,25 @@ object PlayerFactory {
             .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
             .addInterceptor(Interceptor { chain ->
                 val original = chain.request()
+                val urlKey = original.url.toString()
+
+                // 已知带伪装头：请求坐标整体右移前缀字节数
+                normalizer.planOf(urlKey)?.takeIf { it.shifted }?.let { plan ->
+                    val shifted = normalizer.shiftRange(original, plan.prefixBytes, chunkSize)
+                    Log.w("PlayerHttp", ">>> ${shifted.method} ${shifted.url}")
+                    shifted.header("Range")?.let {
+                        Log.w("PlayerHttp", "    Range: $it（已跳过 ${plan.prefixBytes} 字节伪装头）")
+                    }
+                    val shiftedResponse = chain.proceed(shifted)
+                    Log.w(
+                        "PlayerHttp",
+                        "<<< ${shiftedResponse.code} ${shiftedResponse.message} " +
+                            "size=${shiftedResponse.body?.contentLength() ?: -1L} " +
+                            "contentType=${shiftedResponse.header("Content-Type", "")}"
+                    )
+                    return@Interceptor shiftedResponse
+                }
+
                 val rangeHeader = original.header("Range")
                 val openEnded = rangeHeader != null && OPEN_RANGE_REGEX.containsMatchIn(rangeHeader)
                 val request = if (openEnded) {
@@ -147,7 +195,7 @@ object PlayerFactory {
                 Log.w("PlayerHttp", ">>> ${request.method} ${request.url}")
                 val range = request.header("Range")
                 if (range != null) Log.w("PlayerHttp", "    Range: $range")
-                val response = chain.proceed(request)
+                var response = chain.proceed(request)
                 val ct = response.header("Content-Type", "")
                 val ar = response.header("Accept-Ranges", "")
                 val cr = response.header("Content-Range")
@@ -156,6 +204,119 @@ object PlayerFactory {
                 Log.w("PlayerHttp", "<<< $code ${response.message} size=$cl contentType=$ct acceptRanges=$ar")
                 if (!cr.isNullOrBlank()) Log.w("PlayerHttp", "    Content-Range: $cr")
 
+                // ===== 伪装头识别 + 整文件限速规避 =====
+                // 两件事共用同一次头部探测：
+                //   1. 网盘伪装：视频前面塞一张图片（8 字节魔术字或整张 PNG/JPEG），
+                //      必须找到真实容器起点后才能解析；
+                //   2. 无 Range 的整文件 200：CDN 会把它限速在 ~100KB/s（实测夸克 99KB/s），
+                //      4K 片源永远填不满缓冲，表现为「一直缓冲中、速度像 0」。改走 Range 通道即满速。
+                // 伪装长度不固定，所以按窗口逐级扫描真实容器头，命中即停。
+                val fromStart = rangeHeader == null || rangeHeader.startsWith("bytes=0-")
+                val bigBody = cl <= 0 || cl > 8L * 1024 * 1024
+                if (fromStart && bigBody) {
+                    val head = runCatching { response.peekBody(16).bytes() }.getOrNull()
+                    var plan: PlaybackNormalizer.Plan? = null
+                    if (head != null && normalizer.looksLikeImage(head)) {
+                        var scanned = 0L
+                        for (limit in normalizer.scanWindowLimits) {
+                            val window = runCatching { response.peekBody(limit).bytes() }
+                                .getOrNull() ?: break
+                            scanned = window.size.toLong()
+                            plan = normalizer.detect(window, allowPrefix = true)
+                            // 命中真实容器头，或已经读到流末尾（伪装图之外没有容器头）
+                            if (plan != null || window.size < limit) break
+                        }
+                        if (plan == null) {
+                            Log.w(
+                                "PlayerHttp",
+                                "头部像伪装图，但 ${scanned / 1024}KB 内没找到已知容器头，按原样继续"
+                            )
+                        }
+                    } else if (head != null) {
+                        // 正常文件头：只认第 0 字节，避免把 MP4 的 free/wide 前置 box 当成伪装前缀
+                        plan = normalizer.detect(head, allowPrefix = false)
+                    }
+                    plan?.let { normalizer.remember(urlKey, it) }
+
+                    // 无 Range 的整文件 200 → 改用 Range 通道；伪装头顺带把坐标平移到真实容器起点。
+                    // 只对已知 >8MB 的响应生效，HLS 分片/小文件完全不受影响。
+                    // 重发带的区间要按容器分：
+                    //   开区间（bytes=X-）虽然能通过 Content-Range 报出真实总长，但实测夸克对这种
+                    //   响应同样限速 ~99KB/s，4K MKV 光首包就要转十几秒；
+                    //   MKV 的头部自描述、不依赖总长，所以首包也直接切带结尾的块，走满速通道。
+                    //   MP4 的 moov 常在尾部，必须靠开区间拿到真实总长才能算进度条和 seek，
+                    //   容器未识别时也保守走开区间。
+                    val needRetry = rangeHeader == null && code == 200 && cl > 8L * 1024 * 1024
+                    if (needRetry) {
+                        response.close()
+                        val prefix = plan?.prefixBytes ?: 0L
+                        val retryChunk =
+                            if (plan?.container == PlaybackNormalizer.Container.MATROSKA) chunkSize else null
+                        val retry = normalizer.shiftRange(original, prefix, retryChunk)
+                        Log.w(
+                            "PlayerHttp",
+                            "整文件 200（${cl / 1024 / 1024}MB，${plan?.evidence ?: "容器未识别"}）" +
+                                "改走 Range 通道：${retry.header("Range")}"
+                        )
+                        val retryResponse = chain.proceed(retry)
+                        val retryHead = runCatching {
+                            retryResponse.peekBody(16).bytes()
+                        }.getOrNull()
+                        Log.w(
+                            "PlayerHttp",
+                            "<<< ${retryResponse.code} ${retryResponse.message} " +
+                                "size=${retryResponse.body?.contentLength() ?: -1L} " +
+                                "contentType=${retryResponse.header("Content-Type", "")} " +
+                                "首16B=${retryHead?.joinToString("") { b -> "%02x".format(b) } ?: "?"}"
+                        )
+                        return@Interceptor retryResponse
+                    }
+                }
+
+                // ===== 大文件首包取证 =====
+                // 不带 Range 的首包是「整文件顺序读」。若它被 CDN 限速，现象就是长时间转圈、
+                // 却没有任何后续请求，必须靠读取速率区分「慢」和「卡死」；顺带打前 64 字节
+                // 确认容器真身。只对 >8MB 的响应生效，播放列表和小文件不受影响。
+                if (rangeHeader == null && (cl <= 0 || cl > 8L * 1024 * 1024)) {
+                    runCatching {
+                        val head = response.peekBody(64).bytes()
+                        Log.w("PlayerHttp", "首包64B=${head.joinToString("") { b -> "%02x".format(b) }}")
+                        val body = response.body
+                        if (body != null) {
+                            val counting = object : ForwardingSource(body.source()) {
+                                private var total = 0L
+                                private var lastTotal = 0L
+                                private var markNanos = System.nanoTime()
+
+                                override fun read(sink: Buffer, byteCount: Long): Long {
+                                    val n = super.read(sink, byteCount)
+                                    if (n != -1L) total += n
+                                    val now = System.nanoTime()
+                                    if (n == -1L || now - markNanos >= 2_000_000_000L) {
+                                        val sec = (now - markNanos) / 1e9
+                                        Log.w(
+                                            "PlayerHttp",
+                                            "首包读取 累计=${total / 1024}KB 近${"%.1f".format(sec)}s " +
+                                                "${((total - lastTotal) / 1024 / sec).toInt()}KB/s"
+                                        )
+                                        lastTotal = total
+                                        markNanos = now
+                                    }
+                                    return n
+                                }
+                            }
+                            response = response.newBuilder()
+                                .body(
+                                    ResponseBody.create(
+                                        body.contentType(),
+                                        body.contentLength(),
+                                        counting.buffer()
+                                    )
+                                )
+                                .build()
+                        }
+                    }
+                }
                 // ===== 404 资源失效拦截：提前抛出带明确消息的 IOException =====
                 // Media3 的 ERROR_CODE_IO_BAD_HTTP_STATUS 只给错误码，用户看不懂。
                 // 在 OkHttp 层拦截 404 → 抛带中文提示的 IOException → ExoPlayer 把 message
@@ -207,9 +368,10 @@ object PlayerFactory {
             .setBackBuffer(60_000, true)
             .build()
 
-        val errorPolicy = DefaultLoadErrorHandlingPolicy(8)
-        val mediaSourceFactory = DefaultMediaSourceFactory(httpFactory)
-            .setLoadErrorHandlingPolicy(errorPolicy)
+        val errorPolicy = ChunkEofRetryPolicy()
+        val mediaSourceFactory =
+            DefaultMediaSourceFactory(httpFactory, ContainerExtractorsFactory(normalizer))
+                .setLoadErrorHandlingPolicy(errorPolicy)
 
         // 自定义 RenderersFactory：过滤掉 ImageRenderer。
         // 原因：Range 拦截器会改写 "bytes=X-" 开区间请求，MKV/MP4 内嵌的 poster 图片
@@ -234,6 +396,204 @@ object PlayerFactory {
             .setSeekForwardIncrementMs(10_000)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
+            .also { attachDiagnostics(it) }
+    }
+
+    /**
+     * 播放链路探针。
+     *
+     * 「转圈不出画面」有两种完全不同的成因：网卡在收数据，或数据到了但解不出轨道。
+     * 系统 ACodec / MediaCodec 日志是 D 级，这台电视 ROM 直接吞掉，所以必须在
+     * app 侧用 W 级把「读了多少字节 → 解出什么轨道 → 建没建解码器」串起来。
+     * 只打状态跃迁，不打每帧，正常播放时日志量很小。
+     */
+    @UnstableApi
+    private fun attachDiagnostics(player: ExoPlayer) {
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onLoadStarted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData
+            ) {
+                Log.w(
+                    "PlayerDiag",
+                    "load开始 pos=${loadEventInfo.dataSpec.position} " +
+                        "请求长度=${loadEventInfo.dataSpec.length} dataType=${mediaLoadData.dataType}"
+                )
+            }
+
+            override fun onLoadCompleted(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData
+            ) {
+                Log.w("PlayerDiag", "load完成 实收=${loadEventInfo.bytesLoaded}B 耗时=${loadEventInfo.loadDurationMs}ms")
+            }
+
+            override fun onLoadCanceled(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData
+            ) {
+                Log.w("PlayerDiag", "load取消 实收=${loadEventInfo.bytesLoaded}B")
+            }
+
+            override fun onLoadError(
+                eventTime: AnalyticsListener.EventTime,
+                loadEventInfo: LoadEventInfo,
+                mediaLoadData: MediaLoadData,
+                error: IOException,
+                wasCanceled: Boolean
+            ) {
+                // 这个回调在 LoadErrorHandlingPolicy 重试之前触发，是唯一能看到
+                // 「被重试吞掉的 IO 错误」的地方
+                Log.w(
+                    "PlayerDiag",
+                    "load失败 实收=${loadEventInfo.bytesLoaded}B wasCanceled=$wasCanceled " +
+                        "${error.javaClass.simpleName}: ${error.message}"
+                )
+            }
+
+            override fun onDownstreamFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                mediaLoadData: MediaLoadData
+            ) {
+                val f = mediaLoadData.trackFormat
+                Log.w(
+                    "PlayerDiag",
+                    "解出轨道 trackType=${mediaLoadData.trackType} mime=${f?.sampleMimeType} " +
+                        "codecs=${f?.codecs} ${f?.width}x${f?.height} bitrate=${f?.bitrate}"
+                )
+            }
+
+            override fun onVideoDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
+            ) {
+                Log.w("PlayerDiag", "视频解码器就绪 $decoderName (${initializationDurationMs}ms)")
+            }
+
+            override fun onAudioDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
+            ) {
+                Log.w("PlayerDiag", "音频解码器就绪 $decoderName (${initializationDurationMs}ms)")
+            }
+
+            override fun onVideoCodecError(
+                eventTime: AnalyticsListener.EventTime,
+                videoCodecError: Exception
+            ) {
+                Log.w("PlayerDiag", "视频解码器失败 ${videoCodecError.javaClass.simpleName}: ${videoCodecError.message}")
+            }
+
+            override fun onAudioCodecError(
+                eventTime: AnalyticsListener.EventTime,
+                audioCodecError: Exception
+            ) {
+                Log.w("PlayerDiag", "音频解码器失败 ${audioCodecError.javaClass.simpleName}: ${audioCodecError.message}")
+            }
+        })
+    }
+
+    /**
+     * 分块 Range 读到块尾时，ExtractorInput 会抛一记 EOFException —— 那不是网络故障，
+     * 只是「这一块读完了」；但默认策略会退避 1 秒再续下一块（实测 8MB 块 + 1 秒空窗，
+     * 吞吐直接少 20%）。所以 EOF 立即续读，真正的 IO 错误仍走默认退避，
+     * 避免网络真的断掉时疯狂重试打爆服务器。
+     */
+    private class ChunkEofRetryPolicy :
+        DefaultLoadErrorHandlingPolicy(MIN_LOAD_RETRY_COUNT) {
+
+        override fun getRetryDelayMsFor(
+            loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo
+        ): Long {
+            if (loadErrorInfo.exception is EOFException) return 0L
+            return super.getRetryDelayMsFor(loadErrorInfo)
+        }
+    }
+
+    /**
+     * 容器识别兜底。
+     *
+     * 夸克 CDN 对同一部剧的 MKV 会给出两种 Content-Type：video/x-matroska 或
+     * application/octet-stream。前者 Media3 只产出一个 MatroskaExtractor，直接采用、
+     * 不做嗅探；后者 Media3 认不出容器，会退回「十几个 extractor 逐个嗅探」，实测
+     * 读到 32KB 就全部失败 → 播放器转圈后直接 ENDED，没画面也没错误提示。
+     *
+     * 所以 MIME 不可判定容器时，按「探测到的容器 > 文件名后缀」排序候选，交给 Media3
+     * sniff 最终定夺。文件名只能当提示、不能当事实：实测 E06.mkv 的真实容器是 MP4。
+     * Emby 等 MIME 可靠的来源完全走原路径，不受影响。
+     */
+    private class ContainerExtractorsFactory(
+        private val normalizer: PlaybackNormalizer
+    ) : ExtractorsFactory {
+
+        private val fallback = DefaultExtractorsFactory()
+
+        override fun createExtractors(): Array<Extractor> = fallback.createExtractors()
+
+        override fun createExtractors(
+            uri: Uri,
+            responseHeaders: Map<String, List<String>>
+        ): Array<Extractor> {
+            val contentType = contentTypeOf(responseHeaders)
+            val mimeType = FileTypes.inferFileTypeFromMimeType(contentType)
+            // extractor 在 MediaPeriod 构造时就创建，此时首包可能还没探测完，
+            // 所以探测结果只是「锦上添花」，缺失时退回 MIME / 文件名。
+            val detected = normalizer.planOf(uri.toString())?.container
+                ?.takeIf { it != PlaybackNormalizer.Container.UNKNOWN }
+            if (mimeType != FileTypes.UNKNOWN &&
+                (detected == null || detected.fileType == mimeType)
+            ) {
+                return fallback.createExtractors(uri, responseHeaders)
+            }
+            // 夸克直链的路径里只有 hash，真实文件名在 filename 查询参数上
+            val filename = uri.getQueryParameter("filename")
+            val named = if (!filename.isNullOrBlank()) {
+                Uri.Builder().scheme("file").appendPath(filename).build()
+            } else {
+                uri
+            }
+            val type = detected?.fileType ?: when (mimeType) {
+                FileTypes.UNKNOWN -> FileTypes.inferFileTypeFromUri(named)
+                else -> mimeType
+            }
+            // extractor 是有状态的：init() 不重置、release() 是空实现，同一实例绝不能
+            // 跨剧集复用，否则新周期的 endTracks() 永远发不出来 → 播放器无限转圈。
+            // 所以每次都向默认工厂要一批全新实例。
+            //
+            // 名字匹配的排在前面、其余保留，让 Media3 用 sniff 决定真正匹配的那个
+            // —— 与 MIME 能判定时默认工厂返回「首选 + 全部」的行为一致。
+            val all = fallback.createExtractors(named, emptyMap())
+            val (preferred, rest) = all.partition { matches(type, it) }
+            Log.w(
+                "PlayerFactory",
+                "MIME=${contentType ?: "无"} 探测容器=${detected?.label ?: "无"} " +
+                    "filename=${filename ?: "无"} " +
+                    "按${if (detected != null) "探测" else "名"}优先=" +
+                    preferred.joinToString { it.javaClass.simpleName }.ifEmpty { "无" } +
+                    " 共${all.size}个候选（嗅探定夺）"
+            )
+            return (preferred + rest).toTypedArray()
+        }
+
+        private fun contentTypeOf(headers: Map<String, List<String>>): String? =
+            headers.entries
+                .firstOrNull { it.key.equals("Content-Type", ignoreCase = true) }
+                ?.value?.firstOrNull()
+
+        private fun matches(type: Int, extractor: Extractor): Boolean = when (type) {
+            FileTypes.MATROSKA -> extractor is MatroskaExtractor
+            FileTypes.MP4 -> extractor is Mp4Extractor || extractor is FragmentedMp4Extractor
+            FileTypes.TS -> extractor is TsExtractor
+            FileTypes.PS -> extractor is PsExtractor
+            else -> false
+        }
     }
 
     /** 读取缓存目录当前占用（字节数），设置页展示用 */

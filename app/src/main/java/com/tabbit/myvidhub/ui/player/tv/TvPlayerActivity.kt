@@ -6,8 +6,12 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ProgressBar
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -69,9 +73,12 @@ import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.tabbit.myvidhub.data.MediaRepository
+import com.tabbit.myvidhub.data.format.FormatProbe
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.player.PlayerFactory
+import com.tabbit.myvidhub.ui.components.episodeLabel
+import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
 import kotlinx.coroutines.CoroutineScope
@@ -130,6 +137,22 @@ class TvPlayerActivity : ComponentActivity() {
      */
     private var downloadBps by mutableStateOf(-1L)
 
+    /**
+     * 装载中（点击播放 → 首帧出画）。
+     *
+     * 云盘 / TVBox 线路要先跑 spider 解析出真实地址（实测 2~5 秒），这段时间播放器还停在
+     * IDLE，PlayerView 什么都不画，屏幕上就是纯黑 —— 用户会以为点击没生效。
+     * 所以从进入播放器第一帧就自己画转圈，而不是等线路解析完、播放器进入 BUFFERING 才有反馈。
+     */
+    private var loading by mutableStateOf(true)
+
+    /**
+     * 播放器当前状态。
+     * 自挂转圈只在 IDLE（线路解析期）显示：一旦进入 BUFFERING，PlayerView 自带的
+     * exo_buffering 就会画圈，两个圈同时出现会叠在一起。
+     */
+    private var playerState by mutableStateOf(Player.STATE_IDLE)
+
     /** 经 TransferListener 累计的实收字节（每个带宽样本带自己那段窗口的字节数，逐条相加） */
     private var speedBytesTotal = 0L
 
@@ -144,6 +167,9 @@ class TvPlayerActivity : ComponentActivity() {
 
     /** PlayerView 引用：用于设置字幕样式 */
     private var playerView: PlayerView? = null
+
+    /** 装载中进度圈：平台 ProgressBar，与 PlayerView 自带的缓冲转圈同款 */
+    private var loadingView: ProgressBar? = null
 
     /** 字幕是否处于关闭态。自己记录而不是反查播放器，避免不同 Media3 小版本 API 差异 */
     private var textDisabled by mutableStateOf(false)
@@ -241,6 +267,65 @@ class TvPlayerActivity : ComponentActivity() {
                     runOnUiThread { speedBytesTotal += totalBytesLoaded }
                 }
             })
+            // 播放期读真实轨道（分辨率/HDR/杜比视界/音轨），回写到剧集壳。
+            // 详情页那条文件名推测值可能不准，以这里读到的码流信息为准。
+            p.addListener(object : Player.Listener {
+                // 首帧真正上屏才算「加载好了」：READY 只代表数据够播，电视上从 READY 到
+                // 出画还有几百毫秒，提前撤掉转圈会看到一段黑屏闪烁。
+                override fun onRenderedFirstFrame() {
+                    loading = false
+                }
+
+                override fun onTracksChanged(tracks: Tracks) {
+                    val info = FormatProbe.fromTracks(tracks) ?: return
+                    val item = current ?: return
+                    lifecycleScope0 { repo.savePlaybackFormat(item, info) }
+                }
+
+                override fun onPlaybackStateChanged(state: Int) {
+                    playerState = state
+                    val name = when (state) {
+                        Player.STATE_IDLE -> "IDLE"
+                        Player.STATE_BUFFERING -> "BUFFERING"
+                        Player.STATE_READY -> "READY"
+                        Player.STATE_ENDED -> "ENDED"
+                        else -> state.toString()
+                    }
+                    // 「转圈不出画面」时靠这行区分：还在 BUFFERING 就是没数据，
+                    // 到了 READY 说明数据齐了、问题在解码/渲染
+                    Log.w("TvPlayer", "状态=$name ep=${current?.title?.take(40)} pos=${p.currentPosition}")
+                    // 兜底：纯音频流不触发首帧回调，不能让它一直转圈
+                    if (state == Player.STATE_READY && loading) {
+                        handler.postDelayed({ loading = false }, 1_200L)
+                    }
+                }
+
+                override fun onIsLoadingChanged(isLoading: Boolean) {
+                    Log.w("TvPlayer", "loading=$isLoading pos=${p.currentPosition}")
+                }
+
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    // 出错就别再转圈了，否则错误提示会压在转圈上，看着像还在加载
+                    loading = false
+                    val causeMsg = error.cause?.message
+                    // W 级 + 带上出错地址：这台电视 ROM 吞 D 级日志，播放失败时没有这行就只能靠猜
+                    Log.w(
+                        "TvPlayer",
+                        "播放失败 ${error.errorCodeName} " +
+                            "uri=${p.currentMediaItem?.localConfiguration?.uri.toString().take(160)} " +
+                            "cause=${error.cause?.javaClass?.name} msg=$causeMsg"
+                    )
+                    toast = when {
+                        causeMsg?.startsWith("HTTP 404") == true -> causeMsg
+                        causeMsg?.startsWith("HTTP 403") == true ||
+                        causeMsg?.startsWith("HTTP 412") == true -> causeMsg
+                        error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
+                        error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
+                        error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
+                        else -> "播放失败：${error.errorCodeName}"
+                    }
+                }
+            })
         }
 
     /** 当前视频轨的声明码率（bit/s）；容器没写或还拿不到轨信息时返回 0 */
@@ -274,6 +359,7 @@ class TvPlayerActivity : ComponentActivity() {
         lifecycleScope0 {
             val item = runCatching { repo.getMedia(mediaId) }.getOrNull()
             if (item == null) {
+                loading = false
                 toast = "找不到该媒体"
                 return@lifecycleScope0
             }
@@ -303,11 +389,17 @@ class TvPlayerActivity : ComponentActivity() {
 
     private fun play(item: MediaEntity, startMs: Long) {
         titleText = displayTitle(item)
+        loading = true
+        // 新一集从头开始：状态回到 IDLE，自挂转圈立刻出现，不用等播放器回调
+        playerState = Player.STATE_IDLE
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
             val resolved = resolvePlayUrl(item)
-                ?: return@launch
+                ?: run {
+                    loading = false
+                    return@launch
+                }
 
             // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
             // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
@@ -323,7 +415,10 @@ class TvPlayerActivity : ComponentActivity() {
                 playerView?.player = np
                 np
             } else {
-                player ?: return@launch
+                player ?: run {
+                    loading = false
+                    return@launch
+                }
             }
 
             p.setMediaItem(MediaItem.fromUri(resolved.url))
@@ -331,26 +426,6 @@ class TvPlayerActivity : ComponentActivity() {
             if (startMs > 3_000L) p.seekTo(startMs)
             p.setPlaybackSpeed(speed)
             p.playWhenReady = true
-
-            // ===== TV 端补上 Player.Listener（之前完全缺失！播放失败用户什么都看不到）=====
-            // onPlayerError 把 Media3 errorCode 翻译成用户能懂的中文，
-            // 优先用 OkHttp 层拦截时抛出的带明确提示的 IOException message（404/403/412）。
-            p.addListener(object : androidx.media3.common.Player.Listener {
-                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                    val causeMsg = error.cause?.message
-                    // W 级 + 带上出错地址：这台电视 ROM 吞 D 级日志，播放失败时没有这行就只能靠猜
-                    Log.w("TvPlayer", "播放失败 ${error.errorCodeName} url=${resolved.url.take(160)} cause=${error.cause?.javaClass?.name} msg=$causeMsg")
-                    toast = when {
-                        causeMsg?.startsWith("HTTP 404") == true -> causeMsg
-                        causeMsg?.startsWith("HTTP 403") == true ||
-                        causeMsg?.startsWith("HTTP 412") == true -> causeMsg
-                        error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
-                        error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
-                        error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
-                        else -> "播放失败：${error.errorCodeName}"
-                    }
-                }
-            })
         }
     }
 
@@ -365,6 +440,9 @@ class TvPlayerActivity : ComponentActivity() {
         }.fold(
             onSuccess = { it },
             onFailure = {
+                // 解析失败只弹 toast 时，logcat 里看不到任何线索；
+                // 电视 ROM 吞 D 级日志，取证只能靠 W。
+                Log.w("TvPlayer", "云盘解析失败 mediaId=${item.id} playSource=${item.playSource}：${it.message}")
                 toast = it.message ?: "云盘解析失败"
                 null
             }
@@ -645,10 +723,35 @@ class TvPlayerActivity : ComponentActivity() {
                         player = this@TvPlayerActivity.player
                         this@TvPlayerActivity.playerView = this
                         this@TvPlayerActivity.applySubtitleStyle()
+
+                        // 装载转圈：必须是平台 ProgressBar 且不加任何自定义样式，
+                        // 才会和 PlayerView 自带的缓冲转圈（exo_buffering）完全一致。
+                        // 但它只在 STATE_BUFFERING 显示，线路解析期间播放器还是 IDLE，
+                        // 所以由自己挂在 PlayerView 顶层，按 loading 状态开关。
+                        val bar = ProgressBar(c).apply {
+                            isIndeterminate = true
+                            layoutParams = FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
+                                FrameLayout.LayoutParams.WRAP_CONTENT,
+                                Gravity.CENTER
+                            )
+                        }
+                        addView(bar)
+                        this@TvPlayerActivity.loadingView = bar
                     }
                 },
-                update = { it.player = this@TvPlayerActivity.player }
+                update = { view ->
+                    view.player = this@TvPlayerActivity.player
+                    // 只在 IDLE（线路解析 / setMediaItem 之前）画自挂的圈；
+                    // BUFFERING 之后交给 PlayerView 自带的 exo_buffering，避免两个圈重叠。
+                    val showLoading = loading && playerState == Player.STATE_IDLE
+                    loadingView?.visibility = if (showLoading) View.VISIBLE else View.GONE
+                }
             )
+
+            // ---------- 装载中（点击播放 → 首帧出画） ----------
+            // 转圈控件挂在 PlayerView 里（与它自带的缓冲转圈是同一个 ProgressBar），
+            // 这里只负责按 loading 状态切换可见性，见 AndroidView 的 update。
 
             // ---------- 进度层 ----------
             AnimatedVisibility(
@@ -950,8 +1053,7 @@ private fun TvFunctionPanel(
                     } else {
                         episodes.take(12).forEach { ep ->
                             TvChip(
-                                text = if (ep.episode > 0)
-                                    "S${ep.season}E${ep.episode}" else ep.title,
+                                text = ep.episodeLabel(),
                                 selected = ep.id == currentId,
                                 onClick = { onEpisode(ep) }
                             )
@@ -1026,6 +1128,8 @@ private fun TvChip(
 // ---------- 工具 ----------
 
 private fun displayTitle(item: MediaEntity): String = when {
+    item.kind == com.tabbit.myvidhub.data.model.MediaKind.EPISODE && item.usesSourceEpisodeName ->
+        item.title
     item.kind == com.tabbit.myvidhub.data.model.MediaKind.EPISODE && item.episode > 0 ->
         "${item.title}  S${item.season}E${item.episode}"
     else -> item.title

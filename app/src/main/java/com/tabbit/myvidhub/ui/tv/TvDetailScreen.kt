@@ -55,6 +55,7 @@ import com.tabbit.myvidhub.data.emby.EmbyClient
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceKind
+import com.tabbit.myvidhub.data.model.splitCastNames
 import com.tabbit.myvidhub.data.tvbox.HtmlText
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.detail.FocusColorCache
@@ -71,7 +72,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -90,6 +90,9 @@ import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.ui.StandTarget
+import com.tabbit.myvidhub.ui.components.episodeLabel
+import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
+import com.tabbit.myvidhub.ui.components.TextBadge
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
 import com.tabbit.myvidhub.ui.theme.TvText
 import androidx.compose.runtime.collectAsState
@@ -263,6 +266,17 @@ fun TvDetailScreen(
             val latest = vm.mediaOf(id) ?: m
             media = latest
 
+            // 演员/更新备注是这次才入库的字段：老条目里是空串，而上面的分集守卫又让它们
+            // 没机会重拉详情。这里补一次「只写壳」的详情请求——不动分集行，
+            // 「继续观看」进度与正在展示的选集都不受影响；每个 remoteId 一个进程只试一次。
+            if (src?.kind == SourceKind.TVBOX && latest.kind == MediaKind.SERIES &&
+                latest.actors.isBlank()
+            ) {
+                if (vm.refreshTvBoxMeta(m.sourceId, latest.remoteId)) {
+                    media = vm.mediaOf(id) ?: latest
+                }
+            }
+
             // TVBox 多播放源：读取全部云盘/线路，默认选第一条，按选中源过滤分集；
             // Emby 无源概念，playSources 为空时走全量分集。
             val sources = runCatching { vm.playSourcesOf(latest.seriesKey) }.getOrDefault(emptyList())
@@ -340,13 +354,15 @@ fun TvDetailScreen(
 
     val item = media
 
-    // 主演名单：Emby 刮削优先、TMDB 补齐，取前 5 位（电视一行放得下的量）。
-    val tvCast = remember(scraped, tmdb) {
-        val fromEmby = scraped?.actors?.takeIf { it.isNotEmpty() }
-            ?.map { TvCast(it.name, it.role, it.imageUrl) }
-        val fromTmdb = tmdb?.actors?.takeIf { it.isNotEmpty() }
-            ?.map { TvCast(it.name, it.role, it.imageUrl) }
-        (fromEmby ?: fromTmdb).orEmpty().distinctBy { it.name }.take(5)
+    // 主演名单：Emby 刮削优先、TMDB 补齐，最后才回落到源自己给的 vod_actor。
+    // 只取姓名，和导演一样用文字行展示 —— CatVod 协议本来就只有姓名没有头像。
+    // 取前 5 位（电视一行放得下的量）。
+    val sourceActorNames = splitCastNames(item?.actors.orEmpty())
+    val actorNames = remember(scraped, tmdb, sourceActorNames) {
+        val fromEmby = scraped?.actors?.map { it.name }?.takeIf { it.isNotEmpty() }
+        val fromTmdb = tmdb?.actors?.map { it.name }?.takeIf { it.isNotEmpty() }
+        val fromSource = sourceActorNames.takeIf { it.isNotEmpty() }
+        (fromEmby ?: fromTmdb ?: fromSource).orEmpty().distinct().take(5)
     }
 
     // ---------- 分集：按季过滤 + 按页切块 ----------
@@ -586,11 +602,23 @@ fun TvDetailScreen(
                         Spacer(Modifier.height(8.dp))
                         TvMetaRow(item)
                         Spacer(Modifier.height(10.dp))
+                        // TVBox 源的画质来自详情入库时的文件名推测 + 播放期真实轨道回写；
+                        // 源自己给的更新状态/集数/线路数照旧保留，两类信息一起排。
+                        val sourceBadges = buildList {
+                            val remarks = item.remarks.trim()
+                            if (remarks.isNotBlank()) add(remarks)
+                            if (item.kind == MediaKind.SERIES && episodes.isNotEmpty()) {
+                                add("共 ${episodes.size} 集")
+                            }
+                            if (playSources.size > 1) add("${playSources.size} 条线路")
+                        }
                         FormatBadgesRow(
                             tmdbEnabled = false,   // 评分胶囊已删，徽章行不再显示 TMDB 字样
-                            resolution = scraped?.videoResolution.orEmpty(),
-                            hdr = scraped?.hdrType.orEmpty(),
-                            codec = scraped?.videoCodec.orEmpty()
+                            resolution = scraped?.videoResolution.orEmpty().ifBlank { item.videoResolution },
+                            hdr = scraped?.hdrType.orEmpty().ifBlank { item.hdrType },
+                            codec = scraped?.videoCodec.orEmpty().ifBlank { item.videoCodec },
+                            audio = item.audioType,
+                            sourceInfo = sourceBadges
                         )
 
                         // 操作按钮行：只出一个主按钮，三种内容状态各自对应一个明确动词。
@@ -652,9 +680,11 @@ fun TvDetailScreen(
                                     text = run {
                                         when {
                                             resumeEp != null ->
-                                                "继续观看 S${resumeEp.season}E${resumeEp.episode}"
+                                                if (resumeEp.usesSourceEpisodeName) "继续观看"
+                                                else "继续观看 S${resumeEp.season}E${resumeEp.episode}"
                                             item.kind == MediaKind.SERIES && item.episode > 0 ->
-                                                "继续观看 S${item.season}E${item.episode}"
+                                                if (item.usesSourceEpisodeName) "继续观看"
+                                                else "继续观看 S${item.season}E${item.episode}"
                                             else ->
                                                 if (item.positionMs > 5_000L) "继续播放" else "立即播放"
                                         }
@@ -719,21 +749,18 @@ fun TvDetailScreen(
 
                         // ---------- 导演：紧接简介，只读、不接收焦点 ----------
                         val directors = (tmdb?.directors?.takeIf { it.isNotEmpty() }?.map { it.name }
-                            ?: scraped?.directors?.map { it.name })
+                            ?: scraped?.directors?.map { it.name }
+                            ?: splitCastNames(item.directors).take(3))
                             ?.joinToString(" / ").orEmpty()
                         if (directors.isNotBlank()) {
                             Spacer(Modifier.height(10.dp))
                             TvInfoLine("导演", directors)
                         }
 
-                        // ---------- 主演：上移到选集之前，和简介同屏 ----------
-                        if (tvCast.isNotEmpty()) {
-                            TvSectionTitle(
-                                text = "主演",
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(top = 14.dp, bottom = 6.dp)
-                            )
-                            TvCastRow(tvCast)
+                        // ---------- 主演：和导演一样用文字行，不再占一排头像 ----------
+                        if (actorNames.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            TvInfoLine("主演", actorNames.joinToString(" / "))
                         }
 
                         // ---------- 数据来源署名：只读，位置仍要在焦点滚得到的区域 ----------
@@ -928,12 +955,12 @@ private fun TvInfoLine(label: String, value: String) {
     }
 }
 
-/** 每页显示的分集数：电视端一行 10 个、共 4 行，一屏看完，不用横向滑 */
+/** 每页显示的分集数：40 集一页，超出用翻页按钮切换 */
 private const val TV_EPS_PAGE = 40
 
-/** 分集网格列数：详情区铺满整屏后从 6 列提到 10 列，
- *  单格宽度维持在 85dp 上下，比原来更宽裕，遥控器焦点框也更好认。 */
-private const val TV_GRID_COLS = 10
+/** 分集网格列数：分集名是源给的原名（如 "[5.4GB]E01.mkv【…】"），
+ *  10 列时一格不到 90dp，名字全被省略号吃掉；4 列后单格够宽，集名能看清。 */
+private const val TV_GRID_COLS = 4
 
 /** 本地刮削结果的新鲜期：一周内不重复请求 TMDB */
 private const val TV_SCRAPE_FRESH_MS = 7L * 24 * 60 * 60 * 1000
@@ -960,11 +987,7 @@ private fun TvEpisodeCard(
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.05f else 1f, tween(140), label = "ep_card")
 
-    val label = if (episode.episode > 0) {
-        if (episode.season > 0) "S${episode.season}E${episode.episode}" else "第 ${episode.episode} 集"
-    } else {
-        episode.title
-    }
+    val label = episode.episodeLabel()
     val watched = episode.positionMs > 5_000L
     val progress = if (episode.durationMs > 0L) {
         (episode.positionMs.toFloat() / episode.durationMs).coerceIn(0f, 1f)
@@ -1030,115 +1053,45 @@ private fun TvEpisodeCard(
  * 作用是把「片源质量」这类离散事实压缩成一排小胶囊，一眼扫过即可，
  * 不占用正文空间。TMDB 徽章只在真的拿到 TMDB 数据时才出现，
  * 避免开关关闭时界面上出现不该有的来源标识。
+ *
+ * 分辨率 / HDR / 编码 / 音轨三条路都能给：Emby 来自 MediaSources，
+ * TVBox 来自详情入库时的文件名推测 + 播放期真实轨道回写。
+ * 源自己给的信息（[sourceInfo]：更新状态、集数、线路数）与画质徽章并存，
+ * 画质在前、源信息在后；两边都没有就整行不出现。
  */
 @Composable
 private fun FormatBadgesRow(
     tmdbEnabled: Boolean,
     resolution: String,
     hdr: String,
-    codec: String
+    codec: String,
+    audio: String,
+    sourceInfo: List<String>
 ) {
-    val badges = mutableListOf<String>()
-    if (tmdbEnabled) badges.add("TMDB")
-    if (resolution.isNotBlank()) badges.add(resolution)
-    if (hdr.isNotBlank()) badges.add(hdr)
-    if (codec.isNotBlank()) badges.add(codec.uppercase())
-    // 一条徽章都没有时也要占位（渲染一个灰色「—」），
-    // 否则整行直接消失，有没有刮削的页面骨架会不一样，首屏高度会跳。
-    val placeholder = badges.isEmpty()
-    if (placeholder) badges.add("—")
+    val badges = mutableListOf<Pair<String, Color>>()
+    if (tmdbEnabled) badges.add("TMDB" to AppColors.Brand)
+    if (resolution.isNotBlank()) badges.add(resolution to Color(0xFF01B4E4))
+    if (hdr.isNotBlank()) {
+        val bg = when (hdr) {
+            "Dolby Vision" -> Color(0xFF6D4C41)
+            "HDR10+" -> Color(0xFFE50914)
+            "HDR10", "HDR" -> Color(0xFF2E7D32)
+            "HLG" -> Color(0xFFF57C00)
+            else -> Color(0xFF455A64)
+        }
+        badges.add(hdr to bg)
+    }
+    if (codec.isNotBlank()) badges.add(codec.uppercase() to Color(0xFF455A64))
+    if (audio.isNotBlank() && audio != "Dolby Digital") badges.add(audio to Color(0xFF6D4C41))
+    sourceInfo.forEach { badges.add(it to Color(0xFF455A64)) }
+    if (badges.isEmpty()) return
 
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        badges.forEach { label ->
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(
-                        if (label == "TMDB") AppColors.Brand.copy(alpha = 0.20f)
-                        else Color.White.copy(alpha = 0.10f)
-                    )
-                    .padding(horizontal = 9.dp, vertical = 3.dp)
-            ) {
-                Text(
-                    label,
-                    color = when {
-                        label == "TMDB" -> AppColors.BrandSoft
-                        placeholder -> TvText.Hairline
-                        else -> TvText.Body
-                    },
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
-        }
+        // 与手机端详情页的 FormatBadgesRow 用同一套 TextBadge，双端徽章尺寸一致
+        badges.forEach { (label, bg) -> TextBadge(label, bg) }
     }
 }
 
-/** 电视端主演行用的轻量数据结构，避免直接依赖 Emby / TMDB 两套 Person 类型 */
-private data class TvCast(val name: String, val role: String, val imageUrl: String)
-
-/**
- * 主演头像行：圆形头像 + 姓名 + 角色。
- *
- * 上移到选集之前后，它是「简介 → 导演 → 主演 → 选集」这一屏的一部分，
- * 所以头像从 72dp 收到 56dp，一行五个仍能在三米外看清脸，
- * 又不会把选集首行挤出屏幕。
- */
-@Composable
-private fun TvCastRow(cast: List<TvCast>) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        cast.forEach { person ->
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.width(76.dp)
-            ) {
-                Box(
-                    Modifier
-                        .size(56.dp)
-                        .clip(CircleShape)
-                        .background(AppColors.SurfaceHi),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (person.imageUrl.isNotBlank()) {
-                        AsyncImage(
-                            model = person.imageUrl,
-                            contentDescription = person.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Text(
-                            person.name.take(1),
-                            color = TvText.Meta,
-                            style = MaterialTheme.typography.titleLarge
-                        )
-                    }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    person.name,
-                    color = TvText.Section,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (person.role.isNotBlank()) {
-                    Text(
-                        person.role,
-                        color = TvText.Muted,
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-    }
-}

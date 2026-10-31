@@ -56,6 +56,8 @@ object CatVodResultParser {
                 typeName = o.optString("vod_class").ifBlank { o.optString("vodClass") },
                 content = o.optString("vod_content").ifBlank { o.optString("vodContent") },
                 score = o.optString("vod_score").toDoubleOrNull() ?: 0.0,
+                actors = o.optString("vod_actor").ifBlank { o.optString("vodActor") },
+                directors = o.optString("vod_director").ifBlank { o.optString("vodDirector") },
                 siteKey = siteKey,
                 siteName = siteName
             )
@@ -87,6 +89,8 @@ object CatVodResultParser {
             typeName = obj.optString("vod_class").ifBlank { obj.optString("vodClass") },
             content = obj.optString("vod_content").ifBlank { obj.optString("vodContent") },
             score = obj.optString("vod_score").toDoubleOrNull() ?: 0.0,
+            actors = obj.optString("vod_actor").ifBlank { obj.optString("vodActor") },
+            directors = obj.optString("vod_director").ifBlank { obj.optString("vodDirector") },
             siteKey = siteKey,
             siteName = siteName
         )

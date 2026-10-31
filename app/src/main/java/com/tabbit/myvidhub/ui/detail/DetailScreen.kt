@@ -80,6 +80,7 @@ import com.tabbit.myvidhub.data.emby.EmbyClient
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceKind
+import com.tabbit.myvidhub.data.model.splitCastNames
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.FormatBadgesRow
@@ -268,6 +269,16 @@ fun DetailScreen(
 
                 episodes = eps
                 selectedSeason = eps.firstOrNull()?.season ?: 1
+            }
+
+            // 演员/更新备注是这次才入库的列，老条目里是空串（而分集守卫又让它们没机会重拉）。
+            // 补一次「只写壳」的详情请求：不删不插分集，播放进度与选集列表都不受影响。
+            val shell = vm.mediaOf(id) ?: m
+            if (shell.kind == MediaKind.SERIES && shell.actors.isBlank() && shell.remarks.isBlank() &&
+                vm.sourceOf(shell.sourceId)?.kind == SourceKind.TVBOX &&
+                vm.refreshTvBoxMeta(shell.sourceId, shell.remoteId)
+            ) {
+                media = vm.mediaOf(id) ?: shell
             }
         }
         loading = false
@@ -498,13 +509,16 @@ fun DetailScreen(
                                 }
                             }
 
-                            // 第三行：格式徽章（TMDB 图标 + Emby 解析到的 分辨率/HDR/Codec）
+                            // 第三行：格式徽章（TMDB 图标 + 画质）
+                            // Emby 走刮削得到的 MediaSources；TVBox 协议没有这些字段，
+                            // 用详情页入库时的文件名推测值，播过一次后由 Media3 真实轨道覆盖。
                             // 有数据才显示，什么都没有就自然留出空行不占位
                             FormatBadgesRow(
                                 tmdbEnabled = tmdb != null,
-                                resolution = scraped?.videoResolution.orEmpty(),
-                                hdr = scraped?.hdrType.orEmpty(),
-                                codec = scraped?.videoCodec.orEmpty()
+                                resolution = scraped?.videoResolution.orEmpty().ifBlank { item.videoResolution },
+                                hdr = scraped?.hdrType.orEmpty().ifBlank { item.hdrType },
+                                codec = scraped?.videoCodec.orEmpty().ifBlank { item.videoCodec },
+                                audio = item.audioType
                             )
                         }
                     }
@@ -610,9 +624,14 @@ fun DetailScreen(
                         }
                     }
                     val directors = (scraped?.directors?.map { it.toCast() }
-                        ?: tmdb?.directors?.map { it.toCast() }.orEmpty())
+                        ?: tmdb?.directors?.map { it.toCast() }.orEmpty()
+                            .takeIf { it.isNotEmpty() }
+                        ?: splitCastNames(item.directors).take(3).map { CastPerson(it, "", "") })
+                    // 源给的名单没有头像，走 CastCard 的首字占位样式；上限与 Emby 那条路一致
                     val actors = (scraped?.actors?.map { it.toCast() }
-                        ?: tmdb?.actors?.map { it.toCast() }.orEmpty())
+                        ?: tmdb?.actors?.map { it.toCast() }.orEmpty()
+                            .takeIf { it.isNotEmpty() }
+                        ?: splitCastNames(item.actors).take(12).map { CastPerson(it, "", "") })
 
                     if (tagline.isNotBlank() || chips.isNotEmpty() || directors.isNotEmpty() || actors.isNotEmpty()) {
                         item {

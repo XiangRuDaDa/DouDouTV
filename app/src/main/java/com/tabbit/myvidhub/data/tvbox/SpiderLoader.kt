@@ -159,7 +159,7 @@ object SpiderLoader {
         loaders[key]?.let {
             // 缓存命中：spider 已加载，但 LocalServer 可能未启动（进程重启后缓存还在但本地代理已死）。
             // LocalServer 是端口 9978 的视频代理，云盘播放依赖它，必须确保启动。
-            if (localServerStarted.add(key)) startLocalServerWithFallback(key, it)
+            if (localServerStarted.add(key)) ensureLocalProxy(key, it)
             return key
         }
 
@@ -170,7 +170,7 @@ object SpiderLoader {
                 failedInit.remove(key)
                 loaders[key] = recovered
                 // 恢复路径跳过了 prepareLoader，这里也要启动本地视频代理
-                if (localServerStarted.add(key)) startLocalServerWithFallback(key, recovered)
+                if (localServerStarted.add(key)) ensureLocalProxy(key, recovered)
                 return key
             }
             fail(err)
@@ -209,6 +209,12 @@ object SpiderLoader {
         val initStarted = System.currentTimeMillis()
         // 记在调用之前：Init 超时抛异常时这个时刻也要留下，恢复路径靠它算解密 dex 的新鲜度
         initStartedAt[key] = initStarted
+
+        // 必须在 Init 之前把 9978 占上：壳 native 初始化会从 8964 起逐个端口探测本地代理，
+        // 扫到 39009 还没找到才回退到默认 9978（实测 24 秒，就是冷启动卡的那段）。
+        // 端口先监听，探测在 9978 即命中；命中结果与壳自身的兜底一致，不改变后续行为。
+        val localProxyUp = LocalProxyServer.start()
+
         val initClazz = runCatching { stubLoader.loadClass("com.github.catvod.spider.Init") }
             .getOrElse {
                 fail("spider 包缺少 Init 类：${it.message}")
@@ -218,6 +224,9 @@ object SpiderLoader {
         } catch (e: Exception) {
             fail("spider 壳初始化失败：${e.message}")
         }
+        // 必须等 Init 完成才绑定：壳的 native proxyInvoke 会用 Init.loader() 的返回值去 loadClass，
+        // Init 没跑完时该值还是 null，直接在 JNI 层 abort 整个进程（已实测）。
+        LocalProxyServer.bind { params -> invokeProxyInvoke(initClazz, params) }
 
         // 4) 主 loader 一律用「jar + 扫到的解密 dex」自己组，壳 Init.loader() 只收进备用表。
         //    真机证据（旧版把壳 loader 当主 loader，结果整条链路 CNFE、播放全挂）：
@@ -240,12 +249,28 @@ object SpiderLoader {
 
         loaders[key] = loader
 
-        // 5) 启动 spider 内置的本地视频代理（LocalServer，默认端口 9978）。
-        //    playerContent 返回的视频地址形如 http://127.0.0.1:9978/proxy?...，
-        //    需要 LocalServer（NanoHTTPD）监听该端口、代理视频流并注入 Cookie。
-        //    标准 TVBox 在 Application.onCreate 里启动，这里在 spider Init 成功后启动。
-        //    jar 组的 loader 找不到 LocalServer 类时，再拿壳 loader 试一次（两种壳各放一边）。
-        if (localServerStarted.add(key)) startLocalServerWithFallback(key, loader)
+        // 5) 本地视频代理（LocalServer，默认端口 9978）。
+        //    playerContent 返回的视频地址形如 http://127.0.0.1:9978/proxy?...，需要监听该端口。
+        //    自建的 LocalProxyServer 已在 Init 之前占住 9978，此时反射启动必然端口占用，
+        //    只在自建服务没起来时（端口被别的东西占了）才走壳里的反射兜底。
+        if (localServerStarted.add(key) && !localProxyUp) {
+            startLocalServerWithFallback(key, loader)
+        }
+    }
+
+    /** 调用壳暴露的 Init.proxyInvoke(Map)：本地代理收到请求后由壳的 native 生成响应 */
+    private fun invokeProxyInvoke(initClazz: Class<*>, params: Map<String, String>): Array<Any?>? = runCatching {
+        initClazz.getDeclaredMethod("proxyInvoke", java.util.Map::class.java)
+            .invoke(null, params) as? Array<Any?>
+    }.getOrElse {
+        Log.w(TAG, "proxyInvoke 调用失败：${it.javaClass.simpleName}: ${it.message}")
+        null
+    }
+
+    /** 缓存命中路径没有 initClazz，从已加载的 loader 里取 Init 再绑定 */
+    private fun bindProxyInvoke(loader: ClassLoader) {
+        val initClazz = runCatching { loader.loadClass("com.github.catvod.spider.Init") }.getOrNull() ?: return
+        LocalProxyServer.bind { params -> invokeProxyInvoke(initClazz, params) }
     }
 
     /**
@@ -309,6 +334,15 @@ object SpiderLoader {
     private fun startLocalServerWithFallback(key: String, primary: ClassLoader) {
         if (startLocalServer(primary)) return
         shellLoaders[key]?.let { startLocalServer(it) }
+    }
+
+    /** 确保 9978 有服务：优先自建（同时挂上壳的 proxyInvoke），失败才退回反射启动壳里的 LocalServer */
+    private fun ensureLocalProxy(key: String, loader: ClassLoader) {
+        if (LocalProxyServer.start()) {
+            bindProxyInvoke(loader)
+            return
+        }
+        startLocalServerWithFallback(key, loader)
     }
 
     /**

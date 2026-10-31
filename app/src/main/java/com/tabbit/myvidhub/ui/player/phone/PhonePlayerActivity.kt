@@ -64,10 +64,12 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.tabbit.myvidhub.R
 import com.tabbit.myvidhub.data.MediaRepository
+import com.tabbit.myvidhub.data.format.FormatProbe
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.player.PlayerFactory
+import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
 import kotlinx.coroutines.Job
@@ -450,7 +452,9 @@ class PhonePlayerActivity : ComponentActivity() {
     }
 
     private fun displayTitle(item: MediaEntity): String =
-        if (item.kind == MediaKind.EPISODE && item.episode > 0) {
+        if (item.usesSourceEpisodeName) {
+            item.title
+        } else if (item.kind == MediaKind.EPISODE && item.episode > 0) {
             "%s  S%02dE%02d".format(item.title, item.season, item.episode)
         } else {
             item.title
@@ -502,6 +506,10 @@ class PhonePlayerActivity : ComponentActivity() {
                     updatePlayPauseLabel()
                 }
 
+                override fun onTracksChanged(tracks: Tracks) {
+                    rememberFormat(tracks)
+                }
+
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     Log.e("PhonePlayer", "player error: ${error.errorCodeName} ${error.message}", error)
                     // 优先使用 OkHttp 层拦截时抛出的带中文提示的 IOException message
@@ -545,6 +553,18 @@ class PhonePlayerActivity : ComponentActivity() {
                 null
             }
         )
+    }
+
+    /**
+     * 播放期读真实轨道（分辨率/HDR/杜比视界/音轨），回写画质到剧集壳。
+     * 详情页那条文件名推测值可能不准，以这里读到的码流信息为准；仓储侧判重，不会重复写。
+     */
+    private fun rememberFormat(tracks: Tracks) {
+        val info = FormatProbe.fromTracks(tracks) ?: return
+        val item = current ?: return
+        lifecycleScope.launch {
+            MediaRepository(this@PhonePlayerActivity).savePlaybackFormat(item, info)
+        }
     }
 
     private fun loadEpisodes(item: MediaEntity) {
@@ -617,6 +637,9 @@ class PhonePlayerActivity : ComponentActivity() {
                     }
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         updatePlayPauseLabel()
+                    }
+                    override fun onTracksChanged(tracks: Tracks) {
+                        rememberFormat(tracks)
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         val causeMsg = error.cause?.message

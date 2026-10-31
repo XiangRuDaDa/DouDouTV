@@ -137,8 +137,9 @@ private fun ProgressLine(fraction: Float) {
     }
 }
 
-/** 剧集显示 "S02E05"，电影显示年份 */
+/** 剧集显示源给的分集名；Emby 这类没有源名的显示 "S02E05"，电影显示年份 */
 fun MediaEntity.subtitle(): String = when {
+    kind == MediaKind.EPISODE && usesSourceEpisodeName -> title
     kind == MediaKind.EPISODE && episode > 0 -> "S%02dE%02d".format(season, episode)
     year > 0 -> year.toString()
     else -> ""

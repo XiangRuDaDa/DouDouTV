@@ -9,6 +9,7 @@ import com.tabbit.myvidhub.data.db.HotTitleEntity
 import com.tabbit.myvidhub.data.db.toPinyinInitials
 import com.tabbit.myvidhub.data.douban.DoubanClient
 import com.tabbit.myvidhub.data.emby.EmbyClient
+import com.tabbit.myvidhub.data.format.FormatProbe
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceEntity
@@ -245,6 +246,9 @@ class MediaRepository(private val context: Context) {
                 genres = vod.typeName,
                 overview = vod.content,
                 sourceName = source.name,
+                actors = vod.actors,
+                directors = vod.directors,
+                remarks = vod.remarks,
                 // 远程结果也计算拼音（方便再搜）
                 pinyinInitials = vod.name.toPinyinInitials()
             )
@@ -330,6 +334,10 @@ class MediaRepository(private val context: Context) {
      * http(s) 直链同样交给 spider 处理（可能补 Cookie/Referer，也可能识别出需要网页解析）。
      * 直链解析失败/超时会由 [TvBoxClient.resolvePlayUrl] 内部回退原地址，不影响可播性。
      *
+     * 云盘线路额外做一件事：分集 uri 里是带分享令牌的 id，令牌会过期，
+     * 入库久了的记录拿去转存会被夸克回 HTTP 404。所以先按需刷新详情换新令牌，
+     * 解析仍失败时再强刷一次重试。
+     *
      * @param episode 分集实体（需包含 sourceId、seriesKey、playSource、uri）
      * @return 解析结果（URL + headers）；非 TVBox 来源原样返回 uri
      */
@@ -340,10 +348,173 @@ class MediaRepository(private val context: Context) {
 
         // episode.seriesKey = tvbox:sourceId:siteKey:vodId
         val (siteKey, _) = parseTvBoxKey(episode.sourceId, episode.seriesKey)
-        val vipFlags = mediaDao.playSourcesOf(episode.seriesKey)
-
         val client = TvBoxClient(source.location, context)
-        client.resolvePlayUrl(siteKey, episode.playSource, episode.uri, vipFlags)
+
+        // 直链没有时效问题，照旧一次解析
+        if (episode.uri.startsWith("http://") || episode.uri.startsWith("https://")) {
+            return@withContext client.resolvePlayUrl(siteKey, episode.playSource, episode.uri)
+        }
+
+        val current = refreshCloudShareUris(episode, client, siteKey, force = false) ?: episode
+        try {
+            client.resolvePlayUrl(siteKey, current.playSource, current.uri)
+        } catch (e: Exception) {
+            // 刷新被防抖挡下（刚刷过）或详情拉取失败时也得再试一次，
+            // 否则缓存窗口内同一个坏 id 会一直被判死
+            val retried = refreshCloudShareUris(episode, client, siteKey, force = true)
+            if (retried != null) {
+                Log.w("SpiderProxy", "云盘解析失败，已刷新分享令牌后重试：${e.message}")
+                client.resolvePlayUrl(siteKey, retried.playSource, retried.uri)
+            } else {
+                Log.w("SpiderProxy", "云盘解析失败，刷新未生效，原地址重试一次：${e.message}")
+                client.resolvePlayUrl(siteKey, current.playSource, current.uri)
+            }
+        }
+    }
+
+    /** 云盘分享令牌的保守有效期：入库超过这个时长就重新拉一次详情换新令牌 */
+    private val cloudUriTtlMs = CLOUD_URI_TTL_MS
+
+    /**
+     * 用最新详情覆盖该剧同一条云盘线路的全部分集 uri。
+     *
+     * 只改 uri，不动行 id 与播放进度；直链分集不碰。
+     *
+     * @param force true 表示解析刚失败、怀疑令牌已失效，跳过时间窗口
+     * @return 当前分集的最新副本；没刷新（还在窗口内/拉取失败/线路已不存在）时返回 null
+     */
+    private suspend fun refreshCloudShareUris(
+        episode: MediaEntity,
+        client: TvBoxClient,
+        siteKey: String,
+        force: Boolean
+    ): MediaEntity? {
+        val now = System.currentTimeMillis()
+        val lastRefresh = CLOUD_REFRESH_AT[episode.seriesKey] ?: 0L
+        if (!force) {
+            val newest = maxOf(episode.addedAt, lastRefresh)
+            if (now - newest < cloudUriTtlMs) return null
+        }
+        // force 不设窗口：刚刷新就失败的 id 不能再用，必须换一个新的
+
+        val (_, vodId) = parseTvBoxKey(episode.sourceId, episode.seriesKey)
+        if (vodId.isBlank()) return null
+        val detail = runCatching { client.detail(vodId, siteKey) }.getOrNull() ?: return null
+        CLOUD_REFRESH_AT[episode.seriesKey] = now
+
+        val line = detail.playSources.firstOrNull { it.name == episode.playSource } ?: return null
+        val rows = mediaDao.episodesBySource(episode.seriesKey, episode.playSource)
+        if (rows.isEmpty()) return null
+
+        // 源会改分集名（换体积标注、去掉【分享标记】、换扩展名），全等匹配太脆：
+        // 全名 → 归一化核心名（唯一时）→ 集号（唯一时）→ 数量一致时按下标兜底，逐级降级
+        val byName = line.episodes.groupBy { it.name }.mapValues { it.value.first() }
+        val byCore = line.episodes.groupBy { cloudNameCore(it.name) }
+            .filterValues { it.size == 1 }
+            .mapValues { it.value.first() }
+        val byNumber = line.episodes
+            .mapNotNull { ep -> cloudEpisodeNumber(ep.name)?.let { it to ep } }
+            .groupBy { it.first }
+            .filterValues { it.size == 1 }
+            .mapValues { it.value.first().second }
+        val byIndex = rows.size == line.episodes.size
+
+        val updates = ArrayList<MediaEntity>(rows.size)
+        val unmatched = ArrayList<String>(2)
+        var freshUri: String? = null
+        for ((index, row) in rows.withIndex()) {
+            if (row.uri.startsWith("http")) continue
+            val bySourceName = byName[row.title]
+                ?: byCore[cloudNameCore(row.title)]
+                ?: cloudEpisodeNumber(row.title)?.let { byNumber[it] }
+            val hit = bySourceName ?: if (byIndex) line.episodes.getOrNull(index) else null
+            if (hit == null) {
+                unmatched += row.title
+                continue
+            }
+            // 按名字命中时把新名也写回去，详情页显示的就是源当前的名字；
+            // 按下标兜底时名字可能真不一样，只换地址，别改标题
+            val next = if (bySourceName != null) {
+                row.copy(uri = hit.url, title = hit.name, pinyinInitials = hit.name.toPinyinInitials())
+            } else {
+                row.copy(uri = hit.url)
+            }
+            if (next.uri != row.uri || next.title != row.title) updates += next
+            if (row.id == episode.id) freshUri = hit.url
+        }
+        if (unmatched.isNotEmpty()) {
+            Log.w(
+                "SpiderProxy",
+                "云盘分集对不上：db=${rows.size} src=${line.episodes.size} " +
+                    "未匹配=${unmatched.take(3)} 源名=${line.episodes.take(3).map { it.name }}"
+            )
+        }
+        if (updates.isNotEmpty()) {
+            mediaDao.updateAll(updates)
+            // 打印当前集 id 换没换：换了还 404 就说明锅不在分享令牌上
+            val idNote = when {
+                freshUri == null -> "当前集未在返回列表"
+                freshUri == episode.uri -> "当前集 id 未变"
+                else -> "当前集 id 已换(${episode.uri.hashCode()}→${freshUri.hashCode()})"
+            }
+            Log.w(
+                "SpiderProxy",
+                "云盘分集 uri 已刷新：${episode.seriesKey}/${episode.playSource} 更新 ${updates.size} 条，$idNote"
+            )
+        }
+        return freshUri?.let { episode.copy(uri = it) }
+    }
+
+    /** 分集名归一化：去掉【分享标记】、[体积] 前缀、扩展名与空白，用于源改名后的兜底匹配 */
+    private fun cloudNameCore(name: String): String = name
+        .replace(Regex("【[^】]*】"), "")
+        .replace(Regex("\\[[^\\]]*]"), "")
+        .replace(Regex("\\.[A-Za-z0-9]{2,5}$"), "")
+        .replace(Regex("\\s+"), "")
+        .lowercase()
+
+    /**
+     * 从分集名里猜集号（E01 / EP01 / 第01集 / 01集 / 20 1080P），猜不出返回 null。
+     * 必须在去掉空格之前匹配：「20 1080P」里 20 后面紧跟空格才是集号，
+     * 直接取自数字会贪婪成 201。
+     */
+    private fun cloudEpisodeNumber(name: String): Int? {
+        val base = name
+            .replace(Regex("【[^】]*】"), "")
+            .replace(Regex("\\[[^\\]]*]"), "")
+            .trim()
+        val m = Regex("^(?:ep?|第)?(\\d{1,3})(?:集)?(?=[\\s.\\-_（(]|$)", RegexOption.IGNORE_CASE)
+            .find(base) ?: return null
+        return m.groupValues[1].toIntOrNull()?.takeIf { it in 1..999 }
+    }
+
+    /**
+     * 播放期把 Media3 读到的真实画质回写到剧集壳（方案C 的校正一步）。
+     *
+     * 只对 TVBox 生效：Emby 的画质来自 MediaSources 接口，本来就是真值，别让播放器覆盖。
+     * 新值为空时保留库里的旧值（轨道里没有的信息不该被抹掉）。
+     */
+    suspend fun savePlaybackFormat(item: MediaEntity, info: FormatProbe.Info) = withContext(Dispatchers.IO) {
+        if (info.isEmpty) return@withContext
+        val source = sourceDao.get(item.sourceId) ?: return@withContext
+        if (source.kind != SourceKind.TVBOX) return@withContext
+
+        val target = if (item.kind == MediaKind.EPISODE) mediaDao.shellOf(item.seriesKey) else item
+        if (target == null) return@withContext
+        val merged = target.copy(
+            videoResolution = info.resolution.ifBlank { target.videoResolution },
+            hdrType = info.hdr.ifBlank { target.hdrType },
+            videoCodec = info.codec.ifBlank { target.videoCodec },
+            audioType = info.audio.ifBlank { target.audioType }
+        )
+        if (merged == target) return@withContext
+        mediaDao.update(merged)
+        // W 级：电视 ROM 吞 D 级日志，画质回写是排障时要核对的事实
+        Log.w(
+            "FormatProbe",
+            "画质回写 ${target.title}：${merged.videoResolution}/${merged.hdrType}/" +
+                "${merged.videoCodec}/${merged.audioType}"
+        )
     }
 
     // ---------------- 首页分类 / 浏览页 ----------------
@@ -701,7 +872,10 @@ class MediaRepository(private val context: Context) {
             posterUrl = vod.pic,
             backdropUrl = vod.pic,
             rating = vod.score,
-            genres = vod.typeName
+            genres = vod.typeName,
+            actors = vod.actors,
+            directors = vod.directors,
+            remarks = vod.remarks
         )
     }
 
@@ -751,7 +925,11 @@ class MediaRepository(private val context: Context) {
                     overview = entity.overview.ifBlank { old.overview },
                     genres = entity.genres.ifBlank { old.genres },
                     rating = if (entity.rating > 0) entity.rating else old.rating,
-                    year = if (entity.year > 0) entity.year else old.year
+                    year = if (entity.year > 0) entity.year else old.year,
+                    // 列表接口有时只给 vod_name 不给演员/备注，不能让下一次同步把详情里拿到的清空
+                    actors = entity.actors.ifBlank { old.actors },
+                    directors = entity.directors.ifBlank { old.directors },
+                    remarks = entity.remarks.ifBlank { old.remarks }
                 )
             }
         }
@@ -777,7 +955,10 @@ class MediaRepository(private val context: Context) {
             posterUrl = vod.pic,
             backdropUrl = vod.pic,
             rating = vod.score,
-            genres = vod.typeName
+            genres = vod.typeName,
+            actors = vod.actors,
+            directors = vod.directors,
+            remarks = vod.remarks
         )
     }
 
@@ -796,6 +977,16 @@ class MediaRepository(private val context: Context) {
         val shell = mediaDao.byRemoteId(remoteId)
         val seriesKey = shell?.seriesKey?.takeIf { it.isNotBlank() } ?: remoteId
 
+        // 方案C 的源侧一步：CatVod 协议没有 HDR/杜比字段，能从源拿到的只有备注和分集文件名。
+        // 这里先把文本推测写进壳行，详情页不播放就能显示；播放期读到真实轨道后会覆盖它。
+        val textHint = buildString {
+            append(detail.remarks)
+            detail.playSources.forEach { src ->
+                src.episodes.forEach { ep -> append(' ').append(ep.name) }
+            }
+        }
+        val hint = FormatProbe.fromText(textHint)
+
         // 用详情补全海报与简介
         shell?.let {
             mediaDao.update(
@@ -804,7 +995,14 @@ class MediaRepository(private val context: Context) {
                     posterUrl = detail.pic.ifBlank { it.posterUrl },
                     backdropUrl = detail.pic.ifBlank { it.backdropUrl },
                     rating = if (detail.score > 0) detail.score else it.rating,
-                    year = if (detail.year > 0) detail.year else it.year
+                    year = if (detail.year > 0) detail.year else it.year,
+                    actors = detail.actors.ifBlank { it.actors },
+                    directors = detail.directors.ifBlank { it.directors },
+                    remarks = detail.remarks.ifBlank { it.remarks },
+                    videoResolution = hint.resolution.ifBlank { it.videoResolution },
+                    hdrType = hint.hdr.ifBlank { it.hdrType },
+                    videoCodec = hint.codec.ifBlank { it.videoCodec },
+                    audioType = hint.audio.ifBlank { it.audioType }
                 )
             )
         }
@@ -846,6 +1044,48 @@ class MediaRepository(private val context: Context) {
         detail.playSources
     }
 
+    /** 演员/备注补齐只在一条 seriesKey 上试一次：源本来就不给这些字段时，重复请求白挨一次超时 */
+    private val metaTried = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /**
+     * 只补剧集壳的演职员与更新备注，不碰分集行。
+     *
+     * 为什么要单独一条路：actors/directors/remarks 是新加的列，老库里的 TVBox 条目全是空串，
+     * 而详情页的分集守卫（库里已有分集就不再拉详情）正好让它们没机会补。
+     * 直接复用 [loadTvBoxDetail] 会把分集全删重插，顺手清掉「继续观看」进度，所以这里只写壳。
+     *
+     * 返回 true 表示库里这条记录已经被更新，调用方重新读一次就能看到。
+     */
+    suspend fun refreshTvBoxMeta(source: SourceEntity, remoteId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (source.kind != SourceKind.TVBOX) return@withContext false
+            if (metaTried.putIfAbsent(remoteId, true) != null) return@withContext false
+            val shell = mediaDao.byRemoteId(remoteId) ?: return@withContext false
+            if (shell.kind != MediaKind.SERIES) return@withContext false
+            val (siteKey, vodId) = parseTvBoxKey(source.id, remoteId)
+            val detail = runCatching {
+                TvBoxClient(source.location, context).detail(vodId, siteKey)
+            }.getOrNull() ?: return@withContext false
+            if (detail.actors.isBlank() && detail.directors.isBlank() && detail.remarks.isBlank()) {
+                return@withContext false
+            }
+            mediaDao.update(
+                shell.copy(
+                    actors = detail.actors.ifBlank { shell.actors },
+                    directors = detail.directors.ifBlank { shell.directors },
+                    remarks = detail.remarks.ifBlank { shell.remarks }
+                )
+            )
+            true
+        }
+
+    /** 供 ViewModel 调用：按 sourceId 找源后补元数据 */
+    suspend fun refreshTvBoxMeta(sourceId: Long, remoteId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val src = sourceDao.get(sourceId) ?: return@withContext false
+            refreshTvBoxMeta(src, remoteId)
+        }
+
     /** TVBox 条目唯一键：配置型源可能含多个站点，用 siteKey 区分 */
     private fun tvboxKey(sourceId: Long, siteKey: String, vodId: String): String =
         if (siteKey.isBlank()) "tvbox:$sourceId:$vodId" else "tvbox:$sourceId:$siteKey:$vodId"
@@ -875,6 +1115,16 @@ class MediaRepository(private val context: Context) {
     }
 
     private companion object {
+        /** 云盘分享令牌的保守有效期：入库超过这个时长就重新拉一次详情换新令牌 */
+        const val CLOUD_URI_TTL_MS = 5 * 60 * 1000L
+
+        /**
+         * seriesKey → 上次刷新 uri 的时间。
+         * 必须是进程级：播放器每开一个 Activity 都会 new 一个 MediaRepository，
+         * 放实例字段会导致连播时每集都先拉一次详情。
+         */
+        val CLOUD_REFRESH_AT = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
         /** 热门榜联想缓存有效期：24 小时 */
         const val HOT_SUGGEST_TTL_MS = 24 * 60 * 60 * 1000L
 

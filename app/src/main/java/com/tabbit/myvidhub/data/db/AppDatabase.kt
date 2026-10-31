@@ -12,7 +12,7 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 
 @Database(
     entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class],
-    version = 9,
+    version = 11,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -86,8 +86,30 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v9 → v10：新增 actors / directors / remarks 三列（TVBox 源的演职员与更新备注）。
+         * CatVod 协议里这些都是逗号分隔的纯文本，入库后详情页不用再回源重拉。
+         */
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE media ADD COLUMN actors TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE media ADD COLUMN directors TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE media ADD COLUMN remarks TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        /**
+         * v10 → v11：新增 audioType 列（音轨类型，杜比类音轨的展示位）。
+         * 视频侧的 resolution/hdr/codec 三列 v6 就有，这次只补音轨，同样用 ADD COLUMN 增量迁移。
+         */
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE media ADD COLUMN audioType TEXT NOT NULL DEFAULT ''")
+            }
+        }
 
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
@@ -96,7 +118,10 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "myvidhub.db"
                 )
-                    .addMigrations(MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                    .addMigrations(
+                        MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+                        MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11
+                    )
                     .fallbackToDestructiveMigration()
                     .build()
                     .also { INSTANCE = it }

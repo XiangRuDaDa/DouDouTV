@@ -102,6 +102,7 @@ import com.tabbit.myvidhub.ui.cardStand
 import com.tabbit.myvidhub.ui.components.PosterArt
 import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.components.ShimmerCard
+import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
@@ -1212,7 +1213,7 @@ private fun TvContinueRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (item.seriesKey.isNotBlank() && item.season > 0) {
+                    if (item.seriesKey.isNotBlank() && item.season > 0 && !item.usesSourceEpisodeName) {
                         Text(
                             "S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')}",
                             color = TvText.Body,
@@ -1287,7 +1288,7 @@ private fun TvContinueActionDialog(
                 Spacer(Modifier.height(6.dp))
                 Text(
                     text = buildString {
-                        if (item.seriesKey.isNotBlank() && item.season > 0) {
+                        if (item.seriesKey.isNotBlank() && item.season > 0 && !item.usesSourceEpisodeName) {
                             append("S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')} · ")
                         }
                         append("看到 ")

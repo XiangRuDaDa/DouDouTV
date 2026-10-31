@@ -88,6 +88,7 @@ import com.tabbit.myvidhub.ui.components.HeroBanner
 import com.tabbit.myvidhub.ui.components.PosterCard
 import com.tabbit.myvidhub.ui.components.SectionTitle
 import com.tabbit.myvidhub.ui.components.ShimmerCard
+import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
@@ -435,7 +436,7 @@ private fun ContinueActionDialog(
             Column(Modifier.fillMaxWidth()) {
                 Text(
                     text = buildString {
-                        if (item.seriesKey.isNotBlank() && item.season > 0) {
+                        if (item.seriesKey.isNotBlank() && item.season > 0 && !item.usesSourceEpisodeName) {
                             append("S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')} · ")
                         }
                         append("看到 ")

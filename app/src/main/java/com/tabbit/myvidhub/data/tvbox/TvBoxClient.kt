@@ -66,6 +66,10 @@ class TvBoxClient(
         val typeName: String,
         val content: String,
         val score: Double,
+        /** vod_actor 原文：逗号/顿号分隔的姓名，协议不含演员头像 */
+        val actors: String = "",
+        /** vod_director 原文，同上 */
+        val directors: String = "",
         /** 来自 TVBox 配置时，标记所属站点，保证 remoteId 不冲突 */
         val siteKey: String = "",
         val siteName: String = "",
@@ -548,7 +552,17 @@ class TvBoxClient(
             val shown = when (val v = vod.opt(k)) {
                 is JSONArray -> "[${v.length()}]"
                 is JSONObject -> "{${v.keys().asSequence().sorted().joinToString(",")}}"
-                else -> v?.toString()?.replace('\n', ' ')?.take(60) ?: "null"
+                else -> {
+                    val s = v?.toString()?.replace('\n', ' ')
+                    if (k == "vod_play_url" && s != null) {
+                        // 分集名单独列出来：源改名是「刷新拿不到地址」最常见的原因
+                        s.split("\$\$\$").joinToString(" || ") { line ->
+                            line.split('#').map { it.substringBefore('$') }.joinToString("|")
+                        }
+                    } else {
+                        s?.take(60) ?: "null"
+                    }
+                }
             }
             pairs.append(k).append('=').append(shown)
         }
@@ -589,14 +603,12 @@ class TvBoxClient(
      * @param siteKey    站点 key（用于定位 spider 站点）
      * @param playSource 播放源名称（即 vod_play_from，如「夸克网盘」），作为 playerContent 的 flag
      * @param rawUrl     线路原始地址（云盘 scheme 或 http(s) 直链），作为 playerContent 的 id
-     * @param vipFlags   调用方给出的播放源名称列表；配置根级 flags 非空时以其为准
      * @return 解析结果（URL + headers + parse 标记）；云盘解析失败或需要网页解析时抛异常
      */
     suspend fun resolvePlayUrl(
         siteKey: String,
         playSource: String,
-        rawUrl: String,
-        vipFlags: List<String>
+        rawUrl: String
     ): ResolvedPlayUrl = withContext(Dispatchers.IO) {
         val isDirect = rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
 
@@ -610,13 +622,13 @@ class TvBoxClient(
         }
 
         val resolved = if (isDirect) {
-            runCatching { doResolvePlayUrl(siteKey, playSource, rawUrl, vipFlags, direct = true) }
+            runCatching { doResolvePlayUrl(siteKey, playSource, rawUrl, direct = true) }
                 .getOrElse {
                     Log.w("SpiderProxy", "playerContent($playSource) 直链解析失败，回退原地址：${it.message}")
                     return@withContext ResolvedPlayUrl(rawUrl)
                 }
         } else {
-            doResolvePlayUrl(siteKey, playSource, rawUrl, vipFlags, direct = false)
+            doResolvePlayUrl(siteKey, playSource, rawUrl, direct = false)
         }
 
         when {
@@ -637,7 +649,6 @@ class TvBoxClient(
         siteKey: String,
         playSource: String,
         rawUrl: String,
-        vipFlags: List<String>,
         direct: Boolean
     ): ResolvedPlayUrl {
         val root = baseConfig()
@@ -659,14 +670,16 @@ class TvBoxClient(
         val proxy = loader.getSpider(loaderKey, site.api, site.ext)
             ?: throw IllegalStateException("spider 实例创建失败：${site.api}")
 
-        // CatVod 约定 vipFlags 传配置根级 flags（全部播放源名），spider 据此判断
-        // 哪条线路可直出、哪条需要 VIP 解析。配置没写才退回调用方给的播放源列表。
-        val flags = configFlags(root).ifEmpty { vipFlags }
+        // CatVod 约定 vipFlags 传配置根级 flags（如 youku/qq 等 VIP 平台名），
+        // spider 普遍按 vipFlags.contains(flag) 决定走不走 VIP 解析。
+        // 配置没写 flags 就必须传空列表：把「播放源名」当 vipFlags 会让 spider 误判成 VIP 线路。
+        val flags = configFlags(root)
 
         val json = (if (direct) playerContentWithTimeout(proxy, playSource, rawUrl, flags)
         else proxy.playerContent(playSource, rawUrl, flags))
             ?: throw IllegalStateException("playerContent 返回空")
 
+        logPlayerContentResult(playSource, flags, json)
         val resolved = parsePlayerContentResult(json)
         // 分两行打，避免 logcat 单行截断看不到 URL。
         // 用 W 级：这台电视 ROM 吞掉 app 的 D 级日志，播放链路取证只能靠 W 才抓得到。
@@ -727,6 +740,26 @@ class TvBoxClient(
     private fun isWebPageUrl(url: String): Boolean {
         val path = url.substringBefore('?').substringBefore('#').lowercase()
         return path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".shtml")
+    }
+
+    /**
+     * 记录 playerContent 原始返回的「形状」，用于定位「返回了 msg 却没有 url」这类失败。
+     * 只打字段名、parse/jx、url 的 host 与长度、msg 摘要；header 里是 Cookie/api_key，绝不打印。
+     */
+    private fun logPlayerContentResult(flag: String, flags: List<String>, json: String) {
+        val brief = runCatching {
+            val obj = JSONObject(json)
+            val keys = obj.keys().asSequence().joinToString(",")
+            val msg = (obj.optString("msg").takeIf { it.isNotBlank() }
+                ?: obj.optString("message")).take(300)
+            val url = obj.optString("url")
+            val host = if (url.startsWith("http://") || url.startsWith("https://")) {
+                runCatching { android.net.Uri.parse(url).host }.getOrNull()
+            } else null
+            "keys=[$keys] parse=${obj.optInt("parse", 0)} jx=${obj.optInt("jx", 0)} " +
+                "urlLen=${url.length} urlHost=$host msg=$msg"
+        }.getOrElse { "非 JSON，长度=${json.length} 前120字=${json.take(120)}" }
+        Log.w("SpiderProxy", "playerContent($flag) ← flags=$flags $brief")
     }
 
     /**

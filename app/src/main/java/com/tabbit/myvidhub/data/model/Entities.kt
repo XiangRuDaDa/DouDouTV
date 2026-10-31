@@ -88,6 +88,8 @@ data class MediaEntity(
     val hdrType: String = "",
     /** 视频编码器：H.264 / HEVC (H.265) / AV1 / VP9 等 */
     val videoCodec: String = "",
+    /** 音轨类型：DD+ / TrueHD / AC-4 / Dolby Digital 等，空表示未知或普通立体声 */
+    val audioType: String = "",
 
     /**
      * TVBox 播放源（线路 / 云盘）名称。
@@ -105,5 +107,36 @@ data class MediaEntity(
     val pinyinInitials: String = "",
 
     /** 来源名称（搜索结果按来源分组展示用） */
-    val sourceName: String = ""
+    val sourceName: String = "",
+
+    /**
+     * TVBox 源的主演名单（vod_actor）。
+     * 协议里这只是逗号/顿号分隔的纯文本，源侧不返回演员头像，
+     * 界面拿它补 Emby / TMDB 之外的主演行（无图时显示姓名首字）。
+     */
+    val actors: String = "",
+
+    /** TVBox 源导演名单（vod_director），同上 */
+    val directors: String = "",
+
+    /**
+     * TVBox 源更新备注（vod_remarks），如「更新至第12集」「HD」「正片」。
+     * 详情页徽章行用它表示片源当前的更新状态。
+     */
+    val remarks: String = ""
 )
+
+/**
+ * 把 vod_actor / vod_director 这类纯文本名单切成姓名列表。
+ *
+ * 分隔符各家 spider 不统一（逗号、顿号、分号、斜杠、空格都见过），
+ * 所以先看有没有显式标点：有就只按标点切，避免把「Tom Hanks」这种英文名从空格劈成两半；
+ * 一个标点都没有时才退回按空白切。
+ */
+fun splitCastNames(raw: String): List<String> {
+    if (raw.isBlank()) return emptyList()
+    val punctuation = charArrayOf(',', '，', '、', ';', '；', '/', '|', '\n', '\r', '\t')
+    val hasPunctuation = raw.any { it in punctuation }
+    val parts = if (hasPunctuation) raw.split(*punctuation) else raw.split(' ')
+    return parts.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+}

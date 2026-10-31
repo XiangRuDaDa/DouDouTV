@@ -34,6 +34,7 @@ fun FormatBadgesRow(
     resolution: String,
     hdr: String,
     codec: String,
+    audio: String = "",
     modifier: Modifier = Modifier
 ) {
     val items = buildList {
@@ -42,6 +43,8 @@ fun FormatBadgesRow(
         hdr.takeIf { it.isNotBlank() }?.let { add(Badge.Hdr(it)) }
         // Codec 只在有明显特色时展示（H.264 太通用可以隐藏）
         codec.takeIf { it.isNotBlank() && it != "H.264" }?.let { add(Badge.Codec(it)) }
+        // 音轨同样只在有辨识度时展示（DD+ / TrueHD / Atmos 这类杜比音轨）
+        audio.takeIf { it.isNotBlank() && it != "Dolby Digital" }?.let { add(Badge.Audio(it)) }
     }
     if (items.isEmpty()) return
 
@@ -63,6 +66,7 @@ fun FormatBadgesRow(
                     else -> TextBadge(badge.label, bg = Color(0xFF455A64))
                 }
                 is Badge.Codec -> TextBadge(badge.label, bg = Color(0xFF455A64))
+                is Badge.Audio -> TextBadge(badge.label, bg = Color(0xFF6D4C41))
             }
         }
     }
@@ -73,6 +77,7 @@ sealed interface Badge {
     data class Resolution(val label: String) : Badge
     data class Hdr(val label: String) : Badge
     data class Codec(val label: String) : Badge
+    data class Audio(val label: String) : Badge
 }
 
 /** 纯文字徽章：圆角矩形 + 纯色背景 + 白色粗体字。尺寸统一 28.dp 高。 */
