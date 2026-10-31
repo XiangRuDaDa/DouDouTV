@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -24,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
+import coil.request.ImageRequest
+import com.tabbit.myvidhub.ui.theme.LocalTvMode
 
 /**
  * 无海报时的兜底封面。
@@ -108,15 +111,24 @@ fun PosterArt(
     var failed by remember(model) { mutableStateOf(false) }
     if (model.isBlank() || failed) {
         fallback()
-    } else {
-        AsyncImage(
-            model = model,
-            contentDescription = contentDescription,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize(),
-            onState = { if (it is AsyncImagePainter.State.Error) failed = true }
-        )
+        return
     }
+    // 电视端不做淡入：滚动时一屏新图同时渐显，观感就是整屏「刷新」了一下；
+    // 硬切更稳，也少一层 alpha 合成。
+    val tv = LocalTvMode.current
+    val context = LocalContext.current
+    val request = remember(model, tv) {
+        if (tv) ImageRequest.Builder(context).data(model).crossfade(false).build() else model
+    }
+    AsyncImage(
+        model = request,
+        contentDescription = contentDescription,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier.fillMaxSize(),
+        onState = { state ->
+            if (state is AsyncImagePainter.State.Error) failed = true
+        }
+    )
 }
 
 private fun posterFallbackBrush(seed: String): Brush {

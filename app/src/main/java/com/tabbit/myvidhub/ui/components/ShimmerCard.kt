@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,6 +24,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.LocalTvMode
 
 /**
  * 海报卡骨架屏：2:3 竖版 + 底部标题条，带 shimmer 光扫效果。
@@ -84,6 +86,19 @@ fun ShimmerBox(
 
 @Composable
 private fun shimmerBrush(): Brush {
+    val base = AppColors.Surface
+    val hi = AppColors.SurfaceHi.copy(alpha = 0.55f)
+    // 电视端用静态骨架：每张骨架卡各跑一条无限动画，首页加载态能同时出现几十条，
+    // 每帧都在重算渐变、抢绘制时间。骨架只是占位，不动也看得懂。
+    if (LocalTvMode.current) {
+        return remember(base, hi) {
+            Brush.linearGradient(
+                colors = listOf(base, hi, base),
+                start = Offset(-120f, 0f),
+                end = Offset(0f, 0f)
+            )
+        }
+    }
     val transition = rememberInfiniteTransition(label = "shimmer")
     val offset by transition.animateFloat(
         initialValue = -400f,
@@ -95,11 +110,7 @@ private fun shimmerBrush(): Brush {
         label = "shimmer_offset"
     )
     return Brush.linearGradient(
-        colors = listOf(
-            AppColors.Surface,
-            AppColors.SurfaceHi.copy(alpha = 0.55f),
-            AppColors.Surface
-        ),
+        colors = listOf(base, hi, base),
         start = Offset(offset, 0f),
         end = Offset(offset + 120f, 0f)
     )

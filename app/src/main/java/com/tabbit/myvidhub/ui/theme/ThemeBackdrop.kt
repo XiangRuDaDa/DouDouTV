@@ -6,9 +6,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -47,41 +52,62 @@ fun Modifier.themeBackdrop(): Modifier {
         .drawWithCache {
             val w = size.width
             val h = size.height
-            // 左上主光晕：标题裸露页（来源/设置/分类/TV 设置）的氛围来源
-            val topGlow = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0f to brand.copy(alpha = edgeAlpha),
-                    0.5f to brand.copy(alpha = edgeAlpha * 0.30f),
-                    1f to Color.Transparent
+            fun glows(width: Float, height: Float): List<Brush> = listOf(
+                // 左上主光晕：标题裸露页（来源/设置/分类/TV 设置）的氛围来源
+                Brush.radialGradient(
+                    colorStops = arrayOf(
+                        0f to brand.copy(alpha = edgeAlpha),
+                        0.5f to brand.copy(alpha = edgeAlpha * 0.30f),
+                        1f to Color.Transparent
+                    ),
+                    center = Offset(width * 0.18f, height * 0.02f),
+                    radius = maxOf(width, height) * 0.75f
                 ),
-                center = Offset(w * 0.18f, h * 0.02f),
-                radius = maxOf(w, h) * 0.75f
-            )
-            // 左下光晕：TV 首页 Hero 折痕以下那条唯一可视的带子，手机上也压住左轴。
-            // 圆心放在 0.9h 而不是贴在屏幕角上 —— 首页那条约 0.28h 高的带子里，
-            // 贴角等于最亮的一圈压在最后一行海报背后，观感上仍然是「没有换主题」。
-            val bottomLeftGlow = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0f to brand.copy(alpha = cornerAlpha),
-                    0.55f to brand.copy(alpha = cornerAlpha * 0.28f),
-                    1f to Color.Transparent
+                // 左下光晕：TV 首页 Hero 折痕以下那条唯一可视的带子，手机上也压住左轴。
+                // 圆心放在 0.9h 而不是贴在屏幕角上 —— 首页那条约 0.28h 高的带子里，
+                // 贴角等于最亮的一圈压在最后一行海报背后，观感上仍然是「没有换主题」。
+                Brush.radialGradient(
+                    colorStops = arrayOf(
+                        0f to brand.copy(alpha = cornerAlpha),
+                        0.55f to brand.copy(alpha = cornerAlpha * 0.28f),
+                        1f to Color.Transparent
+                    ),
+                    center = Offset(width * 0.08f, height * 0.90f),
+                    radius = height * 0.55f
                 ),
-                center = Offset(w * 0.08f, h * 0.90f),
-                radius = h * 0.55f
+                // 右下点缀：用浅色把对角拉平衡，避免整屏只往一边偏色
+                Brush.radialGradient(
+                    colorStops = arrayOf(
+                        0f to brandSoft.copy(alpha = cornerAlpha * 0.75f),
+                        1f to Color.Transparent
+                    ),
+                    center = Offset(width * 1.0f, height * 0.88f),
+                    radius = height * 0.5f
+                )
             )
-            // 右下点缀：用浅色把对角拉平衡，避免整屏只往一边偏色
-            val bottomRightGlow = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0f to brandSoft.copy(alpha = cornerAlpha * 0.75f),
-                    1f to Color.Transparent
-                ),
-                center = Offset(w * 1.0f, h * 0.88f),
-                radius = h * 0.5f
-            )
-            onDrawBehind {
-                drawRect(topGlow)
-                drawRect(bottomLeftGlow)
-                drawRect(bottomRightGlow)
+
+            if (!isTv || w < 1f || h < 1f) {
+                val brushes = glows(w, h)
+                onDrawBehind { brushes.forEach { drawRect(it) } }
+            } else {
+                // 电视端把三团光晕先画进一张四分之一尺寸的位图，整屏只做一次纹理放大。
+                // 径向渐变是全屏逐像素算的，滚动时绘制命令每帧重放，三层叠加在弱 GPU 上要吃掉
+                // 十几毫秒；柔和光晕放大后肉眼看不出区别，位图只要 ~0.5MB。
+                val scale = 0.25f
+                val bw = (w * scale).toInt().coerceAtLeast(1)
+                val bh = (h * scale).toInt().coerceAtLeast(1)
+                val bmp = ImageBitmap(bw, bh)
+                CanvasDrawScope().draw(
+                    this,
+                    layoutDirection,
+                    Canvas(bmp),
+                    Size(bw.toFloat(), bh.toFloat())
+                ) {
+                    glows(bw.toFloat(), bh.toFloat()).forEach { drawRect(it) }
+                }
+                onDrawBehind {
+                    drawImage(bmp, dstSize = IntSize(size.width.toInt(), size.height.toInt()))
+                }
             }
         }
 }

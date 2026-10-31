@@ -403,7 +403,10 @@ fun TvPosterCard(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.10f else 1f, tween(150), label = "card")
+    // 不用 by 解包：放大动画每帧都变，解包等于每帧重组整张卡（含图片和文字）。
+    // 保留 State 在 graphicsLayer 的 draw phase 读，动画只重绘这一层。
+    val scale = animateFloatAsState(if (focused) 1.10f else 1f, tween(150), label = "card")
+    val cardShape = remember { RoundedCornerShape(10.dp) }
 
     val progress = if (item.durationMs > 0L) {
         (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f)
@@ -414,10 +417,16 @@ fun TvPosterCard(
             .then(if (fillCell) Modifier.fillMaxWidth() else Modifier.width(width))
             // 放大 10% 后要抬高绘制层级，否则描边会被同行后面的卡片压住
             .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(10.dp))
+            // 缩放和圆角裁剪合成同一个 layer：原来 graphicsLayer + clip 是两个 layer，
+            // 滚动时每张卡都多一层离屏缓冲。
+            .graphicsLayer {
+                scaleX = scale.value
+                scaleY = scale.value
+                shape = cardShape
+                clip = true
+            }
             .background(AppColors.Surface)
-            .then(if (focused) Modifier.border(2.5.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.5.dp, Color.White, cardShape) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(0.dp)
     ) {

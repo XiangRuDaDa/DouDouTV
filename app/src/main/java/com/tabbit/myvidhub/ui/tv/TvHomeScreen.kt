@@ -5,11 +5,7 @@ import android.view.KeyEvent
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -102,7 +98,8 @@ import com.tabbit.myvidhub.ui.cardStand
 import com.tabbit.myvidhub.ui.components.PosterArt
 import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.components.ShimmerCard
-import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
+import com.tabbit.myvidhub.ui.components.continueTitle
+import com.tabbit.myvidhub.ui.components.episodeLabel
 import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
@@ -181,25 +178,30 @@ fun TvHomeScreen(
      * 进度条和换页读同一个值，走到 1 才翻页，两者不会出现「线还差一截就跳下一张」。
      */
     val heroProgress = remember { mutableFloatStateOf(0f) }
+    val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
+
+    val listState = ReturnSpot.listState(TvHomeKey)
+    val scope = rememberCoroutineScope()
+    // 轮播进度按 50ms 推进而不是逐帧：进度条宽度 120dp，50ms 只走 0.6dp，看不出台阶；
+    // 但静止时 GPU 的渲染频率从 60 次/秒降到 20 次/秒。列表滚动中不推进，
+    // 否则滚到一半整屏换图，看起来就是「屏幕刷新了一下」。
     LaunchedEffect(heroItems.size) {
         if (heroItems.size > 1) {
+            var elapsedMs = 0L
             while (true) {
-                val startedAt = withFrameNanos { it }
-                while (true) {
-                    val elapsedSec = (withFrameNanos { it } - startedAt) / 1_000_000_000f
-                    heroProgress.floatValue = (elapsedSec / HERO_DWELL_SECONDS).coerceIn(0f, 1f)
-                    if (heroProgress.floatValue >= 1f) break
+                delay(50L)
+                if (listState.isScrollInProgress) continue
+                elapsedMs += 50L
+                heroProgress.floatValue = (elapsedMs / (HERO_DWELL_SECONDS * 1000f)).coerceIn(0f, 1f)
+                if (heroProgress.floatValue >= 1f) {
+                    heroIndex = (heroIndex + 1) % heroItems.size
+                    elapsedMs = 0L
                 }
-                heroIndex = (heroIndex + 1) % heroItems.size
             }
         } else {
             heroProgress.floatValue = 0f
         }
     }
-    val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
-
-    val listState = ReturnSpot.listState(TvHomeKey)
-    val scope = rememberCoroutineScope()
     // 滚动距离驱动顶栏透明度 —— 注意：**不要用 animateFloatAsState + 直接读 listState**（那会让 LazyColumn 每次
     // scroll 都触发整个 Box 重组）。把计算延后到 TvTopBar 内部 graphicsLayer 的 draw phase 执行：
     val configuration = LocalConfiguration.current
@@ -216,6 +218,10 @@ fun TvHomeScreen(
     // 顶栏是否还在（首屏 Hero 可见）。用 derivedStateOf 只观察 firstVisibleItemIndex 这个离散值：
     // 订阅落在计算块里，滚动时顶栏子树只在真正跨过首屏那一次才重组，不会像直接读连续量那样把整页拖进滚动。
     val topBarVisible = remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
+
+    // Ken Burns 只在列表静止时跑：滚动帧本身就吃紧，再叠一层全屏缩放重绘必然掉帧。
+    // isScrollInProgress 只在滚动开始/结束各变一次，读到它的只有 hero item 这一块。
+    val heroZoomPaused by remember { derivedStateOf { listState.isScrollInProgress } }
 
     // 动态分区（kind + 题材）是纯 CPU 计算：按 library 缓存一次，
     // 避免每次重组（轮播换图、焦点变化）都把几千条条目重新分组拆题材 —— 电视上这是掉帧的主要来源之一。
@@ -334,13 +340,14 @@ fun TvHomeScreen(
         ) {
             // ---------- 主视觉（置顶，TvTopBar 悬浮其上） ----------
             // 轮播区常驻：即使没有内容也保留这一屏高度，避免首页在「加载中 / 空库」之间跳版。
-            item {
+            item(key = "hero") {
                 if (hero != null) {
                     TvHero(
                         item = hero,
                         heroIndex = heroIndex,
                         heroTotal = heroItems.size,
                         progress = heroProgress,
+                        paused = heroZoomPaused,
                         playFocusRequester = heroPlayFocus,
                         onPlay = { onPlay(hero) },
                         onDetail = { onDetail(hero.id) },
@@ -365,7 +372,7 @@ fun TvHomeScreen(
             if (hero != null) {
                 // 收色带：接缝正好落在 Hero 底边上时，无论把渐隐终点配成什么色都会露出一条线，
                 // 所以把接缝挪进这条渐变里 —— 顶边与 Hero 底边同色（看不出发界），底边完全透明（露出页面背景）
-                item { TvHeroSeamFade() }
+                item(key = "hero_seam") { TvHeroSeamFade() }
             }
 
             // ---------- 我的收藏 ----------
@@ -379,8 +386,8 @@ fun TvHomeScreen(
 
             // ---------- 继续观看 ----------
             if (continueItems.isNotEmpty()) {
-                item { TvSectionTitle("▶ 继续观看") { } }
-                item {
+                item(key = "continue_title") { TvSectionTitle("▶ 继续观看") { } }
+                item(key = "continue_row") {
                     TvContinueRow(
                         items = continueItems,
                         rowKey = "continue",
@@ -399,13 +406,12 @@ fun TvHomeScreen(
             homeCategories.take(7).forEachIndexed { index, cat ->
                 // 首屏只预载前 2 个分类（视口内可见的那些），其余由 cat_row 在真正滚到可见时触发，
                 // 避免一进首页就把 7 个分类的请求全打出去、和首屏渲染抢网络和 CPU。
-                if (index < 2) {
-                    item(key = "cat_ensure_${cat.typeId}") {
+                // 预载挂在标题行上而不是单开一个 0 高 item：item 越少，分类陆续插入时的索引抖动越小。
+                item(key = "cat_title_${cat.typeId}") {
+                    if (index < 2) {
                         // homeRefreshEpoch 变化时重新触发一次，否则刷新后分类行仍是旧缓存
                         LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
                     }
-                }
-                item(key = "cat_title_${cat.typeId}") {
                     // 「查看全部」挂在标题右侧，和手机端 MoreLink 一致（有内容时才出现）
                     TvCategoryTitle(
                         typeId = cat.typeId,
@@ -729,6 +735,8 @@ private fun TvHero(
     heroIndex: Int,
     heroTotal: Int,
     progress: State<Float>,
+    /** 列表正在滚动：暂停 Ken Burns，别让全屏缩放和滚动抢同一帧的绘制时间 */
+    paused: Boolean,
     playFocusRequester: FocusRequester,
     onPlay: () -> Unit,
     onDetail: () -> Unit,
@@ -755,18 +763,18 @@ private fun TvHero(
         }
     }
 
-    // Ken Burns：animateFloat 返回 State，故意不用 by 解包 ——
-    // 在 Composable 里解包等于每帧重组整块 Hero，缩放的省帧优势就没了。
-    val zoomTransition = rememberInfiniteTransition(label = "heroKenBurns")
-    val zoom = zoomTransition.animateFloat(
-        initialValue = 1.02f,
-        targetValue = 1.075f,
-        animationSpec = infiniteRepeatable(
-            animation = tween((HERO_DWELL_SECONDS * 2600).toInt(), easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "heroZoom"
-    )
+    // Ken Burns：只用 Animatable 而不用 rememberInfiniteTransition ——
+    // 后者没法暂停。列表一滚动就停，滚动时不再每帧缩放整屏大图；
+    // 缩放值只在 graphicsLayer 的 lambda 里读取，走 draw 阶段，Composable 不重组。
+    val zoom = remember { Animatable(1.02f) }
+    LaunchedEffect(paused) {
+        if (paused) return@LaunchedEffect
+        val legMs = (HERO_DWELL_SECONDS * 2600).toInt()
+        while (true) {
+            zoom.animateTo(1.075f, tween(legMs, easing = LinearEasing))
+            zoom.animateTo(1.02f, tween(legMs, easing = LinearEasing))
+        }
+    }
 
     Box(
         Modifier
@@ -1067,6 +1075,10 @@ private fun TvCategoryPreview(
             stand = stand,
             onNearEnd = { vm.loadMoreCategoryPreview(typeId) }
         )
+        // 还没开始加载（等 activeSite）或加载失败：也必须占住行高。
+        // 什么都不画会让整行塌成 0 高，7 个分类叠成一片空白，
+        // 遥控器按 ↓ 时焦点搜索越过空白直接落到页面底部 —— 就是「一按就跑到最下面」。
+        else -> TvShimmerRow()
     }
 }
 
@@ -1089,7 +1101,11 @@ private fun TvCategoryTitle(
 private fun TvShimmerRow(count: Int = 6) {
     val w = Prefs.posterSize.tvDp.dp
     LazyRow(
-        modifier = Modifier.fillMaxWidth(),
+        // 底部留出真实卡片标题条的高度：骨架换成真卡片时行高不跳，
+        // LazyColumn 不会因此重新定位，遥控器的位置也不跟着晃。
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 34.dp),
         contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
@@ -1127,7 +1143,7 @@ private fun TvPosterRow(
         contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        items(items, key = { "tv_${it.id}" }) { item ->
+        items(items, key = { "tv_${it.id}" }, contentType = { "poster" }) { item ->
             val cardFocus = remember(item.id) { FocusRequester() }
             TvPosterCard(
                 item = item,
@@ -1156,11 +1172,13 @@ private fun TvContinueRow(
         contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        items(items, key = { "continue_${it.id}" }) { item ->
+        items(items, key = { "continue_${it.id}" }, contentType = { "continue" }) { item ->
             val progress = if (item.durationMs > 0L) (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f) else 0f
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
-            val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
+            // 同 TvPosterCard：放大动画的值留在 State 里，在 draw phase 读，避免每帧重组卡片
+            val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
+            val cardShape = remember { RoundedCornerShape(10.dp) }
             val cardFocus = remember(item.id) { FocusRequester() }
             // OK 键按下的时间戳（elapsedRealtime，0 表示当前没有按下中）
             var centerDownAt by remember { mutableLongStateOf(0L) }
@@ -1192,10 +1210,14 @@ private fun TvContinueRow(
                 longPressMenu
                     // 放大后的白边要靠 z 轴抬起来，否则会被同行后面的卡片压住
                     .zIndex(if (focused) 1f else 0f)
-                    .graphicsLayer { scaleX = scale; scaleY = scale }
-                    .clip(RoundedCornerShape(10.dp))
+                    .graphicsLayer {
+                        scaleX = scale.value
+                        scaleY = scale.value
+                        shape = cardShape
+                        clip = true
+                    }
                     .background(AppColors.SurfaceHi)
-                    .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+                    .then(if (focused) Modifier.border(2.dp, Color.White, cardShape) else Modifier)
                     .clickable(interactionSource = interaction, indication = null) {
                         if (item.positionMs > 5_000L) onPlay(item) else onDetail(item.id)
                     }
@@ -1220,18 +1242,21 @@ private fun TvContinueRow(
                     Modifier.align(Alignment.BottomStart).padding(12.dp).fillMaxWidth()
                 ) {
                     Text(
-                        item.title,
+                        item.continueTitle,
                         color = TvText.Title,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    if (item.seriesKey.isNotBlank() && item.season > 0 && !item.usesSourceEpisodeName) {
+                    val epLabel = item.episodeLabel().takeIf { it.isNotBlank() && it != item.continueTitle }
+                    if (epLabel != null) {
                         Text(
-                            "S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')}",
+                            epLabel,
                             color = TvText.Body,
-                            style = MaterialTheme.typography.labelSmall
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     if (progress > 0.02f) {
@@ -1291,7 +1316,7 @@ private fun TvContinueActionDialog(
                     .padding(vertical = 26.dp)
             ) {
                 Text(
-                    text = item.title,
+                    text = item.continueTitle,
                     color = TvText.Title,
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
@@ -1302,8 +1327,10 @@ private fun TvContinueActionDialog(
                 Spacer(Modifier.height(6.dp))
                 Text(
                     text = buildString {
-                        if (item.seriesKey.isNotBlank() && item.season > 0 && !item.usesSourceEpisodeName) {
-                            append("S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')} · ")
+                        val epLabel = item.episodeLabel().takeIf { it.isNotBlank() && it != item.continueTitle }
+                        if (epLabel != null) {
+                            append(epLabel)
+                            append(" · ")
                         }
                         append("看到 ")
                         append(tvClock(item.positionMs))
