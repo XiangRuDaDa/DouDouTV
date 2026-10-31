@@ -18,3 +18,10 @@ fun MediaEntity.episodeLabel(): String = when {
     episode > 0 -> "第 $episode 集"
     else -> title
 }
+
+/**
+ * 「继续观看」卡的主标题：分集行显示所属剧名（parentTitle 由查询层补），
+ * 拿不到壳行时退回分集名，至少不至于空着。
+ */
+val MediaEntity.continueTitle: String
+    get() = parentTitle.ifBlank { title }

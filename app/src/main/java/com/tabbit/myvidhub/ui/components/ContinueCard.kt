@@ -87,8 +87,8 @@ fun ContinueCard(
             .focusable()
     ) {
         // 无图或死链时露出渐变兜底，不再是一块纯色矩形；图上已经压了片名，占位只放首字
-        PosterArt(model = image, contentDescription = item.title) {
-            PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
+        PosterArt(model = image, contentDescription = item.continueTitle) {
+            PosterFallback(title = item.continueTitle, showTitle = false, titleFontSize = 30.sp)
         }
 
         // 左侧压暗，保证文字可读
@@ -110,7 +110,7 @@ fun ContinueCard(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                text = item.title,
+                text = item.continueTitle,
                 style = MaterialTheme.typography.titleMedium,
                 color = Color.White,
                 maxLines = 1,
@@ -128,7 +128,7 @@ fun ContinueCard(
                     modifier = Modifier.size(14.dp)
                 )
                 Text(
-                    text = progressLabel(item),
+                    text = item.continueSubtitle(),
                     style = MaterialTheme.typography.labelSmall,
                     color = Color.White.copy(alpha = 0.85f)
                 )
@@ -163,6 +163,12 @@ private fun progressLabel(item: MediaEntity): String {
     val dur = item.durationMs
     val remaining = if (dur > pos) dur - pos else 0L
     return "剩余 ${formatMin(remaining)}"
+}
+
+/** 副行：分集名（与主标题不同时才带，避免电影卡重复）+ 剩余时长 */
+private fun MediaEntity.continueSubtitle(): String {
+    val ep = episodeLabel().takeIf { it.isNotBlank() && it != continueTitle }
+    return listOfNotNull(ep, progressLabel(this)).joinToString(" · ")
 }
 
 private fun formatMin(ms: Long): String {

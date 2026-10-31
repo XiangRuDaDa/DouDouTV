@@ -83,6 +83,10 @@ interface MediaDao {
     @Query("SELECT * FROM media WHERE seriesKey = :seriesKey AND kind = 'SERIES' LIMIT 1")
     suspend fun shellOf(seriesKey: String): MediaEntity?
 
+    /** 「继续观看」批量回查壳行：拿剧名给分集卡当标题 */
+    @Query("SELECT * FROM media WHERE kind = 'SERIES' AND seriesKey IN (:seriesKeys)")
+    suspend fun shellsOf(seriesKeys: List<String>): List<MediaEntity>
+
     @Query(
         "SELECT * FROM media WHERE seriesKey = :seriesKey AND kind = 'EPISODE' " +
             "ORDER BY season ASC, episode ASC"

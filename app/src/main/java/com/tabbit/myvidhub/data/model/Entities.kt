@@ -1,6 +1,7 @@
 package com.tabbit.myvidhub.data.model
 
 import androidx.room.Entity
+import androidx.room.Ignore
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
@@ -124,7 +125,17 @@ data class MediaEntity(
      * 详情页徽章行用它表示片源当前的更新状态。
      */
     val remarks: String = ""
-)
+) {
+    /**
+     * 所属剧集名，只在内存里填，不落库。
+     *
+     * 分集行的 title 是播放源给的分集名（"[5.4GB]E01.mkv" 这种），
+     * 「继续观看」卡片要显示的是用户记得住的片名，由查询层按 seriesKey 回查壳行补上。
+     * 放类体而不是主构造：Room 这个版本对构造参数上的 @Ignore 处理有误，
+     * 会把整张表当成"没有可用构造函数"。
+     */
+    @Ignore var parentTitle: String = ""
+}
 
 /**
  * 把 vod_actor / vod_director 这类纯文本名单切成姓名列表。

@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -44,7 +45,28 @@ class MediaRepository(private val context: Context) {
 
     fun observeSources(): Flow<List<SourceEntity>> = sourceDao.observeAll()
     fun observeLibrary(): Flow<List<MediaEntity>> = mediaDao.observeLibrary()
-    fun observeContinueWatching(): Flow<List<MediaEntity>> = mediaDao.observeContinueWatching()
+
+    /**
+     * 「继续观看」：记录行常常是分集（title 是播放源的分集名），
+     * 卡片要显示用户记得住的剧名，所以按 seriesKey 一次批量回查壳行补 [MediaEntity.parentTitle]，
+     * 顺带用壳行的海报/背景图补空（分集行这两个字段经常是空的）。
+     */
+    fun observeContinueWatching(): Flow<List<MediaEntity>> =
+        mediaDao.observeContinueWatching().map { rows ->
+            val keys = rows.filter { it.kind == MediaKind.EPISODE && it.seriesKey.isNotBlank() }
+                .map { it.seriesKey }
+                .distinct()
+            if (keys.isEmpty()) return@map rows
+            val shells = mediaDao.shellsOf(keys).associateBy { it.seriesKey }
+            rows.map { row ->
+                val shell = if (row.kind == MediaKind.EPISODE) shells[row.seriesKey] else null
+                if (shell == null) row else row.copy(
+                    posterUrl = row.posterUrl.ifBlank { shell.posterUrl },
+                    backdropUrl = row.backdropUrl.ifBlank { shell.backdropUrl }
+                ).also { it.parentTitle = shell.title }
+            }
+        }
+
     fun observeFeatured(): Flow<List<MediaEntity>> = mediaDao.observeFeatured()
     fun observeFavorites(): Flow<List<MediaEntity>> = mediaDao.observeFavorites()
 

@@ -88,7 +88,8 @@ import com.tabbit.myvidhub.ui.components.HeroBanner
 import com.tabbit.myvidhub.ui.components.PosterCard
 import com.tabbit.myvidhub.ui.components.SectionTitle
 import com.tabbit.myvidhub.ui.components.ShimmerCard
-import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
+import com.tabbit.myvidhub.ui.components.continueTitle
+import com.tabbit.myvidhub.ui.components.episodeLabel
 import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
@@ -439,7 +440,7 @@ private fun ContinueActionDialog(
         containerColor = AppColors.Surface,
         title = {
             Text(
-                text = item.title,
+                text = item.continueTitle,
                 color = AppColors.TextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -449,8 +450,10 @@ private fun ContinueActionDialog(
             Column(Modifier.fillMaxWidth()) {
                 Text(
                     text = buildString {
-                        if (item.seriesKey.isNotBlank() && item.season > 0 && !item.usesSourceEpisodeName) {
-                            append("S${item.season.toString().padStart(2, '0')} · E${item.episode.toString().padStart(2, '0')} · ")
+                        val epLabel = item.episodeLabel().takeIf { it.isNotBlank() && it != item.continueTitle }
+                        if (epLabel != null) {
+                            append(epLabel)
+                            append(" · ")
                         }
                         append("看到 ")
                         append(continueClock(item.positionMs))
@@ -1400,13 +1403,7 @@ fun SearchScreen(
                                 Box(Modifier.width(cardW)) {
                                     PosterCard(
                                         item = item,
-                                        onClick = {
-                                            android.util.Log.d(
-                                                "MyVidHubNav",
-                                                "search result click id=${item.id} title=${item.title} remoteId=${item.remoteId}"
-                                            )
-                                            onOpenDetail(item.id)
-                                        }
+                                        onClick = { onOpenDetail(item.id) }
                                     )
                                 }
                             }
