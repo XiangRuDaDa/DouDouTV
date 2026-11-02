@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -67,6 +66,7 @@ import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
+import com.tabbit.myvidhub.ui.theme.Radius
 
 /**
  * 手机端来源管理。
@@ -98,7 +98,7 @@ fun SourcesScreen(vm: LibraryViewModel, isTv: Boolean = false) {
                         containerColor = AppColors.Brand,
                         contentColor = Color.White
                     ),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = Radius.Lg,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 12.dp)
@@ -308,7 +308,7 @@ private fun SourceCard(
 
     Card(
         colors = CardDefaults.cardColors(containerColor = AppColors.Surface),
-        shape = RoundedCornerShape(14.dp),
+        shape = Radius.Lg,
         modifier = Modifier
             .fillMaxWidth()
             .alpha(if (source.enabled) 1f else 0.55f)
@@ -346,7 +346,7 @@ private fun SourceCard(
                     if (isActiveHome && source.enabled) {
                         Box(
                             Modifier
-                                .background(AppColors.Brand.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                                .background(AppColors.Brand.copy(alpha = 0.16f), Radius.Sm)
                                 .padding(horizontal = 7.dp, vertical = 3.dp)
                         ) {
                             Text(
@@ -379,7 +379,7 @@ private fun SourceCard(
                         .background(
                             if (source.kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.16f)
                             else AppColors.SurfaceHi,
-                            RoundedCornerShape(4.dp)
+                            Radius.Sm
                         )
                         .padding(horizontal = 7.dp, vertical = 3.dp)
                 ) {
@@ -551,7 +551,7 @@ private fun SourceDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = AppColors.Surface,
-        shape = RoundedCornerShape(18.dp),
+        shape = Radius.Lg,
         title = {
             Text(
                 if (initial == null) "添加视频来源" else "编辑视频来源",
@@ -680,7 +680,7 @@ private fun SourceDialog(
                     disabledContainerColor = AppColors.SurfaceHi,
                     disabledContentColor = AppColors.TextTertiary
                 ),
-                shape = RoundedCornerShape(10.dp)
+                shape = Radius.Md
             ) {
                 Text(
                     if (initial == null) "添加来源" else "保存",
@@ -735,7 +735,7 @@ private fun MobileFormField(
                 fontSize = 15.sp,
                 color = AppColors.TextPrimary
             ),
-            shape = RoundedCornerShape(10.dp),
+            shape = Radius.Md,
             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                 unfocusedContainerColor = AppColors.Bg,
                 focusedContainerColor = AppColors.Bg,

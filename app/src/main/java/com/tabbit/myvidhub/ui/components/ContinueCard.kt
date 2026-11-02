@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
@@ -31,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -41,10 +41,14 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Lift
+import com.tabbit.myvidhub.ui.theme.Edge
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 
 // 常量形状与渐变提到组合外：滚动时每张卡不必每次新建对象
-private val ContinueShape = RoundedCornerShape(12.dp)
-private val ContinueBarShape = RoundedCornerShape(2.dp)
+private val ContinueShape = Radius.Md
+private val ContinueBarShape = Radius.Pill
 private val ContinueLeftScrim = Brush.horizontalGradient(
     listOf(Color.Black.copy(alpha = 0.8f), Color.Black.copy(alpha = 0.15f))
 )
@@ -72,7 +76,7 @@ fun ContinueCard(
     // 免得 Modifier.scale 在组合期读值、动画每帧重组合整张卡
     val scale by animateFloatAsState(
         targetValue = if (focused) 1.04f else 1f,
-        animationSpec = tween(180),
+        animationSpec = tween(Motion.FAST),
         label = "continue_scale"
     )
 
@@ -83,9 +87,13 @@ fun ContinueCard(
             .width(248.dp)
             .height(140.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale }
+            .then(if (focused) Modifier.shadow(Lift.Focus, ContinueShape) else Modifier)
             .clip(ContinueShape)
-            .background(AppColors.Surface)
-            .then(if (focused) Modifier.border(2.5.dp, AppColors.Brand, ContinueShape) else Modifier)
+            .background(if (focused) AppColors.SurfaceRaise else AppColors.Surface)
+            .then(
+                if (focused) Modifier.border(2.5.dp, AppColors.Brand, ContinueShape)
+                else Modifier.border(1.dp, Edge.Hairline, ContinueShape)
+            )
             .combinedClickable(
                 interactionSource = interaction,
                 indication = null,

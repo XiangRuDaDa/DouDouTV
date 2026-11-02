@@ -1,6 +1,7 @@
 package com.tabbit.myvidhub.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -8,7 +9,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tabbit.myvidhub.R
+import com.tabbit.myvidhub.ui.theme.Radius
 
 /**
  * 格式徽章条：TMDB 图标（开启 TMDB 时）+ Emby 解析到的分辨率/HDR/Codec。
@@ -80,22 +81,31 @@ sealed interface Badge {
     data class Audio(val label: String) : Badge
 }
 
-/** 纯文字徽章：圆角矩形 + 纯色背景 + 白色粗体字。尺寸统一 28.dp 高。 */
+/**
+ * 纯文字徽章：哑光材质 —— 底色只取传入色的 15% 做同色相染色，再勾一道同色相的描边，字用近白。
+ *
+ * 之前是六个高饱和实底色块（青/绿/红/橙/蓝灰/棕）并排，徽章本身比海报还抢眼，
+ * 等于在画面上撒了一排彩色贴纸。传入的色值保留下来：它现在表示「这一类信息的色相」，
+ * 不再等于色块本身。
+ *
+ * 尺寸与内边距一字未改，只换材质 —— 徽章行在详情页覆盖层的第三行，动内边距会挤动整行。
+ */
 @Composable
 fun TextBadge(label: String, bg: Color) {
     Box(
         Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(bg.copy(alpha = 0.88f))
+            .clip(Radius.Sm)
+            .background(bg.copy(alpha = 0.15f))
+            .border(1.dp, bg.copy(alpha = 0.38f), Radius.Sm)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            color = Color.White,
+            color = Color.White.copy(alpha = 0.9f),
             fontSize = 11.sp,
-            fontWeight = FontWeight.ExtraBold,
-            letterSpacing = 0.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.6.sp,
             lineHeight = 12.sp
         )
     }
@@ -112,13 +122,19 @@ fun TmdbIconOnly() {
     )
 }
 
-/** Dolby Vision 徽章：白底黑色 Dolby 官方 D 字母图标 + 右上角 DV 小字 */
+/**
+ * Dolby Vision 徽章：官方 D 字母图标 + VISION 小字。
+ *
+ * 原来是一整块纯白底 —— 一排哑光徽章里唯一发亮的色块，视线先被它抓走。
+ * 现在跟着 [TextBadge] 的材质走：低亮度白底 + 一道亮边，Dolby 的标识本身保持原样。
+ */
 @Composable
 fun DolbyVisionBadge() {
     Box(
         Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(Color.White)
+            .clip(Radius.Sm)
+            .background(Color.White.copy(alpha = 0.13f))
+            .border(1.dp, Color.White.copy(alpha = 0.34f), Radius.Sm)
             .padding(horizontal = 8.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -126,13 +142,13 @@ fun DolbyVisionBadge() {
             Icon(
                 painter = painterResource(R.drawable.ic_dolby),
                 contentDescription = null,
-                tint = Color.Black,
+                tint = Color.White,
                 modifier = Modifier.height(16.dp)
             )
             Spacer(Modifier.width(2.dp))
             Text(
                 "VISION",
-                color = Color.Black,
+                color = Color.White.copy(alpha = 0.92f),
                 fontSize = 9.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = 0.3.sp

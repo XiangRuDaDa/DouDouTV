@@ -2,9 +2,9 @@
 <resources>
     <!-- 底色用深色，避免 Compose 首帧白屏闪烁 -->
     <style name="Theme.MyVidHub" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/surface_dark</item>
-        <item name="android:statusBarColor">@color/surface_dark</item>
-        <item name="android:navigationBarColor">@color/surface_dark</item>
+        <item name="android:windowBackground">@color/app_bg</item>
+        <item name="android:statusBarColor">@color/app_bg</item>
+        <item name="android:navigationBarColor">@color/app_bg</item>
     </style>
 
     <style name="Theme.MyVidHub.Fullscreen" parent="Theme.MyVidHub">

@@ -38,7 +38,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -76,6 +75,7 @@ import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
+import com.tabbit.myvidhub.ui.theme.Radius
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1280,7 +1280,7 @@ private fun PlayerScreen(
                 Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 72.dp)
-                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(10.dp))
+                    .background(Color.Black.copy(alpha = 0.72f), Radius.Md)
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
                 Text(
@@ -1296,7 +1296,7 @@ private fun PlayerScreen(
             Box(
                 Modifier
                     .align(Alignment.Center)
-                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(10.dp))
+                    .background(Color.Black.copy(alpha = 0.72f), Radius.Md)
                     .padding(horizontal = 18.dp, vertical = 12.dp)
             ) {
                 Text(toast, color = Color.White, style = MaterialTheme.typography.bodyMedium)
@@ -1309,7 +1309,7 @@ private fun PlayerScreen(
                 Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 120.dp)
-                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(10.dp))
+                    .background(Color.Black.copy(alpha = 0.72f), Radius.Md)
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Text(
@@ -1377,7 +1377,7 @@ private fun TrackRow(option: TrackOption, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(if (option.selected) AppColors.SurfaceHi else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -1414,7 +1414,7 @@ private fun EpisodeDialog(
                         Modifier
                             .fillMaxWidth()
                             .padding(vertical = 2.dp)
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(Radius.Md)
                             .background(if (selected) AppColors.SurfaceHi else Color.Transparent)
                             .clickable { onSelect(ep) }
                             .padding(horizontal = 12.dp, vertical = 10.dp),

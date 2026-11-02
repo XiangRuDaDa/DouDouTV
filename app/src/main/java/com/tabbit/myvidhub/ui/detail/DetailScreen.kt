@@ -28,7 +28,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
@@ -88,6 +87,8 @@ import com.tabbit.myvidhub.ui.components.FormatBadgesRow
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
 import com.tabbit.myvidhub.ui.components.matchEpisodeInSource
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -329,12 +330,12 @@ fun DetailScreen(
     }
     val animatedTop by animateColorAsState(
         targetValue = pageTones.first,
-        animationSpec = tween(320),
+        animationSpec = tween(Motion.SLOW),
         label = "page_top"
     )
     val animatedBottom by animateColorAsState(
         targetValue = pageTones.second,
-        animationSpec = tween(320),
+        animationSpec = tween(Motion.SLOW),
         label = "page_bottom"
     )
 
@@ -445,7 +446,7 @@ fun DetailScreen(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
                                 .padding(12.dp)
-                                .clip(RoundedCornerShape(50))
+                                .clip(Radius.Pill)
                                 .background(Color.Black.copy(alpha = 0.45f))
                         ) {
                             Icon(
@@ -580,7 +581,7 @@ fun DetailScreen(
                             },
                             modifier = Modifier
                                 .size(48.dp)
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(Radius.Md)
                                 .background(AppColors.SurfaceHi)
                         ) {
                             Icon(
@@ -652,7 +653,7 @@ fun DetailScreen(
                                         chips.forEach { label ->
                                             Box(
                                                 Modifier
-                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .clip(Radius.Sm)
                                                     .background(AppColors.SurfaceHi)
                                                     .padding(horizontal = 8.dp, vertical = 3.dp)
                                             ) {
@@ -868,7 +869,7 @@ private fun detailMeta(item: MediaEntity, rating: Double = item.rating): String 
 private fun TypeChip(label: String) {
     Box(
         Modifier
-            .clip(RoundedCornerShape(999.dp))
+            .clip(Radius.Pill)
             .background(Color.White.copy(alpha = 0.20f))
             .padding(horizontal = 9.dp, vertical = 3.dp)
     ) {
@@ -935,7 +936,7 @@ private fun EpisodeCard(episode: MediaEntity, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
 
-    val shape = RoundedCornerShape(10.dp)
+    val shape = Radius.Md
     val playing = episode.positionMs > 0
 
     Row(
@@ -969,7 +970,7 @@ private fun EpisodeCard(episode: MediaEntity, onClick: () -> Unit) {
                         .padding(top = 6.dp)
                         .fillMaxWidth()
                         .height(2.5.dp)
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(Radius.Pill)
                         .background(Color.White.copy(alpha = 0.2f))
                 ) {
                     Box(

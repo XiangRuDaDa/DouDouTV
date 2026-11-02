@@ -36,7 +36,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -82,6 +81,7 @@ import com.tabbit.myvidhub.ui.components.episodeLabel
 import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
+import com.tabbit.myvidhub.ui.theme.Radius
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -1097,7 +1097,7 @@ class TvPlayerActivity : ComponentActivity() {
                     Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 46.dp)
-                        .background(Color.Black.copy(alpha = 0.74f), RoundedCornerShape(10.dp))
+                        .background(Color.Black.copy(alpha = 0.74f), Radius.Md)
                         .padding(horizontal = 20.dp, vertical = 10.dp)
                 ) {
                     Text(it, color = Color.White, style = MaterialTheme.typography.titleMedium)
@@ -1108,7 +1108,7 @@ class TvPlayerActivity : ComponentActivity() {
                 Box(
                     Modifier
                         .align(Alignment.Center)
-                        .background(Color.Black.copy(alpha = 0.74f), RoundedCornerShape(10.dp))
+                        .background(Color.Black.copy(alpha = 0.74f), Radius.Md)
                         .padding(horizontal = 22.dp, vertical = 12.dp)
                 ) {
                     Text(it, color = Color.White, style = MaterialTheme.typography.titleMedium)
@@ -1198,14 +1198,14 @@ private fun TvProgressBar(
             Modifier
                 .fillMaxWidth()
                 .height(4.dp)
-                .clip(RoundedCornerShape(2.dp))
+                .clip(Radius.Pill)
                 .background(Color.White.copy(alpha = 0.26f))
         ) {
             Box(
                 Modifier
                     .fillMaxWidth(fraction)
                     .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(Radius.Pill)
                     .background(AppColors.Brand)
             )
         }
@@ -1416,7 +1416,7 @@ private fun TvChip(
 
     Box(
         modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(
                 when {
                     focused -> Color.White
@@ -1425,7 +1425,7 @@ private fun TvChip(
                 }
             )
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp))
+                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
                 else Modifier
             )
             .onFocusChanged { focused = it.isFocused }

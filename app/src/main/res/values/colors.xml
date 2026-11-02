@@ -3,5 +3,7 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
     <color name="brand">#FF3B82F6</color>
-    <color name="surface_dark">#FF0E1116</color>
+    <!-- 窗口底色 / 状态栏 / 导航栏：必须和 Compose 侧的 AppColors.Bg（L0）取同一个值，
+         否则冷启动首帧和系统栏会比界面亮一档，压深底色时这个落差尤其明显 -->
+    <color name="app_bg">#FF06080C</color>
 </resources>

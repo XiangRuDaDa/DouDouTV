@@ -25,7 +25,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -78,6 +77,8 @@ import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 import com.tabbit.myvidhub.ui.tv.TvButtonSize
 import com.tabbit.myvidhub.ui.tv.TvFilterChip
 import com.tabbit.myvidhub.ui.tv.TvIconButton
@@ -371,7 +372,7 @@ private fun TvSourceCard(
     val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(
         targetValue = if (focused) 1.05f else 1f,
-        animationSpec = tween(140),
+        animationSpec = tween(Motion.FAST),
         label = "source-card"
     )
 
@@ -382,11 +383,11 @@ private fun TvSourceCard(
             .width(width)
             .height(height)
             .graphicsLayer { scaleX = scale; scaleY = scale; alpha = disabledAlpha }
-            .clip(RoundedCornerShape(14.dp))
+            .clip(Radius.Md)
             .background(AppColors.Surface)
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(14.dp))
-                else Modifier.border(2.dp, Color.Transparent, RoundedCornerShape(14.dp))
+                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
+                else Modifier.border(2.dp, Color.Transparent, Radius.Md)
             )
             .clickable(
                 interactionSource = interaction,
@@ -439,7 +440,7 @@ private fun TvSourceCard(
                     if (isActiveHome && source.enabled) {
                         Box(
                             Modifier
-                                .background(AppColors.Brand.copy(alpha = 0.16f), RoundedCornerShape(4.dp))
+                                .background(AppColors.Brand.copy(alpha = 0.16f), Radius.Sm)
                                 .padding(horizontal = 8.dp, vertical = 3.dp)
                         ) {
                             Text(
@@ -453,7 +454,7 @@ private fun TvSourceCard(
                     if (!source.enabled) {
                         Box(
                             Modifier
-                                .background(AppColors.SurfaceHi, RoundedCornerShape(4.dp))
+                                .background(AppColors.SurfaceHi, Radius.Sm)
                                 .padding(horizontal = 8.dp, vertical = 3.dp)
                         ) {
                             Text(
@@ -546,7 +547,7 @@ private fun TvSourceIcon(kind: SourceKind) {
     Box(
         Modifier
             .size(56.dp)
-            .clip(RoundedCornerShape(12.dp))
+            .clip(Radius.Md)
             .background(bg),
         contentAlignment = Alignment.Center
     ) {
@@ -567,7 +568,7 @@ private fun TvKindBadge(kind: SourceKind) {
     val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.16f) else AppColors.SurfaceHi
     val fg = if (kind == SourceKind.EMBY) AppColors.Brand else TvText.Body
     Box(
-        Modifier.background(bg, RoundedCornerShape(4.dp)).padding(horizontal = 10.dp, vertical = 4.dp)
+        Modifier.background(bg, Radius.Sm).padding(horizontal = 10.dp, vertical = 4.dp)
     ) {
         Text(
             text = if (kind == SourceKind.EMBY) "EMBY" else "TVBOX",
@@ -620,7 +621,7 @@ private fun TvSourceActionDialog(
         val dialogWidth = (maxWidth * 0.2f).coerceIn(280.dp, 460.dp)
         Surface(
             modifier = Modifier.width(dialogWidth),
-            shape = RoundedCornerShape(20.dp),
+            shape = Radius.Lg,
             color = AppColors.Surface,
             shadowElevation = 24.dp
         ) {
@@ -732,7 +733,7 @@ private fun TvSourceFormPanel(
     ) {
         Surface(
             modifier = Modifier.fillMaxWidth(0.62f).fillMaxSize(0.90f),
-            shape = RoundedCornerShape(20.dp),
+            shape = Radius.Lg,
             color = AppColors.Surface,
             shadowElevation = 24.dp
         ) {
@@ -958,7 +959,7 @@ private fun TvFormField(
                 imeAction = ImeAction.Next
             ),
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = TvText.Title),
-            shape = RoundedCornerShape(10.dp),
+            shape = Radius.Md,
             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                 unfocusedContainerColor = AppColors.Bg,
                 focusedContainerColor = AppColors.Bg,
@@ -1006,7 +1007,7 @@ private fun TvDeleteConfirmDialog(
     ) {
         Surface(
             modifier = Modifier.width(640.dp),
-            shape = RoundedCornerShape(16.dp),
+            shape = Radius.Lg,
             color = AppColors.Surface,
             shadowElevation = 24.dp
         ) {
@@ -1051,8 +1052,8 @@ private fun TvDeleteConfirmDialog(
                 Box(
                     Modifier.fillMaxWidth().padding(horizontal = 28.dp).background(
                         Color(0xFFE5484D).copy(alpha = 0.08f),
-                        RoundedCornerShape(10.dp)
-                    ).border(1.dp, Color(0xFFE5484D).copy(alpha = 0.25f), RoundedCornerShape(10.dp)).padding(16.dp, 14.dp),
+                        Radius.Md
+                    ).border(1.dp, Color(0xFFE5484D).copy(alpha = 0.25f), Radius.Md).padding(16.dp, 14.dp),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
@@ -1097,18 +1098,18 @@ private fun TvDeleteConfirmDialog(
                     var delFocused by remember { mutableStateOf(false) }
                     val delScale by animateFloatAsState(
                         targetValue = if (delFocused) 1.06f else 1f,
-                        animationSpec = tween(140),
+                        animationSpec = tween(Motion.FAST),
                         label = "del-scale"
                     )
                     Box(
                         Modifier
                             .graphicsLayer { scaleX = delScale; scaleY = delScale }
-                            .clip(RoundedCornerShape(8.dp))
+                            .clip(Radius.Md)
                             .background(
                                 if (delFocused) Color.White else Color(0xFFE5484D)
                             )
                             .then(
-                                if (delFocused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp))
+                                if (delFocused) Modifier.border(2.dp, Color.White, Radius.Md)
                                 else Modifier
                             )
                             .onFocusChanged { delFocused = it.isFocused }

@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,6 +39,8 @@ import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.player.tv.TvPlayerActivity
 import com.tabbit.myvidhub.ui.sources.TvSourcesScreen
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 import kotlinx.coroutines.delay
 
 /**
@@ -143,7 +144,7 @@ fun TvApp(vm: LibraryViewModel) {
     Box(Modifier.fillMaxSize()) {
         AnimatedContent(
             targetState = navStack.last(),
-            transitionSpec = { fadeIn(tween(220)).togetherWith(fadeOut(tween(160))) },
+            transitionSpec = { fadeIn(tween(Motion.BASE)).togetherWith(fadeOut(tween(Motion.FAST))) },
             label = "tv_route",
             modifier = Modifier.fillMaxSize()
         ) { target ->
@@ -206,14 +207,14 @@ fun TvApp(vm: LibraryViewModel) {
         // 退出提示压在页面上层：不可聚焦、不拦按键，纯绘制，所以不会影响下面任何页面的焦点走位。
         AnimatedVisibility(
             visible = exitHintAt >= 0,
-            enter = fadeIn(tween(140)),
-            exit = fadeOut(tween(260)),
+            enter = fadeIn(tween(Motion.FAST)),
+            exit = fadeOut(tween(Motion.SLOW)),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             Row(
                 Modifier
                     .padding(bottom = 32.dp)
-                    .clip(RoundedCornerShape(20.dp))
+                    .clip(Radius.Pill)
                     .background(Color.Black.copy(alpha = 0.72f))
                     .padding(horizontal = 22.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically,

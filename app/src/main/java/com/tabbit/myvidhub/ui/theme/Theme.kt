@@ -32,9 +32,25 @@ object AppColors {
     val BrandSoft: Color
         @Composable get() = LocalPalette.current.brandSoft
 
-    val Bg = Color(0xFF0B0D12)
-    val Surface = Color(0xFF141822)
-    val SurfaceHi = Color(0xFF1E2430)
+    /**
+     * 材质四层里的 L0 —— 页面底。
+     *
+     * 从 0B0D12 压深到 06080C：原来 L0 和卡片只差了 9 的明度，在近黑底上这点落差
+     * 肉眼读不出来，于是所有元素像贴在同一张平面上。页面底压深一档，
+     * 上面的容器和卡片才有地方「抬起来」。
+     * 引用这个常量的地方（背景层、大图渐隐、详情页 scrim）会一起跟上，不会出现两套底色。
+     */
+    val Bg = Color(0xFF06080C)
+
+    /** L1 —— 分区容器、分组面板、图片占位 */
+    val Surface = Color(0xFF0F141B)
+
+    /** L2 —— 卡片、列表行、输入控件 */
+    val SurfaceHi = Color(0xFF18202A)
+
+    /** L3 —— 焦点/抬起态的填充，十英尺下靠这一层区分「选中」和「没选中」 */
+    val SurfaceRaise = Color(0xFF232D3A)
+
     val TextPrimary = Color(0xFFF2F4F8)
     val TextSecondary = Color(0xFF9BA4B4)
     val TextTertiary = Color(0xFF6B7482)
@@ -45,8 +61,9 @@ object AppColors {
      *
      * 这里要的是「和屏幕底色完全一致」，不是一个会随主题漂移的语义品牌色，
      * 所以详情页直接用它、绕开 MaterialTheme；详情页自己有一套从海报取色的配色体系。
+     * 和 [Bg] 取同一个值 —— 底色调了这里必须跟着调，否则接缝重新露出来。
      */
-    val ScrimTop = Color(0xFF0B0D12)
+    val ScrimTop = Bg
 }
 
 /**
@@ -100,7 +117,12 @@ private fun schemeFor(palette: ThemePalette) = darkColorScheme(
 /**
  * 手机端字号表。这里列出的档位是唯一真相：没写进来的档位会静默回落到 Material3 默认值，
  * 曾经就是因此让电视端标题拿到了 57sp/Regular 的默认 displayLarge。
+ *
+ * 带数字的档位统一加 `tnum`（等宽数字）：进度「01:24 / 45:00」、评分、计数这类值一变，
+ * 比例数字的字宽就跟着抖，行宽跳来跳去。系统字体不支持这个特性时它是空操作，不会报错。
  */
+private const val TabularDigits = "tnum"
+
 private val MobileTypography = Typography(
     displayLarge = TextStyle(fontSize = 40.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp),
     displayMedium = TextStyle(fontSize = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp),
@@ -111,11 +133,11 @@ private val MobileTypography = Typography(
     titleMedium = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium),
     titleSmall = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
     bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 22.sp),
-    bodyMedium = TextStyle(fontSize = 13.5.sp, lineHeight = 20.sp),
-    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp),
-    labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
-    labelMedium = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium),
-    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Medium)
+    bodyMedium = TextStyle(fontSize = 13.5.sp, lineHeight = 20.sp, fontFeatureSettings = TabularDigits),
+    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontFeatureSettings = TabularDigits),
+    labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits),
+    labelMedium = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits),
+    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits)
 )
 
 /**
@@ -151,11 +173,11 @@ private val TvTypography = Typography(
     titleMedium = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium, lineHeight = 23.sp),
     titleSmall = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Medium, lineHeight = 20.sp),
     bodyLarge = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Normal, lineHeight = 25.sp),
-    bodyMedium = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Normal, lineHeight = 22.sp),
-    bodySmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Normal, lineHeight = 18.sp),
-    labelLarge = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.2.sp),
-    labelMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.2.sp),
-    labelSmall = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.3.sp)
+    bodyMedium = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Normal, lineHeight = 22.sp, fontFeatureSettings = TabularDigits),
+    bodySmall = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Normal, lineHeight = 18.sp, fontFeatureSettings = TabularDigits),
+    labelLarge = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.2.sp, fontFeatureSettings = TabularDigits),
+    labelMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.2.sp, fontFeatureSettings = TabularDigits),
+    labelSmall = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.3.sp, fontFeatureSettings = TabularDigits)
 )
 
 fun Context.isTelevision(): Boolean {

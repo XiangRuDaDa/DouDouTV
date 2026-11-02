@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -64,6 +63,7 @@ import com.tabbit.myvidhub.ui.gridState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.theme.Radius
 import kotlinx.coroutines.delay
 
 /**
@@ -356,9 +356,9 @@ private fun TvSuggestionRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(if (focused) Color.White else AppColors.Surface)
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(horizontal = 18.dp, vertical = 13.dp),
@@ -398,11 +398,11 @@ private fun TvSearchField(
     Box(
         modifier
             .height(52.dp)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(Radius.Md)
             .background(AppColors.Surface)
             .then(
-                if (focused) Modifier.border(2.dp, AppColors.Brand, RoundedCornerShape(10.dp))
-                else Modifier.border(1.dp, AppColors.SurfaceHi, RoundedCornerShape(10.dp))
+                if (focused) Modifier.border(2.dp, AppColors.Brand, Radius.Md)
+                else Modifier.border(1.dp, AppColors.SurfaceHi, Radius.Md)
             )
             .onFocusChanged { focused = it.isFocused }
             .focusRequester(focusRequester)

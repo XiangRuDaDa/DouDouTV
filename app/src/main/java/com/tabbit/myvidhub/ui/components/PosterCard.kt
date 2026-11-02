@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -28,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -37,10 +37,13 @@ import androidx.compose.ui.unit.sp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Edge
+import com.tabbit.myvidhub.ui.theme.Lift
+import com.tabbit.myvidhub.ui.theme.Radius
 
 // 卡片用到的形状与渐变都是常量：提到组合外，滚动时每张卡不必每次新建对象
-private val PosterShape = RoundedCornerShape(10.dp)
-private val TinyShape = RoundedCornerShape(2.dp)
+private val PosterShape = Radius.Md
+private val TinyShape = Radius.Pill
 private val PosterBottomScrim = Brush.verticalGradient(
     0f to Color.Transparent,
     0.45f to Color.Black.copy(alpha = 0.55f),
@@ -50,10 +53,12 @@ private val PosterBottomScrim = Brush.verticalGradient(
 /**
  * 海报卡（VidHub 风格）。
  *
- * 三个细节决定"像不像"：
- * 1) 2:3 竖版比例，圆角 10dp
- * 2) 聚焦时轻微放大（1.05x）+ 品牌色描边 —— TV 遥控器可用性核心
- * 3) 底部渐变叠层压住标题，不单独占一块，保持海报主体完整
+ * 四个细节决定"像不像"：
+ * 1) 2:3 竖版比例，圆角走 [Radius.Md] 档
+ * 2) 静止态勾一道 1dp [Edge.Hairline] 亮边 —— 近黑底上投影读不出来，
+ *    卡片和背景的分离只能靠描边和填充明度差，不挂投影也就不多一层 graphicsLayer
+ * 3) 聚焦时轻微放大（1.09x）+ 品牌色描边 + 抬起投影 —— TV 遥控器可用性核心
+ * 4) 底部渐变叠层压住标题，不单独占一块，保持海报主体完整
  */
 @Composable
 fun PosterCard(
@@ -81,10 +86,13 @@ fun PosterCard(
         modifier = modifier
             .aspectRatio(2f / 3f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
+            // 投影只挂在焦点卡上：一屏七十张卡各挂一层就是七十多个图层，弱盒子吃不消
+            .then(if (focused) Modifier.shadow(Lift.Focus, PosterShape) else Modifier)
             .clip(PosterShape)
-            .background(AppColors.Surface)
+            .background(if (focused) AppColors.SurfaceRaise else AppColors.Surface)
             .then(
-                if (focused) Modifier.border(2.5.dp, AppColors.Brand, PosterShape) else Modifier
+                if (focused) Modifier.border(2.5.dp, AppColors.Brand, PosterShape)
+                else Modifier.border(1.dp, Edge.Hairline, PosterShape)
             )
             .clickable(
                 interactionSource = interaction,

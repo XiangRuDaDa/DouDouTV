@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
@@ -47,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Radius
 import kotlinx.coroutines.delay
 
 /**
@@ -211,7 +211,7 @@ fun HeroBanner(
                         // 主按钮：品牌色实底 + 阴影，视觉最突出
                         Button(
                             onClick = { onPlay(item) },
-                            shape = RoundedCornerShape(24.dp),
+                            shape = Radius.Pill,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = AppColors.Brand,
                                 contentColor = Color.White
@@ -229,7 +229,7 @@ fun HeroBanner(
                         // 次按钮：半透明白底玻璃风，与主按钮形成层级
                         OutlinedButton(
                             onClick = { onOpen(item) },
-                            shape = RoundedCornerShape(24.dp),
+                            shape = Radius.Pill,
                             colors = ButtonDefaults.outlinedButtonColors(
                                 containerColor = Color.White.copy(alpha = 0.14f),
                                 contentColor = Color.White
@@ -258,7 +258,7 @@ fun HeroBanner(
                 Box(
                     Modifier
                         .size(width = if (active) 16.dp else 6.dp, height = 6.dp)
-                        .clip(RoundedCornerShape(3.dp))
+                        .clip(Radius.Pill)
                         .background(
                             if (active) AppColors.Brand else Color.White.copy(alpha = 0.35f)
                         )

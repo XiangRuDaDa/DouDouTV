@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -49,6 +48,7 @@ import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.AppPalette
 import com.tabbit.myvidhub.ui.theme.ThemePalettes
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
+import com.tabbit.myvidhub.ui.theme.Radius
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -123,7 +123,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .background(AppColors.SurfaceHi, RoundedCornerShape(8.dp))
+                        .background(AppColors.SurfaceHi, Radius.Sm)
                         .padding(horizontal = 12.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -313,7 +313,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
                                         clearing = false
                                     }
                                 },
-                                shape = RoundedCornerShape(10.dp),
+                                shape = Radius.Md,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = AppColors.SurfaceHi,
                                     contentColor = AppColors.TextPrimary
@@ -405,7 +405,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
 private fun SettingCard(title: String, content: @Composable () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = AppColors.Surface),
-        shape = RoundedCornerShape(12.dp),
+        shape = Radius.Md,
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -427,7 +427,7 @@ private fun StatRow(label: String, value: String) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(AppColors.SurfaceHi, RoundedCornerShape(8.dp))
+            .background(AppColors.SurfaceHi, Radius.Sm)
             .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

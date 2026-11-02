@@ -49,10 +49,12 @@ import java.util.concurrent.TimeUnit
  * 用户看到的就是「播一下就转圈」的循环。
  *
  * 因此这里的关键改动是**抬高起播与重缓冲门槛**，让播放器先攒够余量再出画面：
- *   1. bufferForPlaybackMs 1s → 5s：首帧稍晚一点，但换来连续播放；
- *   2. bufferForPlaybackAfterRebufferMs 2.5s → 5s：卡顿后必须重新攒够 5s 才恢复，
+ *   1. bufferForPlaybackMs 1s → 2s：首帧稍晚一点，但换来连续播放；再往 5s 抬过，
+ *      夸克 CDN 限速时要等超久，所以最终停在 2s；
+ *   2. bufferForPlaybackAfterRebufferMs 2.5s → 3s：卡顿后必须重新攒够 3s 才恢复，
  *      避免「恢复 0.5 秒又卡」的抖动；
- *   3. minBufferMs 20s/30s → 30s/45s：网络抖动时靠本地缓冲兜住；
+ *   3. minBufferMs 20s/30s → 50s/60s：网络抖动时靠本地缓冲兜住（网盘是按连接累计限速，
+ *      一次限速窗口实测能到 66 秒，存粮薄就必穿）；
  *   4. maxBufferMs 与 targetBufferBytes 同步放大，防止缓冲到顶后主动停止预读。
  *
  * 播放器不使用磁盘缓存：CacheDataSource 与 Range 拦截器不兼容（见下面的 createXXXPlayer），
@@ -320,7 +322,13 @@ object PlayerFactory {
         // 因此直接使用裸 OkHttpDataSource，跳过 CacheDataSource。
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                if (isTv) 45_000 else 30_000,
+                // minBufferMs 是「常态下始终保持 ahead 这么多秒」的存粮，不是起播门槛（起播见下面两项）。
+                // 抬到 50s/60s 的依据是实测的限速窗口：32MiB 一块的完成间隔会 12.5s→21s→32s 一路劣化，
+                // 最坏一次 66 秒几乎无字节；旧值 30s/45s 正好穿不过这种窗口，表现就是「看着看着要加载」。
+                // 电视给 60s 而不是 50s：4K 码率更高、盒子内存吃得住。
+                // 注意 prioritizeTimeOverSize=true 时 targetBufferBytes 不参与判据，
+                // 所以这部分内存是按 秒数 × 码率 实打实涨：50s @16Mbps ≈ 100MB，60s ≈ 120MB。
+                if (isTv) 60_000 else 50_000,
                 if (isTv) 300_000 else 240_000,
                 BUFFER_FOR_PLAYBACK_MS,
                 BUFFER_AFTER_REBUFFER_MS

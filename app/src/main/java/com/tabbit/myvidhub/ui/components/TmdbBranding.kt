@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.R
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Radius
 
 /**
  * TMDB 品牌与署名组件。
@@ -40,7 +40,7 @@ private val TmdbBlue = Color(0xFF01B4E4)
 fun TmdbLogoBadge(modifier: Modifier = Modifier, compact: Boolean = false) {
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(5.dp))
+            .clip(Radius.Sm)
             .background(TmdbBlue)
             .padding(
                 horizontal = if (compact) 6.dp else 8.dp,

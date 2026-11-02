@@ -23,7 +23,6 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -95,6 +94,7 @@ import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.themeSeamFade
+import com.tabbit.myvidhub.ui.theme.Radius
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -490,7 +490,7 @@ private fun ContinueMenuAction(
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(Radius.Md)
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -637,7 +637,7 @@ private fun MoreLink(onMore: () -> Unit) {
         style = MaterialTheme.typography.labelMedium,
         color = AppColors.TextSecondary,
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Sm)
             .clickable(onClick = onMore)
             .padding(horizontal = 10.dp, vertical = 4.dp)
     )
@@ -849,7 +849,7 @@ private fun HomePickerMenu(
     ) {
         Column(
             Modifier
-                .background(AppColors.SurfaceHi, RoundedCornerShape(14.dp))
+                .background(AppColors.SurfaceHi, Radius.Md)
                 .padding(vertical = 6.dp)
                 .heightIn(max = 240.dp)
                 .verticalScroll(scrollState)

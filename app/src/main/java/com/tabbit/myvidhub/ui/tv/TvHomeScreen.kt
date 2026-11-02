@@ -40,7 +40,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -102,9 +101,13 @@ import com.tabbit.myvidhub.ui.components.continueTitle
 import com.tabbit.myvidhub.ui.components.episodeLabel
 import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Lift
+import com.tabbit.myvidhub.ui.theme.Edge
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
 import com.tabbit.myvidhub.ui.theme.themeSeamFade
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -642,7 +645,7 @@ private fun TvSourceChainPill(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "chain")
+    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "chain")
     val labelColor = when (kind) {
         SourceKind.EMBY -> AppColors.BrandSoft
         SourceKind.TVBOX -> AppColors.Rating
@@ -660,9 +663,9 @@ private fun TvSourceChainPill(
         modifier
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(bg)
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .onFocusChanged(onFocusChanged)
@@ -857,7 +860,7 @@ private fun TvHero(
             AnimatedContent(
                 targetState = item,
                 transitionSpec = {
-                    fadeIn(tween(300)) togetherWith fadeOut(tween(150))
+                    fadeIn(tween(Motion.SLOW)) togetherWith fadeOut(tween(Motion.FAST))
                 },
                 contentAlignment = Alignment.BottomStart,
                 label = "heroText"
@@ -937,7 +940,7 @@ private fun TvHero(
                     Modifier
                         .width(120.dp)
                         .height(3.dp)
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(Radius.Pill)
                         .background(TvText.Hairline)
                         // 在 draw 阶段读 State：进度每秒变几十次，只重画这条线，不重组整个 Hero
                         .drawBehind {
@@ -1179,8 +1182,8 @@ private fun TvContinueRow(
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
             // 同 TvPosterCard：放大动画的值留在 State 里，在 draw phase 读，避免每帧重组卡片
-            val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "continue")
-            val cardShape = remember { RoundedCornerShape(10.dp) }
+            val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "continue")
+            val cardShape = remember { Radius.Md }
             val cardFocus = remember(item.id) { FocusRequester() }
             // OK 键按下的时间戳（elapsedRealtime，0 表示当前没有按下中）
             var centerDownAt by remember { mutableLongStateOf(0L) }
@@ -1224,7 +1227,10 @@ private fun TvContinueRow(
                         clip = true
                     }
                     .background(AppColors.SurfaceHi)
-                    .then(if (focused) Modifier.border(2.dp, Color.White, cardShape) else Modifier)
+                    .then(
+                        if (focused) Modifier.border(2.dp, Color.White, cardShape)
+                        else Modifier.border(1.dp, Edge.Hairline, cardShape)
+                    )
                     .clickable(interactionSource = interaction, indication = null) {
                         if (item.positionMs > 5_000L) onPlay(item) else onDetail(item.id)
                     }
@@ -1267,12 +1273,12 @@ private fun TvContinueRow(
                         )
                     }
                     if (progress > 0.02f) {
-                        Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(3.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(alpha = 0.25f))) {
+                        Box(Modifier.fillMaxWidth().padding(top = 6.dp).height(3.dp).clip(Radius.Pill).background(Color.White.copy(alpha = 0.25f))) {
                             Box(
                                 Modifier
                                     .fillMaxWidth(progress)
                                     .fillMaxHeight()
-                                    .background(AppColors.Brand, RoundedCornerShape(2.dp))
+                                    .background(AppColors.Brand, Radius.Pill)
                             )
                         }
                     }
@@ -1319,7 +1325,7 @@ private fun TvContinueActionDialog(
             Column(
                 Modifier
                     .width(dialogWidth)
-                    .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
+                    .background(AppColors.SurfaceHi, Radius.Lg)
                     .padding(vertical = 26.dp)
             ) {
                 Text(
@@ -1466,7 +1472,7 @@ private fun TvDialogOption(
     Box(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(Radius.Md)
             .background(
                 when {
                     focused -> Color.White
@@ -1474,7 +1480,7 @@ private fun TvDialogOption(
                     else -> AppColors.Surface
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -1520,7 +1526,7 @@ private fun HomeSourceDialog(
         Column(
             Modifier
                 .width(400.dp)
-                .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
+                .background(AppColors.SurfaceHi, Radius.Lg)
                 .padding(vertical = 26.dp)
         ) {
             Text(
@@ -1586,7 +1592,7 @@ private fun HomeSiteDialog(
             Column(
                 Modifier
                     .width(dialogWidth)
-                    .background(AppColors.SurfaceHi, RoundedCornerShape(18.dp))
+                    .background(AppColors.SurfaceHi, Radius.Lg)
                     .padding(vertical = 26.dp)
             ) {
                 Text(

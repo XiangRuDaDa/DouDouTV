@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -62,10 +61,14 @@ import com.tabbit.myvidhub.ui.settings.APP_VERSION_LABEL
 import com.tabbit.myvidhub.ui.settings.forceTvMode
 import com.tabbit.myvidhub.ui.settings.setForceTvMode
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Lift
+import com.tabbit.myvidhub.ui.theme.Edge
 import com.tabbit.myvidhub.ui.theme.AppPalette
 import com.tabbit.myvidhub.ui.theme.ThemePalettes
 import com.tabbit.myvidhub.ui.theme.TvText
 import com.tabbit.myvidhub.ui.theme.themeBackdrop
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -316,7 +319,7 @@ private fun TvSettingsGroup(title: String, content: @Composable ColumnScope.() -
         Column(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
+                .clip(Radius.Md)
                 .background(AppColors.Surface)
                 .padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -331,7 +334,7 @@ private fun TvStatRow(label: String, value: String) {
     Row(
         Modifier
             .fillMaxWidth()
-            .background(AppColors.SurfaceHi, RoundedCornerShape(10.dp))
+            .background(AppColors.SurfaceHi, Radius.Md)
             .padding(horizontal = 18.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -363,16 +366,16 @@ private fun TvSettingRow(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.015f else 1f, tween(140), label = "tv_setting_row")
+    val scale by animateFloatAsState(if (focused) 1.015f else 1f, tween(Motion.FAST), label = "tv_setting_row")
 
     Row(
         Modifier
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
+            .clip(Radius.Md)
             .background(if (focused) AppColors.SurfaceHi else AppColors.Bg.copy(alpha = 0.35f))
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(12.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
             .clickable(
                 interactionSource = interaction,
@@ -464,7 +467,7 @@ private fun TvSettingField(
                 keyboardType = KeyboardType.Text,
                 imeAction = ImeAction.Done
             ),
-            shape = RoundedCornerShape(10.dp),
+            shape = Radius.Md,
             colors = OutlinedTextFieldDefaults.colors(
                 unfocusedContainerColor = AppColors.Bg,
                 focusedContainerColor = AppColors.Bg,

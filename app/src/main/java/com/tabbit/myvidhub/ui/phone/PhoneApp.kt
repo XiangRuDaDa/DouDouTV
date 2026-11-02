@@ -49,6 +49,7 @@ import com.tabbit.myvidhub.ui.player.phone.PhonePlayerActivity
 import com.tabbit.myvidhub.ui.settings.SettingsScreen
 import com.tabbit.myvidhub.ui.sources.SourcesScreen
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Motion
 
 /**
  * 手机端外壳（与电视端完全独立的一套代码）。
@@ -155,20 +156,20 @@ fun PhoneApp(vm: LibraryViewModel) {
                 transitionSpec = {
                     when {
                         targetState is PhoneRoute.Detail || targetState is PhoneRoute.Genre ->
-                            (slideInHorizontally(animationSpec = tween(300)) { it / 6 } +
-                                fadeIn(tween(260)))
-                                .togetherWith(fadeOut(tween(160)))
+                            (slideInHorizontally(animationSpec = tween(Motion.SLOW)) { it / 6 } +
+                                fadeIn(tween(Motion.SLOW)))
+                                .togetherWith(fadeOut(tween(Motion.FAST)))
 
                         (initialState is PhoneRoute.Detail || initialState is PhoneRoute.Genre) &&
                             targetState is PhoneRoute.Home ->
-                            (fadeIn(tween(260)) +
-                                slideInHorizontally(animationSpec = tween(300)) { -it / 12 })
+                            (fadeIn(tween(Motion.SLOW)) +
+                                slideInHorizontally(animationSpec = tween(Motion.SLOW)) { -it / 12 })
                                 .togetherWith(
-                                    slideOutHorizontally(animationSpec = tween(260)) { it / 4 } +
-                                        fadeOut(tween(200))
+                                    slideOutHorizontally(animationSpec = tween(Motion.SLOW)) { it / 4 } +
+                                        fadeOut(tween(Motion.BASE))
                                 )
 
-                        else -> fadeIn(tween(220)).togetherWith(fadeOut(tween(160)))
+                        else -> fadeIn(tween(Motion.BASE)).togetherWith(fadeOut(tween(Motion.FAST)))
                     }
                 },
                 label = "phone_route",

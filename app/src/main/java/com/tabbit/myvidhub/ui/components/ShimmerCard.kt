@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -22,9 +21,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.dp
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.LocalTvMode
+import com.tabbit.myvidhub.ui.theme.Radius
 
 /**
  * 海报卡骨架屏：2:3 竖版 + 底部标题条，带 shimmer 光扫效果。
@@ -33,7 +34,7 @@ import com.tabbit.myvidhub.ui.theme.LocalTvMode
 @Composable
 fun ShimmerCard(modifier: Modifier = Modifier) {
     val shimmerBrush = shimmerBrush()
-    val shape = RoundedCornerShape(10.dp)
+    val shape = Radius.Md
 
     Box(
         modifier = modifier
@@ -59,7 +60,7 @@ fun ShimmerCard(modifier: Modifier = Modifier) {
                 Modifier
                     .fillMaxWidth(0.8f)
                     .height(10.dp)
-                    .clip(RoundedCornerShape(3.dp))
+                    .clip(Radius.Pill)
                     .background(shimmerBrush)
                     .align(Alignment.CenterStart)
             )
@@ -73,7 +74,7 @@ fun ShimmerCard(modifier: Modifier = Modifier) {
 @Composable
 fun ShimmerBox(
     modifier: Modifier = Modifier,
-    shape: RoundedCornerShape = RoundedCornerShape(10.dp)
+    shape: Shape = Radius.Md
 ) {
     Box(
         modifier = modifier

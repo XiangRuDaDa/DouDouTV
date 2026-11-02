@@ -64,6 +64,8 @@ import com.tabbit.myvidhub.ui.detail.focusColorOf
 import com.tabbit.myvidhub.ui.detail.loadPosterBitmap
 import com.tabbit.myvidhub.ui.detail.pageTonesOf
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Lift
+import com.tabbit.myvidhub.ui.theme.Edge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,7 +76,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -98,6 +99,8 @@ import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.components.TextBadge
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
@@ -477,8 +480,8 @@ fun TvDetailScreen(
             pageTonesOf(dominant)
         }
     }
-    val top by animateColorAsState(tones.first, tween(320), label = "tv_top")
-    val bottom by animateColorAsState(tones.second, tween(320), label = "tv_bottom")
+    val top by animateColorAsState(tones.first, tween(Motion.SLOW), label = "tv_top")
+    val bottom by animateColorAsState(tones.second, tween(Motion.SLOW), label = "tv_bottom")
 
     val bgBrush = remember(top, bottom) {
         Brush.verticalGradient(
@@ -1167,7 +1170,7 @@ private fun TvCastRow(
         cast.forEachIndexed { index, person ->
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
-            val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(150), label = "cast")
+            val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST), label = "cast")
             val avatarShape = remember { CircleShape }
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -1265,7 +1268,7 @@ private fun TvEpisodeCard(
     onClick: () -> Unit
 ) {
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.05f else 1f, tween(140), label = "ep_card")
+    val scale by animateFloatAsState(if (focused) 1.05f else 1f, tween(Motion.FAST), label = "ep_card")
 
     val label = episode.episodeLabel()
     val watched = episode.positionMs > 5_000L
@@ -1277,12 +1280,12 @@ private fun TvEpisodeCard(
         modifier
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(10.dp))
+            .clip(Radius.Md)
             .background(if (watched) AppColors.Brand.copy(alpha = 0.18f) else AppColors.Surface)
             .border(
                 width = if (focused) 2.dp else 1.dp,
                 color = if (focused) AppColors.Brand else AppColors.SurfaceHi,
-                shape = RoundedCornerShape(10.dp)
+                shape = Radius.Md
             )
             .onFocusChanged { focused = it.isFocused }
             // 焦点路由必须排在 focusable 之前，才挂得到这个焦点目标上
@@ -1312,7 +1315,7 @@ private fun TvEpisodeCard(
             Modifier
                 .fillMaxWidth()
                 .height(3.dp)
-                .clip(RoundedCornerShape(2.dp))
+                .clip(Radius.Pill)
                 .background(AppColors.SurfaceHi)
         ) {
             if (progress > 0f) {

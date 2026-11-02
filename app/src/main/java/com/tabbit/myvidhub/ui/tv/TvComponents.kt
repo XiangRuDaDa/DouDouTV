@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
@@ -59,7 +58,11 @@ import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.components.PosterArt
 import com.tabbit.myvidhub.ui.components.PosterFallback
 import com.tabbit.myvidhub.ui.theme.AppColors
+import com.tabbit.myvidhub.ui.theme.Lift
+import com.tabbit.myvidhub.ui.theme.Edge
 import com.tabbit.myvidhub.ui.theme.TvText
+import com.tabbit.myvidhub.ui.theme.Radius
+import com.tabbit.myvidhub.ui.theme.Motion
 
 /**
  * 电视端专用组件（十英尺界面）。
@@ -235,7 +238,7 @@ fun TvPillButton(
     // （Hero 播放键 → 顶栏同步键）时会出现逻辑焦点已移走、画面高亮却停在原按钮上的错位。
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "pill")
+    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "pill")
     val brand = AppColors.Brand
     val brandSoft = AppColors.BrandSoft
 
@@ -244,7 +247,7 @@ fun TvPillButton(
             // 放大后要把绘制层级抬起来，否则同排右侧的兄弟节点会压在白边上面
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(
                 // 填充整颗跟着主题色走，聚焦态不再刷纯白：
                 // 十英尺下焦点是常态（进页第一个落点就是主按钮），
@@ -257,7 +260,7 @@ fun TvPillButton(
                     else -> brand.copy(alpha = 0.18f)
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -294,15 +297,15 @@ fun TvPlayButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(140), label = "play_pill")
+    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(Motion.FAST), label = "play_pill")
 
     Row(
         modifier
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(if (focused) AppColors.BrandSoft else AppColors.Brand)
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(tvButtonPadding(size)),
@@ -351,14 +354,14 @@ fun TvIconButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(140), label = "tv_icon")
+    val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST), label = "tv_icon")
 
     Box(
         modifier
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .size(sizeDp)
-            .clip(RoundedCornerShape(50))
+            .clip(Radius.Pill)
             .background(
                 when {
                     focused -> Color.White
@@ -367,8 +370,8 @@ fun TvIconButton(
                 }
             )
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(50))
-                else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), RoundedCornerShape(50))
+                if (focused) Modifier.border(2.dp, Color.White, Radius.Pill)
+                else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), Radius.Pill)
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction),
@@ -412,8 +415,8 @@ fun TvPosterCard(
     val focused by interaction.collectIsFocusedAsState()
     // 不用 by 解包：放大动画每帧都变，解包等于每帧重组整张卡（含图片和文字）。
     // 保留 State 在 graphicsLayer 的 draw phase 读，动画只重绘这一层。
-    val scale = animateFloatAsState(if (focused) 1.10f else 1f, tween(150), label = "card")
-    val cardShape = remember { RoundedCornerShape(10.dp) }
+    val scale = animateFloatAsState(if (focused) 1.10f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "card")
+    val cardShape = remember { Radius.Md }
 
     val progress = if (item.durationMs > 0L) {
         (item.positionMs.toFloat() / item.durationMs).coerceIn(0f, 1f)
@@ -441,7 +444,12 @@ fun TvPosterCard(
                 clip = true
             }
             .background(AppColors.Surface)
-            .then(if (focused) Modifier.border(2.5.dp, Color.White, cardShape) else Modifier)
+            // 静止态勾一道亮边：近黑底上投影读不出来，卡片与页面底的分离只能靠描边+明度差。
+            // 一屏几十张卡只描边不挂投影，避免弱盒子多出一层离屏缓冲。
+            .then(
+                if (focused) Modifier.border(2.5.dp, Color.White, cardShape)
+                else Modifier.border(1.dp, Edge.Hairline, cardShape)
+            )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(0.dp)
     ) {
@@ -562,7 +570,7 @@ fun TvMenuRow(
     Box(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(Radius.Md)
             .background(
                 when {
                     focused -> Color.White
@@ -571,7 +579,7 @@ fun TvMenuRow(
                 }
             )
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
+                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
                 else Modifier
             )
             .onFocusChanged { focused = it.isFocused }
@@ -683,9 +691,9 @@ fun TvBackButton(onBack: () -> Unit) {
     Box(
         Modifier
             .padding(start = TvPagePadding, top = 20.dp)
-            .clip(RoundedCornerShape(8.dp))
+            .clip(Radius.Md)
             .background(if (focused) Color.White else Color.Black.copy(alpha = 0.45f))
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(8.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -733,7 +741,7 @@ fun TvFilterChip(
     var focused by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .clip(RoundedCornerShape(20.dp))
+            .clip(Radius.Pill)
             .background(
                 when {
                     focused -> Color.White
@@ -741,7 +749,7 @@ fun TvFilterChip(
                     else -> AppColors.SurfaceHi
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(20.dp)) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Pill) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
