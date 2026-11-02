@@ -1,6 +1,7 @@
 package com.tabbit.myvidhub.data.tvbox
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import dalvik.system.DexClassLoader
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +110,12 @@ object SpiderLoader {
      *  出现，端口通了再调第 2 次 Init。最多 2 次 Init，避免反复弹「正在初始化本地代理」。 */
     private const val PROXY_WAIT_MS = 30_000L
     private const val PROXY_WAIT_INTERVAL_MS = 2_000L
+
+    /** 兜底扫描的端口带：先扫实测到的壳代理带（8964 起递增），再扫随机端口大区 */
+    private val FALLBACK_PORT_BANDS = listOf(8964..9978, 20000..50000)
+
+    /** 单次兜底扫描的用时上限：轮询间隔 2 秒，留足余量给端口探测之外的环节 */
+    private const val FALLBACK_SCAN_BUDGET_MS = 1_200L
 
     /** 进程级初始化：幂等，多次调用（多个 TvBoxClient）只跑一次。 */
     fun init(context: Context) {
@@ -415,6 +422,8 @@ object SpiderLoader {
      * 再逐个 HTTP GET 探测，响应体含 {"state":"ok"} 即为目标代理。
      */
     private suspend fun waitGoProxyReady(timeoutMs: Long): Int? {
+        // 新的一轮等待：把兜底扫描的游标复位（上一轮扫过的端口，这一轮才可能刚被代理监听上）
+        fallbackScanIndex = 0
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             findGoProxyPort()?.let { return it }
@@ -426,7 +435,9 @@ object SpiderLoader {
     /** 扫描本机所有监听端口，找 Go 代理（GET /health 返回 {"state":"ok"}） */
     private fun findGoProxyPort(): Int? {
         val ports = scanListeningPorts()
-        Log.w(TAG, "扫描到监听端口 ${ports.size} 个：$ports")
+        // 只印前 20 个：兜底扫描可能一下给出上百个端口，整行日志会被 ROM 截断，
+        // 真要排查时前 20 个足够判断「有没有扫到」
+        Log.w(TAG, "扫描到监听端口 ${ports.size} 个：${ports.take(20)}")
         for (port in ports) {
             val ok = isGoProxy(port)
             if (ok) {
@@ -460,10 +471,52 @@ object SpiderLoader {
         }
         if (out.isNotEmpty()) return out.toList()
 
-        // 2) Fallback：Socket 探测 Go 代理常用端口范围（仅 proc 读不到时应急）
-        for (port in 20000..50000) {
-            if (isPortOpen(port)) out += port
+        // 2) Fallback：Socket 探测，见 [scanPortsByConnect] 的预算说明
+        out += scanPortsByConnect()
+        return out.toList()
+    }
+
+    /** 兜底扫描扫到哪儿了；-1 表示本轮已扫完，后续轮询不再重复扫 */
+    /** 兜底扫描扫到第几个端口（按 [FALLBACK_PORT_BANDS] 展平后的下标）；扫完不再重复 */
+    @Volatile
+    private var fallbackScanIndex = 0
+
+    /** 展平下标 → 端口；越界返回 null 表示整个带区已经扫过 */
+    private fun fallbackPortAt(index: Int): Int? {
+        var n = index
+        for (band in FALLBACK_PORT_BANDS) {
+            val size = band.last - band.first + 1
+            if (n < size) return band.first + n
+            n -= size
         }
+        return null
+    }
+
+    /**
+     * proc 读不到时的兜底端口探测。
+     *
+     * 原来这里一次 `for (port in 20000..50000)` 三万多次 connect，外面还套着 2 秒一次的轮询：
+     * ROM 拒绝/拖慢本机 connect 时每个端口都要等满超时，最坏能把 Init 的整段等待预算
+     * 全耗在端口探测上，代理明明已经就绪也等不到。
+     * 现在按带区顺序推进（先 8964 那段实测常用的，再大区），每轮最多花
+     * [FALLBACK_SCAN_BUDGET_MS]，扫到哪儿记到哪儿，扫完就不再重复。
+     */
+    private fun scanPortsByConnect(): List<Int> {
+        val started = SystemClock.elapsedRealtime()
+        val out = LinkedHashSet<Int>()
+        var index = fallbackScanIndex
+        while (true) {
+            val port = fallbackPortAt(index) ?: break
+            if (isPortOpen(port)) out += port
+            index++
+            if (SystemClock.elapsedRealtime() - started > FALLBACK_SCAN_BUDGET_MS) break
+        }
+        fallbackScanIndex = index
+        Log.w(
+            TAG,
+            "端口兜底扫描：已推进到第 $index 个，命中 ${out.size} 个" +
+                "（本轮用时 ${SystemClock.elapsedRealtime() - started}ms）"
+        )
         return out.toList()
     }
 

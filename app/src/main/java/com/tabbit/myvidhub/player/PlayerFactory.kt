@@ -2,18 +2,13 @@ package com.tabbit.myvidhub.player
 
 import android.content.Context
 import android.net.Uri
-import android.os.StatFs
 import android.os.SystemClock
 import android.util.Log
+import com.tabbit.myvidhub.core.LogGate
 import androidx.media3.common.C
 import androidx.media3.common.FileTypes
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.datasource.cache.CacheDataSink
-import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
-import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -39,7 +34,6 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.EOFException
-import java.io.File
 import java.io.IOException
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -61,21 +55,14 @@ import java.util.concurrent.TimeUnit
  *   3. minBufferMs 20s/30s → 30s/45s：网络抖动时靠本地缓冲兜住；
  *   4. maxBufferMs 与 targetBufferBytes 同步放大，防止缓冲到顶后主动停止预读。
  *
- * 磁盘缓存默认 LRU 自动淘汰，但如果用户长时间不用、缓存越积越多，
- * 可以通过设置页手动清空。关闭单个播放器时也会调用 clearCacheFor(context) 清一次。
+ * 播放器不使用磁盘缓存：CacheDataSource 与 Range 拦截器不兼容（见下面的 createXXXPlayer），
+ * 所以这里没有任何 SimpleCache 生命周期，设置页的缓存面板统计的是图片缓存，见
+ * [com.tabbit.myvidhub.core.AppCache]。
+ * 失效状态码（404 / 403 / 412）在 HTTP 层的每个响应出口统一转成带中文提示的 IOException，
+ * 让「分享链接过期 / Cookie 失效」显示成一句能读懂的话，而不是无限转圈。
  */
 @UnstableApi
 object PlayerFactory {
-
-    /** 缓存目录名称 */
-    private const val CACHE_DIR_NAME = "media_cache"
-
-    /** 磁盘缓存期望上限：手机 256MB（之前 1GB 太激进，看个 20G 电影缓存膨胀到 20G 就是这个原因） */
-    private const val CACHE_PREFERRED_PHONE = 256L * 1024 * 1024
-    /** 磁盘缓存期望上限：电视盒子 512MB */
-    private const val CACHE_PREFERRED_TV = 512L * 1024 * 1024
-    /** 保底缓存下限：低于这个值连一集都存不下，缓存就失去意义了 */
-    private const val CACHE_MIN_BYTES = 64L * 1024 * 1024
 
     /** 起播门槛：攒够 2 秒再出画面（5 秒太激进，夸克 CDN 限速时要等超久） */
     private const val BUFFER_FOR_PLAYBACK_MS = 2_000
@@ -85,6 +72,13 @@ object PlayerFactory {
 
     /** 开区间 Range 头（bytes=X-）：只有这种请求才需要补一个结尾，防止一路读到 EOF */
     private val OPEN_RANGE_REGEX = Regex("bytes=(\\d+)-$")
+
+    /**
+     * 【临时取证】只追踪这一条直链的分块请求，避免把其它加载也打成流水账。
+     * 播放器装载一集时由 Activity 赋值，定位结束后整条 PlayTrace 一起删除。
+     */
+    @Volatile
+    var traceUrl: String = ""
 
     /**
      * 分块「开口耗时」取证：只对走换连接通道的网盘大文件打，超过 800ms 才记一行。
@@ -103,29 +97,6 @@ object PlayerFactory {
 
     /** 加载失败的重试次数（与之前 DefaultLoadErrorHandlingPolicy(8) 保持一致） */
     private const val MIN_LOAD_RETRY_COUNT = 8
-
-    @Volatile
-    private var cache: SimpleCache? = null
-
-    /** 计算磁盘缓存上限 */
-    private fun cacheLimitFor(context: Context, isTv: Boolean): Long {
-        val preferred = if (isTv) CACHE_PREFERRED_TV else CACHE_PREFERRED_PHONE
-        val free = runCatching {
-            StatFs(context.cacheDir.absolutePath).availableBytes
-        }.getOrDefault(preferred * 4)
-        return minOf(preferred, maxOf(free / 4, CACHE_MIN_BYTES))
-    }
-
-    private fun cacheInstance(context: Context, isTv: Boolean): SimpleCache =
-        cache ?: synchronized(this) {
-            cache ?: run {
-                SimpleCache(
-                    File(context.cacheDir, CACHE_DIR_NAME),
-                    LeastRecentlyUsedCacheEvictor(cacheLimitFor(context, isTv)),
-                    StandaloneDatabaseProvider(context)
-                ).also { cache = it }
-            }
-        }
 
     /** 手机端：屏幕小、常切前后台，缓冲略收一点以保证内存占用可控 */
     fun createPhonePlayer(
@@ -181,6 +152,52 @@ object PlayerFactory {
             if (rotateConnection.contains(urlKey))
                 request.newBuilder().header("Connection", "close").build()
             else request
+
+        // ===== 失效状态码的统一出口 =====
+        // Media3 对被拒的响应只给一个 ERROR_CODE_IO_BAD_HTTP_STATUS 错误码，用户看不懂；
+        // 在 OkHttp 层换成带中文提示的 IOException，ExoPlayer 会把它放进 PlaybackException.message，
+        // onPlayerError 再翻译一次就能显示「Cookie 可能已过期」。
+        //
+        // 三个响应出口都必须过这道检查：原样透传、伪装平移分支、改走 Range 通道的重发分支。
+        // 前两个分支以前是直接 return 的，于是 403 的错误页被当成视频数据喂进 extractor，
+        // 用户看到的是无限转圈，日志里只剩 BUFFERING，根本看不出真正原因是令牌过期。
+        // ===== 【临时取证】PlayTrace：定位完连同 PhonePlayerActivity 里的同名日志一起删 =====
+        // 三个响应出口都在此经过，所以这一行能还原「片尾到底请求了哪段字节、CDN 给了什么」：
+        // 网盘 4K MKV 播到结尾报 No valid varint length mask found（解析器读到 0x00），
+        // 需要确认是 ChunkNotFound/越界/还是返回体被截断，光看 extractor 栈猜不出来。
+        fun traceExit(request: Request, response: okhttp3.Response): okhttp3.Response {
+            if (request.url.toString() == traceUrl) {
+                Log.w(
+                    "PlayTrace",
+                    "req=${request.header("Range") ?: "无Range"} → ${response.code}" +
+                        " cl=${response.header("Content-Length") ?: "无"}" +
+                        " cr=${response.header("Content-Range") ?: "无"}" +
+                        " proto=${response.protocol}"
+                )
+            }
+            return response
+        }
+
+        fun failOnDeadStatus(request: Request, response: okhttp3.Response): okhttp3.Response {
+            traceExit(request, response)
+            val code = response.code
+            if (code != 404 && code != 403 && code != 412) return response
+            val host = request.url.host
+            if (code == 404) {
+                Log.e("PlayerHttp", "404 Not Found — 资源已失效 ${LogGate.url(context, request.url.toString())}")
+                response.close()
+                throw java.io.IOException(
+                    "HTTP 404: 该资源已失效（$host），可能是云盘分享链接过期或内容被移除。"
+                )
+            }
+            // 403/412 = Cookie 失效或签名过期（云盘常见）
+            Log.e("PlayerHttp", "$code ${response.message} — 认证失效 host=$host")
+            response.close()
+            throw java.io.IOException(
+                "HTTP $code: 访问被拒绝（$host），云盘 Cookie 或登录状态可能已过期。"
+            )
+        }
+
         val client = OkHttpClient.Builder()
             .connectTimeout(connectTimeout.toLong(), TimeUnit.MILLISECONDS)
             .readTimeout(readTimeout.toLong(), TimeUnit.MILLISECONDS)
@@ -201,7 +218,7 @@ object PlayerFactory {
                     val openAt = SystemClock.elapsedRealtime()
                     val shiftedResponse = chain.proceed(shifted)
                     logChunkOpen(openAt, shifted, rotateConnection.contains(urlKey))
-                    return@Interceptor shiftedResponse
+                    return@Interceptor failOnDeadStatus(shifted, shiftedResponse)
                 }
 
                 val rangeHeader = original.header("Range")
@@ -279,30 +296,12 @@ object PlayerFactory {
                                 "改走 Range 通道：${retry.header("Range")}，" +
                                 "分块换连接=$observedProtocol"
                         )
-                        return@Interceptor chain.proceed(retry)
+                        return@Interceptor failOnDeadStatus(retry, chain.proceed(retry))
                     }
                 }
-                // ===== 404 资源失效拦截：提前抛出带明确消息的 IOException =====
-                // Media3 的 ERROR_CODE_IO_BAD_HTTP_STATUS 只给错误码，用户看不懂。
-                // 在 OkHttp 层拦截 404 → 抛带中文提示的 IOException → ExoPlayer 把 message
-                // 放进 PlaybackException → onPlayerError 能拿到 message 翻译。
-                if (code == 404) {
-                    val host = request.url.host
-                    Log.e("PlayerHttp", "404 Not Found — 资源已失效 host=$host url=${request.url}")
-                    response.close()
-                    throw java.io.IOException(
-                        "HTTP 404: 该资源已失效（$host），可能是云盘分享链接过期或内容被移除。"
-                    )
-                }
-                // 403/412 = Cookie 失效或签名过期（云盘常见）
-                if (code == 403 || code == 412) {
-                    val host = request.url.host
-                    Log.e("PlayerHttp", "$code ${response.message} — 认证失效 host=$host")
-                    response.close()
-                    throw java.io.IOException(
-                        "HTTP $code: 访问被拒绝（$host），云盘 Cookie 或登录状态可能已过期。"
-                    )
-                }
+                // ===== 404 / 403 / 412 出口 =====
+                // 透传分支的响应在这里过统一检查；另外两个分支在各自 return 前已经查过。
+                failOnDeadStatus(request, response)
 
                 response
             })
@@ -516,41 +515,6 @@ object PlayerFactory {
             FileTypes.TS -> extractor is TsExtractor
             FileTypes.PS -> extractor is PsExtractor
             else -> false
-        }
-    }
-
-    /** 读取缓存目录当前占用（字节数），设置页展示用 */
-    fun cacheSizeBytes(context: Context): Long {
-        val dir = File(context.cacheDir, CACHE_DIR_NAME)
-        if (!dir.exists()) return 0L
-        fun walk(f: File): Long {
-            return if (f.isFile) f.length()
-            else f.listFiles()?.sumOf { walk(it) } ?: 0L
-        }
-        return walk(dir)
-    }
-
-    /** 清理磁盘缓存。SimpleCache 必须 release 后才能删目录，否则会被锁。 */
-    fun clearCache(context: Context) {
-        synchronized(this) {
-            runCatching { cache?.release() }
-            cache = null
-        }
-        runCatching {
-            val dir = File(context.cacheDir, CACHE_DIR_NAME)
-            if (dir.exists()) {
-                // 先删 SimpleCache 自己的 db 文件，确保下次创建不冲突
-                dir.listFiles()?.forEach { it.deleteRecursively() }
-                dir.delete()
-            }
-        }
-    }
-
-    /** 释放当前 SimpleCache 实例（退出应用 / 播放器 Activity onDestroy 时调用） */
-    fun releaseCache() {
-        synchronized(this) {
-            runCatching { cache?.release() }
-            cache = null
         }
     }
 

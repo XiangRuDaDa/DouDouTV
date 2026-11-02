@@ -32,10 +32,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 媒体库仓储。
  *
  * 两类来源走两条完全不同的入库路径：
- * · Emby：一次拉回库里的电影/剧集，剧集再按 seriesId 逐部取分集
+ * · Emby：一次拉回库里的电影/剧集壳，分集在详情页按需拉取
  * · TVBox：列表只入库「剧集壳」，分集等用户点进详情页再按需拉取
  *   （详情接口才带播放地址，提前全量拉取会打爆请求量）
  */
+
+/** 批量入库的单批条数：`IN (:ids)` 的占位符个数有上限，整库一次传会让查询直接失败 */
+private const val MEDIA_UPSERT_BATCH_SIZE = 200
+
 class MediaRepository(private val context: Context) {
 
     private val db: AppDatabase = MyVidHubApp.instance.db
@@ -45,6 +49,13 @@ class MediaRepository(private val context: Context) {
 
     fun observeSources(): Flow<List<SourceEntity>> = sourceDao.observeAll()
     fun observeLibrary(): Flow<List<MediaEntity>> = mediaDao.observeLibrary()
+
+    /** 详情页种子色用：只跟这一条，别为一颗色把整库拉进内存 */
+    fun observeMedia(id: Long): Flow<MediaEntity?> =
+        mediaDao.observeMediaById(id).map { it.firstOrNull() }
+
+    /** 设置页的条目计数：口径与 [observeLibrary] 一致，但只回一个数 */
+    fun observeMediaCount(): Flow<Int> = mediaDao.observeMediaCount()
 
     /**
      * 「继续观看」：记录行常常是分集（title 是播放源的分集名），
@@ -658,8 +669,9 @@ class MediaRepository(private val context: Context) {
             .map { it.key }
 
     /**
-     * 按 remoteId 写入元数据。
+     * 按 remoteId 批量写入元数据（一批 = 一次查询 + 一次 insertAll + 一次 updateAll + 一次回填）。
      *
+     * 语义与之前的逐条版本一致：
      * 已存在时保留 id / 播放进度 / 收藏 / 添加时间，并刷新源同步来的字段。
      *
      * 关键语义：**源同步字段有值就用源的，源给空字符串就保留 DB 已有值**。
@@ -667,37 +679,64 @@ class MediaRepository(private val context: Context) {
      * 等字段冲成空。优先级：Emby 自带元数据 > TVBox 返回字段 > TMDB 补空。
      *
      * 不能用 upsert(REPLACE)：那会删行重插，进度和收藏都会丢。
+     * 调用方传入的条目需已补齐 pinyinInitials / sourceName。
+     * @return 库里现在的这些条目（新行带上了自增 id）
      */
-    private suspend fun saveMedia(entity: MediaEntity) {
-        // 入库前统一补齐拼音首字母和来源名称（运行时零开销，库里有就覆盖）
-        val srcName = sourceDao.get(entity.sourceId)?.name ?: ""
-        val enriched = entity.copy(
-            pinyinInitials = entity.title.toPinyinInitials(),
-            sourceName = srcName
-        )
-        val existing = mediaDao.byRemoteId(enriched.remoteId)
-        if (existing == null) {
-            mediaDao.insert(enriched)
-        } else {
-            mediaDao.update(
-                enriched.copy(
-                    id = existing.id,
+    private suspend fun upsertMediaBatch(incoming: List<MediaEntity>): List<MediaEntity> {
+        if (incoming.isEmpty()) return emptyList()
+        val existing = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
+        val toInsert = ArrayList<MediaEntity>(incoming.size)
+        val toUpdate = ArrayList<MediaEntity>(incoming.size)
+        for (entity in incoming) {
+            val old = existing[entity.remoteId]
+            if (old == null) {
+                toInsert += entity
+            } else {
+                toUpdate += entity.copy(
+                    id = old.id,
                     // ---- 播放相关：始终保留已有进度，源同步不会覆盖 ----
-                    positionMs = existing.positionMs,
-                    lastPlayedAt = existing.lastPlayedAt,
-                    favorite = existing.favorite,
-                    addedAt = existing.addedAt,
-                    durationMs = if (entity.durationMs > 0) entity.durationMs else existing.durationMs,
+                    positionMs = old.positionMs,
+                    lastPlayedAt = old.lastPlayedAt,
+                    favorite = old.favorite,
+                    addedAt = old.addedAt,
+                    durationMs = if (entity.durationMs > 0) entity.durationMs else old.durationMs,
                     // ---- 媒体元数据：源有值就用它，源给空就保留 DB 已有（可能是 TMDB 补的） ----
-                    posterUrl = entity.posterUrl.ifBlank { existing.posterUrl },
-                    backdropUrl = entity.backdropUrl.ifBlank { existing.backdropUrl },
-                    logoUrl = entity.logoUrl.ifBlank { existing.logoUrl },
-                    overview = entity.overview.ifBlank { existing.overview },
-                    genres = entity.genres.ifBlank { existing.genres },
-                    rating = if (entity.rating > 0) entity.rating else existing.rating,
-                    year = if (entity.year > 0) entity.year else existing.year
+                    posterUrl = entity.posterUrl.ifBlank { old.posterUrl },
+                    backdropUrl = entity.backdropUrl.ifBlank { old.backdropUrl },
+                    logoUrl = entity.logoUrl.ifBlank { old.logoUrl },
+                    overview = entity.overview.ifBlank { old.overview },
+                    genres = entity.genres.ifBlank { old.genres },
+                    rating = if (entity.rating > 0) entity.rating else old.rating,
+                    year = if (entity.year > 0) entity.year else old.year,
+                    // 列表接口常常不给演员/备注，不能让下一次同步把详情里拿到的清空
+                    actors = entity.actors.ifBlank { old.actors },
+                    directors = entity.directors.ifBlank { old.directors },
+                    remarks = entity.remarks.ifBlank { old.remarks }
                 )
-            )
+            }
+        }
+        if (toInsert.isNotEmpty()) mediaDao.insertAll(toInsert)
+        if (toUpdate.isNotEmpty()) mediaDao.updateAll(toUpdate)
+        val saved = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
+        return incoming.map { saved[it.remoteId] ?: it }
+    }
+
+    /**
+     * 整库同步的入口：按 [MEDIA_UPSERT_BATCH_SIZE] 分批走 [upsertMediaBatch]。
+     *
+     * 必须分批：`WHERE remoteId IN (:ids)` 的占位符个数有上限，
+     * 几千条一次传进去，查询会直接失败（之前逐条写则是每条 3 次往返，600 条 ≈1800 个独立事务）。
+     */
+    private suspend fun upsertMediaAll(
+        incoming: List<MediaEntity>,
+        onProgress: (Int) -> Unit = {}
+    ): List<MediaEntity> {
+        var done = 0
+        return incoming.chunked(MEDIA_UPSERT_BATCH_SIZE).flatMap { batch ->
+            val saved = upsertMediaBatch(batch)
+            done += batch.size
+            onProgress(done)
+            saved
         }
     }
 
@@ -740,33 +779,32 @@ class MediaRepository(private val context: Context) {
             val items = client.fetchLibrary()
             if (items.isEmpty()) return@withContext 0
 
-            var count = 0
-            for (item in items) {
-                // remoteId 统一带 sourceId：多台 Emby 时不会因 itemId 相同而互相覆盖
-                val key = "emby:${source.id}:${item.id}"
+            // 整库一次批量写：之前每条三次 DAO 往返，600 条库就是近 1800 个独立事务
+            val incoming = items.map { item ->
                 val isSeries = item.isSeries
-                saveMedia(
-                    MediaEntity(
-                        sourceId = source.id,
-                        uri = if (isSeries) "" else EmbyClient.playbackUrl(source.location, item.id, source.token),
-                        remoteId = key,
-                        seriesKey = if (isSeries) key else "",
-                        title = item.name,
-                        kind = if (isSeries) MediaKind.SERIES else MediaKind.MOVIE,
-                        year = item.year,
-                        overview = item.overview,
-                        posterUrl = item.posterUrl,
-                        backdropUrl = item.backdropUrl,
-                        logoUrl = item.logoUrl,
-                        rating = item.rating,
-                        genres = item.genres,
-                        durationMs = item.runTimeMs
-                    )
+                MediaEntity(
+                    sourceId = source.id,
+                    // 入库前统一补齐拼音首字母和来源名称（运行时零开销，库里有就覆盖）
+                    pinyinInitials = item.name.toPinyinInitials(),
+                    sourceName = source.name,
+                    uri = if (isSeries) "" else EmbyClient.playbackUrl(source.location, item.id, source.token),
+                    // remoteId 统一带 sourceId：多台 Emby 时不会因 itemId 相同而互相覆盖
+                    remoteId = "emby:${source.id}:${item.id}",
+                    seriesKey = if (isSeries) "emby:${source.id}:${item.id}" else "",
+                    title = item.name,
+                    kind = if (isSeries) MediaKind.SERIES else MediaKind.MOVIE,
+                    year = item.year,
+                    overview = item.overview,
+                    posterUrl = item.posterUrl,
+                    backdropUrl = item.backdropUrl,
+                    logoUrl = item.logoUrl,
+                    rating = item.rating,
+                    genres = item.genres,
+                    durationMs = item.runTimeMs
                 )
-                count++
-                if (count % 20 == 0) onProgress(count)
             }
-            count
+            upsertMediaAll(incoming, onProgress)
+            incoming.size
         }
 
     /**
@@ -783,10 +821,13 @@ class MediaRepository(private val context: Context) {
 
             val client = EmbyClient(source.location, source.token, source.userId)
             val episodes = client.fetchEpisodes(itemId)
-            episodes.forEachIndexed { index, ep ->
-                saveMedia(
+            // 分集一次批量写：一部 100 集的剧之前要 300 次 DAO 往返，详情页就在这几秒里等
+            upsertMediaAll(
+                episodes.mapIndexed { index, ep ->
                     MediaEntity(
                         sourceId = source.id,
+                        pinyinInitials = ep.name.toPinyinInitials(),
+                        sourceName = source.name,
                         uri = EmbyClient.playbackUrl(source.location, ep.id, source.token),
                         remoteId = "emby:${source.id}:${ep.id}",
                         seriesKey = seriesKey,
@@ -800,8 +841,8 @@ class MediaRepository(private val context: Context) {
                         backdropUrl = shell.backdropUrl,
                         logoUrl = shell.logoUrl
                     )
-                )
-            }
+                }
+            )
             episodes.isNotEmpty()
         }
 
@@ -939,8 +980,8 @@ class MediaRepository(private val context: Context) {
     /**
      * TVBox 列表入库（全站点聚合 / 单站点切换共用）。
      *
-     * 改成批处理：一次 `byRemoteIds` 查已有行 → 一次 `insertAll` / 一次 `updateAll` → 一次回填 id，
-     * 整批只走 3~4 次 DB 调用，替代之前的「每条 insert + byRemoteId」。
+     * 与 Emby 共用 [upsertMediaBatch]：一次 `byRemoteIds` 查已有行 → 一次 `insertAll` /
+     * 一次 `updateAll` → 一次回填 id，整批只走 3~4 次 DB 调用。
      */
     private suspend fun saveTvBoxVods(
         source: SourceEntity,
@@ -954,42 +995,8 @@ class MediaRepository(private val context: Context) {
                 sourceName = source.name
             )
         }
-        val existing = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
-        val toInsert = ArrayList<MediaEntity>(incoming.size)
-        val toUpdate = ArrayList<MediaEntity>(incoming.size)
-        for (entity in incoming) {
-            val old = existing[entity.remoteId]
-            if (old == null) {
-                toInsert += entity
-            } else {
-                toUpdate += entity.copy(
-                    id = old.id,
-                    // ---- 播放相关：始终保留已有进度，源同步不会覆盖 ----
-                    positionMs = old.positionMs,
-                    lastPlayedAt = old.lastPlayedAt,
-                    favorite = old.favorite,
-                    addedAt = old.addedAt,
-                    durationMs = if (entity.durationMs > 0) entity.durationMs else old.durationMs,
-                    // ---- 媒体元数据：源有值就用它，源给空就保留 DB 已有（可能是 TMDB 补的） ----
-                    posterUrl = entity.posterUrl.ifBlank { old.posterUrl },
-                    backdropUrl = entity.backdropUrl.ifBlank { old.backdropUrl },
-                    logoUrl = entity.logoUrl.ifBlank { old.logoUrl },
-                    overview = entity.overview.ifBlank { old.overview },
-                    genres = entity.genres.ifBlank { old.genres },
-                    rating = if (entity.rating > 0) entity.rating else old.rating,
-                    year = if (entity.year > 0) entity.year else old.year,
-                    // 列表接口有时只给 vod_name 不给演员/备注，不能让下一次同步把详情里拿到的清空
-                    actors = entity.actors.ifBlank { old.actors },
-                    directors = entity.directors.ifBlank { old.directors },
-                    remarks = entity.remarks.ifBlank { old.remarks }
-                )
-            }
-        }
-        if (toInsert.isNotEmpty()) mediaDao.insertAll(toInsert)
-        if (toUpdate.isNotEmpty()) mediaDao.updateAll(toUpdate)
-        onProgress(incoming.size)
-        val saved = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
-        return incoming.map { saved[it.remoteId] ?: it }
+        val saved = upsertMediaAll(incoming, onProgress)
+        return saved
     }
 
     /** TVBox 条目 → 剧集壳 MediaEntity（remoteId 带 siteKey，多站点不冲突） */

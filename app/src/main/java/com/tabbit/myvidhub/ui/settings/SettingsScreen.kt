@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
+import com.tabbit.myvidhub.core.AppCache
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.components.TmdbDisclaimer
@@ -71,7 +72,7 @@ fun Context.setForceTvMode(enabled: Boolean) {
 @Composable
 fun SettingsScreen(vm: LibraryViewModel) {
     val sources by vm.sources.collectAsStateWithLifecycle()
-    val library by vm.library.collectAsStateWithLifecycle()
+    val libraryCount by vm.libraryCount.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
 
     var forceTv by remember { mutableStateOf(ctx.forceTvMode()) }
@@ -109,7 +110,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
             // ---------- 状态 ----------
             SettingCard(title = "状态") {
                 StatRow("来源数量", "${sources.size}")
-                StatRow("媒体条目", "${library.size}")
+                StatRow("媒体条目", "$libraryCount")
                 StatRow(
                     "Emby 已登录",
                     sources.count { it.kind == com.tabbit.myvidhub.data.model.SourceKind.EMBY && it.token.isNotBlank() }
@@ -335,13 +336,13 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 }
             }
 
-            // ---------- 播放缓存 ----------
-            SettingCard(title = "播放缓存") {
+            // ---------- 图片缓存 ----------
+            SettingCard(title = "图片缓存") {
                 var cacheBytes by remember { mutableStateOf(0L) }
                 val scope = rememberCoroutineScope()
-                // 整棵缓存目录树的遍历放 IO 线程：主线程按文件数卡帧
+                // 读体积是磁盘遍历（图片缓存有几万个条目），不能压在主线程
                 LaunchedEffect(Unit) {
-                    cacheBytes = withContext(Dispatchers.IO) { PlayerFactory.cacheSizeBytes(ctx) }
+                    cacheBytes = withContext(Dispatchers.IO) { AppCache.sizeBytes(ctx) }
                 }
                 Row(
                     Modifier.fillMaxWidth(),
@@ -355,11 +356,11 @@ fun SettingsScreen(vm: LibraryViewModel) {
                     )
                     Button(
                         onClick = {
-                            // 删目录同样是磁盘遍历，不能压在点击回调里同步跑
+                            // 清缓存同样是磁盘操作，不能压在点击回调里同步跑
                             scope.launch {
                                 withContext(Dispatchers.IO) {
-                                    PlayerFactory.clearCache(ctx)
-                                    cacheBytes = PlayerFactory.cacheSizeBytes(ctx)
+                                    AppCache.clear(ctx)
+                                    cacheBytes = AppCache.sizeBytes(ctx)
                                 }
                             }
                         },
@@ -370,7 +371,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
                     ) { Text("清除缓存") }
                 }
                 Text(
-                    "视频播放产生的临时缓存，关闭播放器时会自动清理。也可以手动清除释放存储。",
+                    "封面与海报的本地缓存，清除后浏览时重新下载。不影响观看进度、网盘登录状态和爬虫库。",
                     style = MaterialTheme.typography.labelSmall,
                     color = AppColors.TextTertiary
                 )

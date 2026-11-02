@@ -2,6 +2,7 @@ package com.tabbit.myvidhub.data.tvbox
 
 import android.content.Context
 import android.util.Log
+import com.tabbit.myvidhub.core.LogGate
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -40,6 +41,9 @@ class TvBoxClient(
      * 改成进程级单例后，配置下载也能复用连接。
      */
     private val http: OkHttpClient = sharedHttp
+
+    /** 判定构建类型用（见 [com.tabbit.myvidhub.core.LogGate]），只保留 applicationContext */
+    private val appContext: Context? = context?.applicationContext
 
     /** Spider 加载器（type 3 需要 Android Context；进程级单例，整个 App 只初始化一次） */
     private val spiderLoader: SpiderLoader? = context?.applicationContext?.let {
@@ -639,7 +643,8 @@ class TvBoxClient(
         val resolved = parsePlayerContentResult(json)
         // 分两行打，避免 logcat 单行截断看不到 URL。
         // 用 W 级：这台电视 ROM 吞掉 app 的 D 级日志，播放链路取证只能靠 W 才抓得到。
-        Log.w("SpiderProxy", "playerContent($playSource) → url=${resolved.url}")
+        // 地址按构建类型脱敏：debug 包保留全文，正式包只留 host 与路径尾（见 LogGate）。
+        Log.w("SpiderProxy", "playerContent($playSource) → ${LogGate.url(appContext, resolved.url)}")
         Log.w(
             "SpiderProxy",
             "playerContent($playSource) → headers=${resolved.headers.keys} parse=${resolved.parse}"

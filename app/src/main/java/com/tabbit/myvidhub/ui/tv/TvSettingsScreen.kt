@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.tabbit.myvidhub.core.AppCache
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
@@ -72,7 +73,7 @@ import kotlinx.coroutines.withContext
 /**
  * 电视端设置页 —— 手机端 SettingsScreen 的十英尺版本。
  *
- * 分组和内容与手机端一一对应（状态 / 界面 / 刮削 / 数据来源 / 播放缓存 / 关于），
+ * 分组和内容与手机端一一对应（状态 / 界面 / 刮削 / 数据来源 / 图片缓存 / 关于），
  * 但控件全部换掉：手机端的 Switch、AssistChip、AlertDialog 是靠手指点的，
  * 隔着三米用遥控器操作，可聚焦区域至少要 40dp 高、焦点态必须有白边，
  * 所以这里统一用「整行可聚焦 + 右侧回显当前值」的十英尺设置列表。
@@ -86,7 +87,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun TvSettingsScreen(vm: LibraryViewModel) {
     val sources by vm.sources.collectAsStateWithLifecycle()
-    val library by vm.library.collectAsStateWithLifecycle()
+    val libraryCount by vm.libraryCount.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -103,7 +104,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
 
     var cacheCount by remember { mutableStateOf(vm.scrapeCacheSize()) }
     var clearing by remember { mutableStateOf(false) }
-    var playerCache by remember { mutableStateOf(0L) }
+    var imageCache by remember { mutableStateOf(0L) }
 
     val scrollState = rememberScrollState()
     val entryFocus = remember { FocusRequester() }
@@ -113,10 +114,10 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
         entryFocus,
         scrollToTop = { scrollState.scrollTo(0) }
     )
-    // 播放缓存是播放器写出来的，只在进页读一次会停在旧值上：回到这一页（resume tick）再读一遍。
-    // 整棵缓存目录树的遍历放 IO 线程，不在主线程上按文件数卡帧。
+    // 图片缓存的体积只在进页读一次会停在旧值上：回到这一页（resume tick）再读一遍。
+    // 读体积是磁盘遍历（缓存里可能几万个条目），放 IO 线程，不在主线程上按文件数卡帧。
     LaunchedEffect(resumeTick) {
-        playerCache = withContext(Dispatchers.IO) { PlayerFactory.cacheSizeBytes(ctx) }
+        imageCache = withContext(Dispatchers.IO) { AppCache.sizeBytes(ctx) }
         cacheCount = vm.scrapeCacheSize()
     }
 
@@ -146,7 +147,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
             ) {
                 TvSettingsGroup("状态") {
                     TvStatRow("来源数量", "${sources.size}")
-                    TvStatRow("媒体条目", "${library.size}")
+                    TvStatRow("媒体条目", "$libraryCount")
                     TvStatRow(
                         "Emby 已登录",
                         "${sources.count { it.kind == SourceKind.EMBY && it.token.isNotBlank() }}"
@@ -266,17 +267,17 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                     }
                 }
 
-                TvSettingsGroup("播放缓存") {
+                TvSettingsGroup("图片缓存") {
                     TvSettingAction(
-                        title = "当前占用：${PlayerFactory.formatBytes(playerCache)}",
-                        hint = "播放产生的临时缓存，关闭播放器时自动清理，也可手动释放存储",
+                        title = "当前占用：${PlayerFactory.formatBytes(imageCache)}",
+                        hint = "封面与海报的本地缓存，清除后浏览时重新下载；不影响观看进度、网盘登录状态和爬虫库",
                         actionLabel = "清除缓存",
                         onClick = {
-                            // 删目录是整棵缓存树的磁盘遍历，读大小同理：都不该压在按钮点击里跑主线程
+                            // 清缓存与读体积都是磁盘操作，都不该压在按钮点击里跑主线程
                             scope.launch {
                                 withContext(Dispatchers.IO) {
-                                    PlayerFactory.clearCache(ctx)
-                                    playerCache = PlayerFactory.cacheSizeBytes(ctx)
+                                    AppCache.clear(ctx)
+                                    imageCache = AppCache.sizeBytes(ctx)
                                 }
                             }
                         }

@@ -85,6 +85,7 @@ import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
@@ -213,9 +214,20 @@ class TvPlayerActivity : ComponentActivity() {
     /** 字幕是否处于关闭态。自己记录而不是反查播放器，避免不同 Media3 小版本 API 差异 */
     private var textDisabled by mutableStateOf(false)
 
-    /** 字幕样式：背景透明度 / 字号，与手机端共用同一套偏好 */
+    /** 字幕样式：背景透明度 / 字号，与手机端共用同一份偏好文件（player_prefs） */
     private var subtitleBgAlpha by mutableStateOf(DEFAULT_SUBTITLE_BG_ALPHA)
     private var subtitleTextSize by mutableStateOf(DEFAULT_SUBTITLE_TEXT_SIZE)
+
+    private var prefs: android.content.SharedPreferences? = null
+
+    /**
+     * 装载 / 预热用的 scope，onDestroy 一并取消。
+     * 原来每处各自 `CoroutineScope(...)`：退出播放后 spider 解析还在跑，
+     * 完回来会对已 release 的播放器调方法、给已 detach 的 PlayerView 挂上新 ExoPlayer，
+     * 那一路的解码器没人 release。
+     * 落进度不在这里挂：见 [saveProgress]，它要能在 Activity 已经销毁后把最后一笔写完。
+     */
+    private val workScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     /** 交互计数：每次按键 / 选项切换都 +1，用于重置 3 秒自动隐藏 */
     private var tick by mutableStateOf(0)
@@ -383,11 +395,24 @@ class TvPlayerActivity : ComponentActivity() {
                             "uri=${p.currentMediaItem?.localConfiguration?.uri.toString().take(160)} " +
                             "cause=${error.cause?.javaClass?.name} msg=$causeMsg"
                     )
+                    if (isTailSourceError(p)) {
+                        // 片尾的坏数据（网盘重传截断/补零）不当故障报：按看完交给连播
+                        Log.w("TvPlayer", "片尾容错命中 pos=${p.currentPosition} dur=${p.duration}")
+                        if (endedEpisodeId != (current?.id ?: 0L)) {
+                            endedEpisodeId = current?.id ?: 0L
+                            saveProgress(force = true)
+                            autoNextEpisode()
+                        }
+                        return
+                    }
                     toast = when {
                         causeMsg?.startsWith("HTTP 404") == true -> causeMsg
                         causeMsg?.startsWith("HTTP 403") == true ||
                         causeMsg?.startsWith("HTTP 412") == true -> causeMsg
                         error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
+                        // 容器读到损坏数据（片尾补零、上传截断），不是网络问题
+                        causeMsg?.contains("varint") == true || causeMsg?.contains("EOF found") == true ->
+                            "视频文件不完整（读到损坏数据），可换一条线路试试"
                         error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
                         error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
                         else -> "播放失败：${error.errorCodeName}"
@@ -395,6 +420,18 @@ class TvPlayerActivity : ComponentActivity() {
                 }
             })
         }
+
+    /**
+     * 片尾容错：网盘重传/截断的片子，最后零点几秒常是补零的坏数据，
+     * MatroskaExtractor 读到就抛 varint 异常 → Source error。
+     * 这个位置本来就是「看完了」，所以按 ENDED 处理：落盘 + 连播，不弹网络错误。
+     * 只认片尾 5 秒内，别的位置读到坏数据仍然照实报错。
+     */
+    private fun isTailSourceError(p: Player): Boolean {
+        val dur = p.duration
+        if (dur <= 0L) return false
+        return maxOf(p.currentPosition, p.bufferedPosition) >= dur - TAIL_ERROR_TOLERANCE_MS
+    }
 
     /** 当前视频轨的声明码率（bit/s）；容器没写或还拿不到轨信息时返回 0 */
     private fun videoBitrateBps(p: Player): Int {
@@ -411,6 +448,13 @@ class TvPlayerActivity : ComponentActivity() {
 
         repo = MediaRepository(applicationContext)
         mediaId = intent.getLongExtra(EXTRA_MEDIA_ID, 0L)
+
+        // 字幕样式在 PlayerView 建出来时（AndroidView factory 里的 applySubtitleStyle）生效，
+        // 所以要在 setContent 之前把上次的选择读回来
+        val sp = getSharedPreferences(PREFS_NAME, android.content.Context.MODE_PRIVATE)
+        prefs = sp
+        subtitleBgAlpha = sp.getFloat(KEY_SUBTITLE_BG_ALPHA, DEFAULT_SUBTITLE_BG_ALPHA)
+        subtitleTextSize = sp.getFloat(KEY_SUBTITLE_TEXT_SIZE, DEFAULT_SUBTITLE_TEXT_SIZE)
 
         setContent {
             MyVidHubTheme {
@@ -447,7 +491,8 @@ class TvPlayerActivity : ComponentActivity() {
             current = item
             titleText = displayTitle(item)
             play(item, item.positionMs)
-            refreshTracks()
+            // 轨道不在这里刷：刚 setMediaItem 的播放器还没有 currentTracks，
+            // 刷了也是空列表；真正的刷新由 onTracksChanged 回调负责
             val list = runCatching { repo.episodes(item.seriesKey) }.getOrDefault(emptyList())
             // 上下集只在同一个网盘 / 同一条线路里走：episodes(seriesKey) 是全量，
             // 多线路的剧直接按它取下一集会跳到别的网盘（别的网盘还常常解析失败）。
@@ -455,12 +500,21 @@ class TvPlayerActivity : ComponentActivity() {
             val source = item.playSource
             episodes = list.filter {
                 it.seriesKey == item.seriesKey && (source.isBlank() || it.playSource == source)
-            }.sortedWith(compareBy({ it.season }, { it.episode }))
+            }
+                // 与手机端同一口径：没有地址的分集不进上下集列表，否则「下一集」会跳到空条目
+                .filter { it.uri.isNotBlank() }
+                .sortedWith(compareBy({ it.season }, { it.episode }))
             refreshTracks()
         }
     }
 
     private fun play(item: MediaEntity, startMs: Long) {
+        // 与手机端同一守卫：空地址喂给播放器只会得到一个看不懂的 IO 错误
+        if (item.uri.isBlank()) {
+            loading = false
+            toast = "该条目没有可播放地址（可能需要在详情页重新加载）"
+            return
+        }
         titleText = displayTitle(item)
         // 装载遮罩与转圈立刻出现，不用等播放器回调
         loading = true
@@ -475,7 +529,7 @@ class TvPlayerActivity : ComponentActivity() {
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
         val gen = ++playGeneration
-        CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
+        workScope.launch {
             val resolved = resolvePlayUrl(item, gen)
                 ?: run {
                     // 被更新的一次切集取代时别撤黑幕，那层黑幕现在是给新一集用的
@@ -682,7 +736,7 @@ class TvPlayerActivity : ComponentActivity() {
         val idx = currentEpisodeIndex()
         if (idx < 0 || idx >= episodes.size - 1) return
         val next = episodes[idx + 1]
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        workScope.launch(Dispatchers.IO) {
             runCatching { repo.resolveTvBoxPlayUrl(next) }
                 .onFailure { Log.w("TvPlayer", "下一集预热失败 mediaId=${next.id}：${it.message}") }
         }
@@ -835,11 +889,12 @@ class TvPlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         handler.removeCallbacks(progressTicker)
+        // 先停掉在飞的装载/预热，再 release 播放器：反过来的话，
+        // 解析回来那一步还会摸到已释放的实例和已 detach 的 PlayerView
+        workScope.cancel()
         saveProgress(force = true)
         player?.release()
         player = null
-        // 退出播放即清掉磁盘缓存，避免旧视频断网仍可播放、长期占用存储空间
-        PlayerFactory.clearCache(this)
         super.onDestroy()
     }
 
@@ -867,7 +922,7 @@ class TvPlayerActivity : ComponentActivity() {
 
     // 避免与 lifecycle-runtime-ktx 的 lifecycleScope 扩展名混淆，这里包一层
     private fun lifecycleScope0(block: suspend () -> Unit) {
-        CoroutineScope(SupervisorJob() + Dispatchers.Main).launch { block() }
+        workScope.launch { block() }
     }
 
     // ---------- Compose 界面 ----------
@@ -1027,6 +1082,10 @@ class TvPlayerActivity : ComponentActivity() {
                         subtitleBgAlpha = bg
                         subtitleTextSize = size
                         applySubtitleStyle()
+                        prefs?.edit()
+                            ?.putFloat(KEY_SUBTITLE_BG_ALPHA, bg)
+                            ?.putFloat(KEY_SUBTITLE_TEXT_SIZE, size)
+                            ?.apply()
                         tick++
                     }
                 )
@@ -1060,6 +1119,9 @@ class TvPlayerActivity : ComponentActivity() {
 
     companion object {
         private const val EXTRA_MEDIA_ID = "media_id"
+        private const val PREFS_NAME = "player_prefs"
+        private const val KEY_SUBTITLE_BG_ALPHA = "subtitle_bg_alpha"
+        private const val KEY_SUBTITLE_TEXT_SIZE = "subtitle_text_size"
         private const val DEFAULT_SUBTITLE_BG_ALPHA = 0.0f
         private const val DEFAULT_SUBTITLE_TEXT_SIZE = 22f
 
@@ -1404,6 +1466,9 @@ private const val EPISODE_WINDOW_SIZE = 7
 
 /** 距结尾多少毫秒开始预热下一集：解析本身要 8 秒左右，留足余量又不至于提前太久失效 */
 private const val PREFETCH_REMAINING_MS = 90_000L
+
+/** 片尾容错窗口：离结尾不到 5 秒的 Source error 按「看完」处理 */
+private const val TAIL_ERROR_TOLERANCE_MS = 5_000L
 
 private fun displayTitle(item: MediaEntity): String = when {
     item.kind == com.tabbit.myvidhub.data.model.MediaKind.EPISODE && item.usesSourceEpisodeName ->

@@ -4,6 +4,12 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// Room 把每个版本的表结构 JSON 落到这里，配合 AppDatabase 的 exportSchema = true：
+// 下次改表（加索引、加字段）能看出漏没漏迁移，也能直接上自动迁移。
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 android {
     namespace = "com.tabbit.myvidhub"
     compileSdk = 34

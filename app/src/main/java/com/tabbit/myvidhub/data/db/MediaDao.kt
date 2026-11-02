@@ -18,6 +18,20 @@ interface MediaDao {
     fun observeLibrary(): Flow<List<MediaEntity>>
 
     /**
+     * 单条媒体的反应式订阅。详情页取种子色用的就是它：
+     * 为一颗颜色订阅整库的话，任何一次表失效都会把全部条目重新读进内存。
+     */
+    @Query("SELECT * FROM media WHERE id = :id")
+    fun observeMediaById(id: Long): Flow<List<MediaEntity>>
+
+    /** 设置页「媒体条目」的计数：与 observeLibrary 同一口径，但只回一个数，不用把整表读进内存 */
+    @Query(
+        "SELECT COUNT(*) FROM media m JOIN sources s ON m.sourceId = s.id " +
+            "WHERE s.enabled = 1 AND m.kind IN ('MOVIE','SERIES')"
+    )
+    fun observeMediaCount(): Flow<Int>
+
+    /**
      * 「继续观看」：一部剧只留最新的那条记录。
      *
      * TVBox 每个线路、每一集都是独立的一行，各自存进度，直接按行列出来就是

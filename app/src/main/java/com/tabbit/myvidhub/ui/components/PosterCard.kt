@@ -28,15 +28,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.ui.theme.AppColors
+
+// 卡片用到的形状与渐变都是常量：提到组合外，滚动时每张卡不必每次新建对象
+private val PosterShape = RoundedCornerShape(10.dp)
+private val TinyShape = RoundedCornerShape(2.dp)
+private val PosterBottomScrim = Brush.verticalGradient(
+    0f to Color.Transparent,
+    0.45f to Color.Black.copy(alpha = 0.55f),
+    1f to Color.Black.copy(alpha = 0.92f)
+)
 
 /**
  * 海报卡（VidHub 风格）。
@@ -57,6 +66,8 @@ fun PosterCard(
     val focused by interaction.collectIsFocusedAsState()
 
     // TV 遥控器聚焦：带过冲的弹性放大，弹一下让用户明确"选中了"
+    // 缩放读在 graphicsLayer 的绘制块里（与 TV 端口径一致）：
+    // Modifier.scale(scale) 是在组合期读值，动画每一帧都要重组合整张卡
     val scale by animateFloatAsState(
         targetValue = if (focused) 1.09f else 1f,
         animationSpec = spring(
@@ -66,16 +77,14 @@ fun PosterCard(
         label = "poster_scale"
     )
 
-    val shape = RoundedCornerShape(10.dp)
-
     Box(
         modifier = modifier
             .aspectRatio(2f / 3f)
-            .scale(scale)
-            .clip(shape)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(PosterShape)
             .background(AppColors.Surface)
             .then(
-                if (focused) Modifier.border(2.5.dp, AppColors.Brand, shape) else Modifier
+                if (focused) Modifier.border(2.5.dp, AppColors.Brand, PosterShape) else Modifier
             )
             .clickable(
                 interactionSource = interaction,
@@ -94,13 +103,7 @@ fun PosterCard(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Transparent,
-                        0.45f to Color.Black.copy(alpha = 0.55f),
-                        1f to Color.Black.copy(alpha = 0.92f)
-                    )
-                )
+                .background(PosterBottomScrim)
                 .padding(horizontal = 8.dp, vertical = 7.dp)
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -125,7 +128,7 @@ private fun ProgressLine(fraction: Float) {
     Box(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(2.dp))
+            .clip(TinyShape)
             .background(Color.White.copy(alpha = 0.28f))
             .padding(top = 2.5.dp)
     ) {
@@ -160,7 +163,7 @@ fun SectionTitle(
         Box(
             Modifier
                 .size(width = 3.dp, height = 16.dp)
-                .clip(RoundedCornerShape(2.dp))
+                .clip(TinyShape)
                 .background(AppColors.Brand)
         )
         Text(

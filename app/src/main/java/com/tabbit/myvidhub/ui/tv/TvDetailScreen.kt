@@ -98,7 +98,7 @@ import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.components.TextBadge
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
 import com.tabbit.myvidhub.ui.theme.TvText
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
  * 电视端简介页（独立实现，不复用手机端 DetailScreen）。
@@ -210,12 +210,11 @@ fun TvDetailScreen(
     val scope = rememberCoroutineScope()
 
     // 首帧就用「上次算好的主色 / 内存缓存 / 标题哈希色」，避免进入瞬间一片黑
-    // 同手机端：mediaOf() 是 suspend，组合期不能调，改从已订阅的 library 同步取，
-    // 并把 remember 的 key 挂到标题上，库数据晚到时自动重新给初值
-    val libraryState by vm.library.collectAsState()
-    val seedMedia = remember(libraryState, mediaId) {
-        libraryState.firstOrNull { it.id == mediaId }
-    }
+    // 同手机端：mediaOf() 是 suspend，组合期不能调。这里单条订阅这一条媒体，
+    // 不订阅整库（整表 Flow 每次失效都要全表重读进内存，而详情页只要这颗种子色）；
+    // 库数据晚到时 flow 补发，remember 的 key 挂到标题上，初值自动补正确颜色。
+    val seedMedia by remember(mediaId) { vm.seedMediaFlow(mediaId) }
+        .collectAsStateWithLifecycle(initialValue = null)
     var dominant by remember(mediaId, seedMedia?.title) {
         mutableStateOf(
             seedMedia?.let { seed ->

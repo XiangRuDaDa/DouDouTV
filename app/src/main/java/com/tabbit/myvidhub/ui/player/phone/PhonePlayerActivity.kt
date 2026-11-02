@@ -76,7 +76,10 @@ import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.MyVidHubTheme
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -132,6 +135,12 @@ class PhonePlayerActivity : ComponentActivity() {
      * 喂给正在加载新一集的播放器。
      */
     private var playGeneration = 0
+
+    /**
+     * 已经为哪一集触发过连播。同 TV 端口径：一集只允许连播一次，
+     * 否则旧播放器迟投的 ENDED 会在这集已切走后再接着跳一集。
+     */
+    private var endedEpisodeId = 0L
 
     /** 拖动进度时的目标时间提示（只是提示，不是控制条） */
     private var seekPreview by mutableStateOf<String?>(null)
@@ -550,6 +559,8 @@ class PhonePlayerActivity : ComponentActivity() {
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头，再创建播放器
         setLoading(true)
+        // 这一集还没播完过，闸门打开（否则「从头开始」再播到末尾不会连播下一集）
+        endedEpisodeId = 0L
         val gen = ++playGeneration
         lifecycleScope.launch {
             val resolved = resolvePlayUrl(item, gen)
@@ -579,7 +590,17 @@ class PhonePlayerActivity : ComponentActivity() {
 
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_ENDED) playNext()
+                    // 换源重建播放器时，旧实例的回调可能还排在主线程队列里。
+                    // 不认实例，旧播放器的 READY / ENDED 会盖到正在加载的新集上。
+                    if (player !== p) {
+                        Log.w("PlayTrace", "startPlayback 忽略旧实例 state=$state")
+                        return
+                    }
+                    traceState("startPlayback", p, state)
+                    if (state == Player.STATE_ENDED && endedEpisodeId != (current?.id ?: 0L)) {
+                        endedEpisodeId = current?.id ?: 0L
+                        playNext()
+                    }
                     if (state == Player.STATE_READY) {
                         armNextPrefetch()
                         clearLoadingWhenFirstFrameLate(p)
@@ -603,22 +624,21 @@ class PhonePlayerActivity : ComponentActivity() {
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     setLoading(false)
                     Log.e("PhonePlayer", "player error: ${error.errorCodeName} ${error.message}", error)
-                    // 优先使用 OkHttp 层拦截时抛出的带中文提示的 IOException message
-                    // （我们在 PlayerFactory Interceptor 里对 404/403/412 抛了明确中文消息）
-                    val causeMsg = error.cause?.message
-                    val translated = when {
-                        causeMsg?.startsWith("HTTP 404") == true -> causeMsg
-                        causeMsg?.startsWith("HTTP 403") == true ||
-                        causeMsg?.startsWith("HTTP 412") == true -> causeMsg
-                        error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
-                        error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
-                        error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
-                        else -> "播放失败：${error.errorCodeName}"
+                    if (isTailSourceError(p)) {
+                        // 片尾的坏数据不当故障报：按看完落盘，让连播接手
+                        Log.w("PlayTrace", "片尾容错命中 pos=${p.currentPosition} dur=${p.duration}")
+                        if (endedEpisodeId != (current?.id ?: 0L)) {
+                            endedEpisodeId = current?.id ?: 0L
+                            saveProgress(force = true)
+                            playNext()
+                        }
+                        return
                     }
-                    toastState = translated
+                    toastState = translatePlayerError(error)
                 }
             })
 
+            PlayerFactory.traceUrl = resolved.url
             p.setMediaItem(MediaItem.fromUri(resolved.url))
             p.prepare()
             if (startPosition > 3_000L) p.seekTo(startPosition)
@@ -715,6 +735,8 @@ class PhonePlayerActivity : ComponentActivity() {
         // 上一集排的片尾预热作废：它按旧集的时长排，切集后时间点已经不对
         prefetchJob?.cancel()
         prefetchArmedFor = 0L
+        // 新一集允许它自己播完一次连播（旧集的 ENDED 闸门见 endedEpisodeId 注释）
+        endedEpisodeId = 0L
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
         val gen = ++playGeneration
@@ -742,7 +764,16 @@ class PhonePlayerActivity : ComponentActivity() {
                 playerView?.player = np
                 np.addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
-                        if (state == Player.STATE_ENDED) playNext()
+                        // 同第一个 listener：只认当前这台播放器，旧实例的迟到回调不能盖到新集上
+                        if (player !== np) {
+                            Log.w("PlayTrace", "playEpisode 忽略旧实例 state=$state")
+                            return
+                        }
+                        traceState("playEpisode(np)", np, state)
+                        if (state == Player.STATE_ENDED && endedEpisodeId != (current?.id ?: 0L)) {
+                            endedEpisodeId = current?.id ?: 0L
+                            playNext()
+                        }
                         if (state == Player.STATE_READY) {
                             armNextPrefetch()
                             clearLoadingWhenFirstFrameLate(np)
@@ -763,15 +794,18 @@ class PhonePlayerActivity : ComponentActivity() {
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         setLoading(false)
-                        val causeMsg = error.cause?.message
-                        toastState = when {
-                            causeMsg?.startsWith("HTTP 404") == true -> causeMsg
-                            causeMsg?.startsWith("HTTP 403") == true ||
-                            causeMsg?.startsWith("HTTP 412") == true -> causeMsg
-                            error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
-                            error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
-                            else -> "播放失败：${error.errorCodeName}"
+                        Log.e("PhonePlayer", "player error: ${error.errorCodeName} ${error.message}", error)
+                        if (isTailSourceError(np)) {
+                            // 同第一个 listener：片尾的坏数据按看完处理，交给连播
+                            Log.w("PlayTrace", "片尾容错命中 pos=${np.currentPosition} dur=${np.duration}")
+                            if (endedEpisodeId != (current?.id ?: 0L)) {
+                                endedEpisodeId = current?.id ?: 0L
+                                saveProgress(force = true)
+                                playNext()
+                            }
+                            return
                         }
+                        toastState = translatePlayerError(error)
                     }
                 })
                 np
@@ -779,8 +813,10 @@ class PhonePlayerActivity : ComponentActivity() {
                 player ?: run { setLoading(false); return@launch }
             }
 
+            PlayerFactory.traceUrl = resolved.url
             p.setMediaItem(MediaItem.fromUri(resolved.url))
             p.prepare()
+            Log.w("PlayTrace", "playEpisode 装载 id=${episode.id} rebuild=$needRebuild 续播位置=${episode.positionMs}")
             if (episode.positionMs > 3_000L) p.seekTo(episode.positionMs)
             p.setPlaybackSpeed(speedState)
             p.playWhenReady = true
@@ -789,7 +825,9 @@ class PhonePlayerActivity : ComponentActivity() {
 
     private fun playNext() {
         val index = episodeIndex()
-        val next = episodeList.getOrNull(index + 1) ?: return
+        val next = episodeList.getOrNull(index + 1)
+        Log.w("PlayTrace", "playNext 索引=$index/${episodeList.size} 下一集=${next?.let { "${it.id}/${displayTitle(it)}" } ?: "无"}")
+        if (next == null) return
         if (next.id == current?.id) return
         playEpisode(next)
     }
@@ -840,6 +878,54 @@ class PhonePlayerActivity : ComponentActivity() {
             }.onFailure {
                 Log.w("PhonePlayer", "下一集预热失败 mediaId=${next.id}：${it.message}")
             }
+        }
+    }
+
+    /**
+     * 【临时取证】「播到结尾不连播 + 报网络错误」的定位日志：
+     * 状态机每次都记，配合 PlayerFactory 里的 PlayTrace（HTTP 出口）能还原
+     * 片尾到底走没走 ENDED、连播闸门拦在哪一步。拿到结论后两处一起删。
+     */
+    private fun traceState(where: String, p: Player, state: Int) {
+        Log.w(
+            "PlayTrace",
+            "$where state=" + when (state) {
+                Player.STATE_IDLE -> "IDLE"
+                Player.STATE_BUFFERING -> "BUFFERING"
+                Player.STATE_READY -> "READY"
+                Player.STATE_ENDED -> "ENDED"
+                else -> "?$state"
+            } + " pos=${p.currentPosition} dur=${p.duration} buf=${p.bufferedPosition}" +
+                " endedGate=$endedEpisodeId cur=${current?.id} idx=${episodeIndex()}/${episodeList.size}"
+        )
+    }
+
+    /**
+     * 片尾容错：网盘重传/截断的片子，最后零点几秒常是补零的坏数据，
+     * MatroskaExtractor 读到就抛 varint 异常 → Source error。
+     * 这个位置本来就是「看完了」，所以按 ENDED 处理：落盘 + 连播，不弹网络错误。
+     * 只认片尾 5 秒内，别的位置读到坏数据仍然照实报错。
+     */
+    private fun isTailSourceError(p: Player): Boolean {
+        val dur = p.duration
+        if (dur <= 0L) return false
+        return maxOf(p.currentPosition, p.bufferedPosition) >= dur - TAIL_ERROR_TOLERANCE_MS
+    }
+
+    /** 错误翻译：优先用 OkHttp 层抛出的中文提示，其次说实话，最后才兜底到网络 */
+    private fun translatePlayerError(error: androidx.media3.common.PlaybackException): String {
+        val causeMsg = error.cause?.message
+        return when {
+            causeMsg?.startsWith("HTTP 404") == true -> causeMsg
+            causeMsg?.startsWith("HTTP 403") == true ||
+            causeMsg?.startsWith("HTTP 412") == true -> causeMsg
+            error.errorCodeName.contains("BAD_HTTP") -> "视频源不可用，请检查来源或切换其他线路"
+            // 容器读到损坏数据（片尾补零、上传截断），不是网络问题
+            causeMsg?.contains("varint") == true || causeMsg?.contains("EOF found") == true ->
+                "视频文件不完整（读到损坏数据），可换一条线路试试"
+            error.errorCodeName == "ERROR_CODE_IO_UNSPECIFIED" -> "网络连接异常，请检查网络设置"
+            error.errorCodeName == "ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED" -> "视频格式不支持"
+            else -> "播放失败：${error.errorCodeName}"
         }
     }
 
@@ -1058,9 +1144,13 @@ class PhonePlayerActivity : ComponentActivity() {
         val pos = p.currentPosition
         val dur = p.duration.takeIf { it > 0L } ?: 0L
 
-        lifecycleScope.launch {
+        // 落盘不挂在 Activity 生命周期上：onDestroy 里 lifecycleScope 已被取消，
+        // 挂在它上面的协程会在「切到 IO 真正写库」之前就结束，退出前的最后一笔进度就丢了。
+        // 与 TV 端口径一致，用独立 scope；context 用 applicationContext，
+        // 因为这个协程可能活得比 Activity 久。
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching {
-                val repo = MediaRepository(this@PhonePlayerActivity)
+                val repo = MediaRepository(applicationContext)
                 repo.saveProgress(item.id, pos)
                 if (dur > 0L) repo.fillDuration(item.id, dur)
             }
@@ -1094,8 +1184,6 @@ class PhonePlayerActivity : ComponentActivity() {
         playerView?.player = null
         player?.release()
         player = null
-        // 退出播放即清掉磁盘缓存，避免旧视频断网仍可播放、长期占用存储空间
-        PlayerFactory.clearCache(this)
         super.onDestroy()
     }
 
@@ -1133,6 +1221,9 @@ class PhonePlayerActivity : ComponentActivity() {
 
         /** 距结尾多少毫秒预热下一集：解析本身要 8 秒左右，留足余量又不至于提前太久失效 */
         private const val PREFETCH_REMAINING_MS = 90_000L
+
+        /** 片尾容错窗口：离结尾不到 5 秒的 Source error 按「看完」处理 */
+        private const val TAIL_ERROR_TOLERANCE_MS = 5_000L
 
         fun intent(context: Context, mediaId: Long): Intent =
             Intent(context, PhonePlayerActivity::class.java).putExtra(EXTRA_MEDIA_ID, mediaId)

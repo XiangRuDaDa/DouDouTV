@@ -23,6 +23,7 @@ import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -49,6 +50,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     val library: StateFlow<List<MediaEntity>> = repo.observeLibrary()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * 设置页「媒体条目」用的计数。
+     * 那一页只要一个数字，没必要为此把整张表订阅进内存
+     * （表每次失效都会把全部条目重新读一遍）。
+     */
+    val libraryCount: StateFlow<Int> = repo.observeMediaCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val continueWatching: StateFlow<List<MediaEntity>> = repo.observeContinueWatching()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -199,18 +208,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         // 启动判定：TMDB 凭据非空 → TMDB 刮削；为空 → 原有方案
         ScrapeStrategy.refresh()
         scrapeEngine = ScrapeStrategy.engine
-        // 冷启动时若已配置来源但本地还没有内容，自动同步一次，避免用户以为"加完就坏了"
-        viewModelScope.launch {
-            runCatching {
-                if (repo.enabledSources().isNotEmpty() && !repo.hasAnyMedia()) {
-                    scanAll()
-                }
-            }
-        }
-        // 启动时汇总各来源已入库条目数（来源页「N 个条目」展示用）
-        viewModelScope.launch { refreshSourceCounts() }
-        // 拼音算法升级后，把库里已有片名重算一遍首字母（只跑一次）
-        viewModelScope.launch { repo.reindexPinyinIfNeeded() }
         // 恢复上次选中的来源时，预取该 TVBox 来源的站点（线路）列表
         viewModelScope.launch {
             homeSourceId?.let { loadHomeSites(it) }
@@ -220,6 +217,20 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             if (Prefs.homeSourceId < 0) {
                 repo.enabledSources().firstOrNull()?.let { selectHomeSource(it.id) }
             }
+        }
+        // 冷启动里这三件小事串成一条顺序跑：以前各自一个 launch，
+        // 和壳预热、首页线路加载同时抢 IO，启动那几秒全在一起排队
+        viewModelScope.launch {
+            // 冷启动时若已配置来源但本地还没有内容，自动同步一次，避免用户以为"加完就坏了"
+            runCatching {
+                if (repo.enabledSources().isNotEmpty() && !repo.hasAnyMedia()) {
+                    scanAll()
+                }
+            }
+            // 启动时汇总各来源已入库条目数（来源页「N 个条目」展示用）
+            refreshSourceCounts()
+            // 拼音算法升级后，把库里已有片名重算一遍首字母（只跑一次）
+            runCatching { repo.reindexPinyinIfNeeded() }
         }
         // spider 预热：加密壳 Init 在电视上要二十多秒纯本地计算，且和首页刷新抢同一把加载锁。
         // 后台先把它跑完，首页/切线路/详情页再走到 SpiderLoader 时直接命中进程级缓存，
@@ -929,6 +940,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun episodesBySource(seriesKey: String, playSource: String): List<MediaEntity> =
         repo.episodesBySource(seriesKey, playSource)
     suspend fun mediaOf(id: Long): MediaEntity? = repo.getMedia(id)
+
+    /** 详情页种子色：单条订阅，替代为一颗色订阅整库 */
+    fun seedMediaFlow(id: Long): Flow<MediaEntity?> = repo.observeMedia(id)
     suspend fun sourceOf(id: Long): SourceEntity? = repo.getSource(id)
 
     /** 远程搜索结果（负 id）落库并返回真实 id；失败返回 null */

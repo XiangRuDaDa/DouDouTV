@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -1032,7 +1033,13 @@ fun GenreScreen(
                             .padding(horizontal = 20.dp, vertical = 6.dp)
                     )
                 }
-                items(items.chunked(columns)) { row ->
+                itemsIndexed(
+                    items.chunked(columns),
+                    // 带位置 + 行首 id：追加分页时已有行的 key 不变（不重新解码海报），
+                    // 换筛选条件时同一位置的数据变了，key 也随之变化，不会复用上一批的卡片
+                    key = { index, row -> "genre_row_${index}_${row.first().id}" },
+                    contentType = { _, _ -> "genre_row" }
+                ) { _, row ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1549,7 +1556,11 @@ fun TvBoxCategoryScreen(
         // ---------- 网格 ----------
         when {
             loading -> LazyColumn(contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp)) {
-                items(List(9) { it }.chunked(columns)) { row ->
+                itemsIndexed(
+                    List(9) { it }.chunked(columns),
+                    key = { index, row -> "vod_skeleton_${index}_${row.first()}" },
+                    contentType = { _, _ -> "vod_skeleton_row" }
+                ) { _, row ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1588,7 +1599,11 @@ fun TvBoxCategoryScreen(
                 state = gridState,
                 contentPadding = PaddingValues(bottom = 28.dp)
             ) {
-                items(vods.chunked(columns)) { row ->
+                itemsIndexed(
+                    vods.chunked(columns),
+                    key = { index, row -> "vod_row_${index}_${row.first().id}" },
+                    contentType = { _, _ -> "vod_row" }
+                ) { _, row ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()

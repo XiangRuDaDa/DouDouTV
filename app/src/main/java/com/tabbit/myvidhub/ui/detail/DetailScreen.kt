@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -90,7 +91,7 @@ import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
  * 剧集/电影详情页（VidHub 形态）。
@@ -161,12 +162,11 @@ fun DetailScreen(
      * 图片解码完成后会被真实封面主色平滑替换，用户只会看到一次渐变收敛。
      */
     // 注意：这里不能用 vm.mediaOf()，那是 suspend 函数，组合阶段调用会编译不过。
-    // 改从已订阅的 library 里同步查；library 一到位 remember 的 key 变化会重新给初值，
-    // 因此「库数据晚于首帧到达」也能自动补上正确的颜色，不会停在兜底黑。
-    val libraryState by vm.library.collectAsState()
-    val seedMedia = remember(libraryState, mediaId) {
-        libraryState.firstOrNull { it.id == mediaId }
-    }
+    // 单行订阅这一条媒体（不订阅整库：整表 Flow 每次失效都要把全部条目重读进内存，
+    // 而详情页只需要这颗种子色）；库数据晚于首帧到达时 flow 会补发，remember 的 key
+    // 跟着标题变，初值自动补上正确颜色，不会停在兜底黑。
+    val seedMedia by remember(mediaId) { vm.seedMediaFlow(mediaId) }
+        .collectAsStateWithLifecycle(initialValue = null)
     var dominantColor by remember(mediaId, seedMedia?.title) {
         mutableStateOf(
             seedMedia?.let { seed ->
@@ -803,7 +803,13 @@ fun DetailScreen(
                             )
                         }
                     } else {
-                        items(visibleEpisodes.chunked(if (isTv) 4 else 2)) { row ->
+                        itemsIndexed(
+                            visibleEpisodes.chunked(if (isTv) 4 else 2),
+                            // key 带位置 + 行首集 id：切线路/翻页时同一位置换了数据就换 key，
+                            // 没换的行不重新组合，选集卡不用重画
+                            key = { index, row -> "ep_row_${index}_${row.first().id}" },
+                            contentType = { _, _ -> "ep_row" }
+                        ) { _, row ->
                             Row(
                                 Modifier
                                     .fillMaxWidth()

@@ -13,7 +13,9 @@ import com.tabbit.myvidhub.data.model.SourceEntity
 @Database(
     entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class],
     version = 11,
-    exportSchema = false
+    // schema 落档到 app/schemas/：以后加索引之类的改动能用 Room 的自动迁移，
+    // 也能拿历史 JSON 对比出漏写的迁移
+    exportSchema = true
 )
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
@@ -122,7 +124,10 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                         MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11
                     )
-                    .fallbackToDestructiveMigration()
+                    // 这里刻意不调 fallbackToDestructiveMigration()：
+                    // 它会在「漏写某段迁移」时静默整库重建，观看进度和收藏全丢且没有任何迹象，
+                    // 排查时只会看成「数据莫名其妙没了」。缺迁移现在会直接抛
+                    // IllegalStateException（logcat 里写清 from/to 版本），宁可炸得看得见。
                     .build()
                     .also { INSTANCE = it }
             }

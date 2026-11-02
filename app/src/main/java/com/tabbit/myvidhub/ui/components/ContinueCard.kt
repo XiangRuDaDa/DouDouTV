@@ -31,9 +31,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -41,6 +41,13 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.theme.AppColors
+
+// 常量形状与渐变提到组合外：滚动时每张卡不必每次新建对象
+private val ContinueShape = RoundedCornerShape(12.dp)
+private val ContinueBarShape = RoundedCornerShape(2.dp)
+private val ContinueLeftScrim = Brush.horizontalGradient(
+    listOf(Color.Black.copy(alpha = 0.8f), Color.Black.copy(alpha = 0.15f))
+)
 
 /**
  * 「继续观看」横向大卡：16:9 剧照 + 进度条。
@@ -61,23 +68,24 @@ fun ContinueCard(
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
 
+    // 缩放读在 graphicsLayer 的绘制块里（与 TV 端口径一致），
+    // 免得 Modifier.scale 在组合期读值、动画每帧重组合整张卡
     val scale by animateFloatAsState(
         targetValue = if (focused) 1.04f else 1f,
         animationSpec = tween(180),
         label = "continue_scale"
     )
 
-    val shape = RoundedCornerShape(12.dp)
     val image = item.backdropUrl.ifBlank { item.posterUrl }
 
     Box(
         modifier = modifier
             .width(248.dp)
             .height(140.dp)
-            .scale(scale)
-            .clip(shape)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clip(ContinueShape)
             .background(AppColors.Surface)
-            .then(if (focused) Modifier.border(2.5.dp, AppColors.Brand, shape) else Modifier)
+            .then(if (focused) Modifier.border(2.5.dp, AppColors.Brand, ContinueShape) else Modifier)
             .combinedClickable(
                 interactionSource = interaction,
                 indication = null,
@@ -95,11 +103,7 @@ fun ContinueCard(
         Box(
             Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(Color.Black.copy(alpha = 0.8f), Color.Black.copy(alpha = 0.15f))
-                    )
-                )
+                .background(ContinueLeftScrim)
         )
 
         Column(
@@ -140,7 +144,7 @@ fun ContinueCard(
                     Modifier
                         .fillMaxWidth()
                         .height(3.dp)
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(ContinueBarShape)
                         .background(Color.White.copy(alpha = 0.3f))
                 ) {
                     Box(
