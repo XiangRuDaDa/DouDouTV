@@ -85,6 +85,7 @@ import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.FormatBadgesRow
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
+import com.tabbit.myvidhub.ui.components.matchEpisodeInSource
 import com.tabbit.myvidhub.ui.theme.AppColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -367,9 +368,10 @@ fun DetailScreen(
     }
 
     // 封面 → 填充色的渐变过渡。
-    // 策略：alpha 在 0.78 处就到 1.0，海报底部 22% 区域是纯 seamColor，
-    // 与 bgBrush 在 r~r+0.06 的缓冲带重叠。两层同色区域有交叠，
-    // 无论海报图片底部是什么颜色，都被完全盖住，交界线从物理上被消除。
+    // 关键：不透明度要一路缓降到 1f 才封顶，不能在 0.78 就压满 ——
+    // 那样海报底部 22% 变成纯色块，标题看着像「海报截到影片名」，而不是浮在海报上。
+    // 交界线仍然不会露：bgBrush 在 r~r+0.06 有一段纯 seamColor 缓冲带，
+    // 和这条渐变终点（同为 seamColor）重叠，1~2px 的渲染偏差落在纯色区内。
     val headerScrim = remember(animatedTop, animatedBottom) {
         val seamColor = lerp(animatedTop, animatedBottom, 0.08f)
         Brush.verticalGradient(
@@ -378,8 +380,8 @@ fun DetailScreen(
             0.38f to seamColor.copy(alpha = 0.06f),
             0.50f to seamColor.copy(alpha = 0.18f),
             0.60f to seamColor.copy(alpha = 0.38f),
-            0.70f to seamColor.copy(alpha = 0.68f),
-            0.78f to seamColor,              // 此处起完全不透明，海报底部 22% 为纯色
+            0.72f to seamColor.copy(alpha = 0.60f),
+            0.86f to seamColor.copy(alpha = 0.85f),
             1f to seamColor
         )
     }
@@ -758,10 +760,24 @@ fun DetailScreen(
                                     FilterChip(
                                         selected = selectedPlaySource == src,
                                         onClick = {
+                                            // 换源前记住「用户要看的是哪一集」：旧分集行继续挂在
+                                            // resumeEpisode 上的话，换了网盘再按「继续观看」会播回上一条源。
+                                            val anchor = resumeEpisode
+                                                ?: playTarget(item, visibleEpisodes)
+                                                    ?.takeIf { it.kind == MediaKind.EPISODE }
                                             selectedPlaySource = src
                                             scope.launch {
-                                                episodes = vm.episodesBySource(item.seriesKey, src)
-                                                selectedSeason = episodes.firstOrNull()?.season ?: 1
+                                                val next = vm.episodesBySource(item.seriesKey, src)
+                                                val same = matchEpisodeInSource(anchor, next)
+                                                episodes = next
+                                                selectedSeason = when {
+                                                    same != null -> same.season
+                                                    next.isNotEmpty() -> next.first().season
+                                                    else -> 1
+                                                }
+                                                // 续播锚点只在「这页本来就是靠它开的」时跟着换源，
+                                                // 没锚点的正常进入不改主按钮语义
+                                                if (resumeEpisode != null) resumeEpisode = same
                                             }
                                         },
                                         label = { Text(src, maxLines = 1) },

@@ -183,6 +183,12 @@ fun PhoneApp(vm: LibraryViewModel) {
                         onOpenGenre = { kind, genre -> push(PhoneRoute.Genre(kind, genre)) },
                         onOpenCategory = { tid, tname -> push(PhoneRoute.Category(tid, tname)) },
                         onPlay = { item: MediaEntity ->
+                            // Netflix 口径：退出播放器一律落在详情页，而不是回到起播那张卡。
+                            // 首页轮播 / 继续观看是直接起播的，这里在起播前把它的详情页压进栈；
+                            // 已经在详情页起播的不重复压，免得栈里叠两层同一部片。
+                            if (navStack.last() !is PhoneRoute.Detail) {
+                                push(PhoneRoute.Detail(item.id))
+                            }
                             context.startActivity(PhonePlayerActivity.intent(context, item.id))
                         }
                     )

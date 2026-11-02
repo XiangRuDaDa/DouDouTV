@@ -93,6 +93,7 @@ import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.ui.StandTarget
 import com.tabbit.myvidhub.ui.components.episodeLabel
+import com.tabbit.myvidhub.ui.components.matchEpisodeInSource
 import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
 import com.tabbit.myvidhub.ui.components.TextBadge
 import com.tabbit.myvidhub.ui.components.TmdbCreditLine
@@ -176,6 +177,8 @@ fun TvDetailScreen(
     /** 分季 + 分页：几百集的剧直接一屏铺满很难找，先按季过滤再按页翻 */
     var selectedSeason by remember(mediaId) { mutableStateOf(0) }
     var epPage by remember(mediaId) { mutableStateOf(0) }
+    /** 整页重建后要把焦点交回的那一集（0 = 没有），由 [LaunchedEffect] 的接址逻辑填 */
+    var recallEpisodeId by remember(mediaId) { mutableStateOf(0L) }
 
     /**
      * 焦点锚点。
@@ -237,6 +240,9 @@ fun TvDetailScreen(
             if (realId != null && realId > 0) {
                 id = realId
                 m = vm.mediaOf(id)
+                // 记下真实 id：这一页要是被爬虫壳的 finish 打断后重建，导航栈里存的还是那个负 id，
+                // 换成这里记的真实 id 才还能原样打开（负 id 靠的是内存里的浏览结果，重建后已没了）。
+                TvNavHistory.resolvedDetailId = realId
             }
         }
         if (m == null) media = null
@@ -294,6 +300,33 @@ fun TvDetailScreen(
                 episodes = runCatching { vm.episodesOf(latest.seriesKey) }.getOrDefault(emptyList())
             }
             episodes.firstOrNull()?.season?.let { if (selectedSeason == 0) selectedSeason = it }
+
+            // 「看完视频回来还站在那一集」：爬虫壳在播放期间 finish 宿主 → MainActivity recreate()，
+            // 这一页连同季 / 页码 / 焦点全是一份新组合的默认值。用进程级记下的分集 id 把线路、季、页码接回去，
+            // 并把该格的 requester 交给 [stand]，下面的 tvClaimFocusOnEnter 就以它为第一顺位锚点。
+            // 正常进出播放器时子树没销毁，这个 LaunchedEffect 不会再跑，落点仍由 stand 原路接住。
+            val playedId = TvNavHistory.playedEpisodeId
+            if (playedId != 0L) {
+                val all = runCatching { vm.episodesOf(latest.seriesKey) }.getOrDefault(emptyList())
+                val played = all.firstOrNull { it.id == playedId }
+                if (played != null) {
+                    if (sources.isNotEmpty() && played.playSource.isNotBlank() &&
+                        played.playSource in sources && played.playSource != selectedPlaySource
+                    ) {
+                        selectedPlaySource = played.playSource
+                        episodes = runCatching {
+                            vm.episodesBySource(latest.seriesKey, played.playSource)
+                        }.getOrDefault(episodes)
+                    }
+                    val seasons = episodes.map { it.season }.distinct()
+                    if (seasons.size > 1) selectedSeason = played.season
+                    val inSeason =
+                        if (seasons.size <= 1) episodes else episodes.filter { it.season == played.season }
+                    val pos = inSeason.indexOfFirst { it.id == playedId }
+                    if (pos >= 0) epPage = pos / TV_EPS_PAGE
+                    recallEpisodeId = playedId
+                }
+            }
 
             // TMDB 刮削：与手机端同一套判定（凭据存在 + 未被近期刮过）
             if (ScrapeStrategy.refresh() == ScrapeEngine.TMDB) {
@@ -409,6 +442,34 @@ fun TvDetailScreen(
     // 焦点因此不会掉 —— 这里刻意不再做任何抢焦。
     // 原来的 restoreGridFocus 会在每次切换后把焦点抢到第一集，
     // 表现就是「切完云盘，焦点自己跑到剧集上了」（规范 R4：离开哪一层就留在哪一层）。
+
+    /**
+     * 换播放源（网盘 / 线路）之后，把这一页接回用户原来那集。
+     *
+     * 新线路的分集是另一批行、另一批 id：旧行要是继续留在 resumeEpisode 里，
+     * 主按钮「继续观看」就会播回上一条网盘 —— 换源后进度看着还在，按下去却来自另一个源。
+     * 找不到同一集时宁可清掉续播锚点、回到第一页，也不能拿着旧源的行往下走。
+     */
+    fun rebindSource(next: List<MediaEntity>, anchor: MediaEntity?) {
+        val same = matchEpisodeInSource(anchor, next)
+        episodes = next
+        // 续播锚点只在「这页本来就是靠它开的」时跟着换源重绑；
+        // 新线路没有同一集就清掉，不能让主按钮拿着旧网盘的行去播。
+        if (resumeEpisode != null) resumeEpisode = same
+        val seasons = next.map { it.season }.distinct()
+        if (seasons.size > 1) {
+            selectedSeason = when {
+                same != null -> same.season
+                selectedSeason in seasons -> selectedSeason
+                else -> seasons.first()
+            }
+        }
+        val inSeason =
+            if (seasons.size <= 1) next else next.filter { it.season == selectedSeason }
+        val pos = same?.let { s -> inSeason.indexOfFirst { it.id == s.id } } ?: -1
+        epPage = if (pos >= 0) pos / TV_EPS_PAGE else 0
+        recallEpisodeId = same?.id ?: 0L
+    }
 
     val tones = remember(dominant) {
         if (dominant == Color.Unspecified) {
@@ -755,7 +816,11 @@ fun TvDetailScreen(
                                     },
                                     size = TvButtonSize.Lg,
                                     modifier = playFocusModifier,
-                                    onClick = { onPlay(resumeEp?.id ?: item.id) }
+                                    onClick = {
+                                        val target = resumeEp?.id ?: item.id
+                                        TvNavHistory.playedEpisodeId = target
+                                        onPlay(target)
+                                    }
                                 )
                                 if (item.positionMs > 5_000L || resumeEp != null) {
                                     TvPillButton(
@@ -775,6 +840,7 @@ fun TvDetailScreen(
                                             // 从「继续观看」进来时 item 是剧集壳，进度写在分集行上
                                             val target = resumeEp ?: item
                                             vm.resetPosition(target.id)
+                                            TvNavHistory.playedEpisodeId = target.id
                                             onPlay(target.id)
                                         }
                                     )
@@ -907,12 +973,19 @@ fun TvDetailScreen(
                                                     pillFocus.focusRequester(controlsFocusRequester)
                                                 } else pillFocus,
                                                 onClick = {
+                                                    // 换源前先记住「用户站在哪一集」：
+                                                    // 续播的那集 > 回来后要落回的那格 > 当前页第一集
+                                                    val anchor = resumeEpisode
+                                                        ?: episodes.firstOrNull { it.id == recallEpisodeId }
+                                                        ?: pagedEpisodes.firstOrNull()
                                                     selectedPlaySource = src
-                                                    epPage = 0
                                                     scope.launch {
                                                         val item2 = media
                                                         if (item2 != null) {
-                                                            episodes = vm.episodesBySource(item2.seriesKey, src)
+                                                            rebindSource(
+                                                                vm.episodesBySource(item2.seriesKey, src),
+                                                                anchor
+                                                            )
                                                         }
                                                     }
                                                 }
@@ -995,6 +1068,11 @@ fun TvDetailScreen(
                                         val cellFocus = remember(ep.id) { FocusRequester() }
                                         val cellTarget =
                                             if (rowIdx == 0 && idx == 0) firstEpFocusRequester else cellFocus
+                                        if (ep.id == recallEpisodeId) {
+                                            // 重建后的落点：组合期就把这一格交给 stand（同 ReturnSpot.cardStand 的交法），
+                                            // 抢焦效果在本帧组合之后才跑，取到的就是它
+                                            remember(cellTarget) { stand.requester = cellTarget }
+                                        }
                                         TvEpisodeCard(
                                             episode = ep,
                                             modifier = Modifier.weight(1f).then(publishStand(cellTarget)),
@@ -1010,7 +1088,10 @@ fun TvDetailScreen(
                                             focusDown = if (rowIdx == epRows.lastIndex) {
                                                 FocusRequester.Cancel
                                             } else null,
-                                            onClick = { onPlay(ep.id) }
+                                            onClick = {
+                                                TvNavHistory.playedEpisodeId = ep.id
+                                                onPlay(ep.id)
+                                            }
                                         )
                                     }
                                     repeat(TV_GRID_COLS - rowEps.size) {

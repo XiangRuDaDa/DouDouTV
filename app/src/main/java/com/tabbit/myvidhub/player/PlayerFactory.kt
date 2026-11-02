@@ -3,6 +3,7 @@ package com.tabbit.myvidhub.player
 import android.content.Context
 import android.net.Uri
 import android.os.StatFs
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.FileTypes
@@ -84,6 +85,21 @@ object PlayerFactory {
 
     /** 开区间 Range 头（bytes=X-）：只有这种请求才需要补一个结尾，防止一路读到 EOF */
     private val OPEN_RANGE_REGEX = Regex("bytes=(\\d+)-$")
+
+    /**
+     * 分块「开口耗时」取证：只对走换连接通道的网盘大文件打，超过 800ms 才记一行。
+     *
+     * 每个 32MB 块的边界 = 一次重连 + 一次首字节等待。这笔开销在「8.7 秒传完一块」的
+     * 传输节奏里到底占多少，直接决定该不该继续每块换连接、以及块要不要调大；
+     * 没这行日志就只能靠猜（网盘 4K 片「一会一加载」正在查的就是这个）。
+     */
+    private fun logChunkOpen(startAt: Long, request: Request, rotated: Boolean) {
+        if (!rotated || request.header("Range") == null) return
+        val cost = SystemClock.elapsedRealtime() - startAt
+        if (cost > 800) {
+            Log.w("PlayerHttp", "分块开口 ${cost}ms（重连+首字节） ${request.header("Range")}")
+        }
+    }
 
     /** 加载失败的重试次数（与之前 DefaultLoadErrorHandlingPolicy(8) 保持一致） */
     private const val MIN_LOAD_RETRY_COUNT = 8
@@ -182,7 +198,10 @@ object PlayerFactory {
                         normalizer.shiftRange(original, plan.prefixBytes, chunkSize),
                         urlKey
                     )
-                    return@Interceptor chain.proceed(shifted)
+                    val openAt = SystemClock.elapsedRealtime()
+                    val shiftedResponse = chain.proceed(shifted)
+                    logChunkOpen(openAt, shifted, rotateConnection.contains(urlKey))
+                    return@Interceptor shiftedResponse
                 }
 
                 val rangeHeader = original.header("Range")
@@ -198,7 +217,9 @@ object PlayerFactory {
                     // 无 Range（HLS/DASH 分片、清单）或已带完整 end → 原样透传
                     original
                 }
+                val openAt = SystemClock.elapsedRealtime()
                 var response = chain.proceed(request)
+                logChunkOpen(openAt, request, rotateConnection.contains(urlKey))
                 val code = response.code
                 val cl = response.body?.contentLength() ?: -1L
 

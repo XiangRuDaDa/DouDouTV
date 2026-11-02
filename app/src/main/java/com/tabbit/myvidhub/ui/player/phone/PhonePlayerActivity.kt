@@ -9,12 +9,16 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -107,9 +111,35 @@ class PhonePlayerActivity : ComponentActivity() {
     private var titleState by mutableStateOf("")
     private var toastState by mutableStateOf<String?>(null)
 
+    /**
+     * 装载态：进入播放器到首帧上屏、以及每次切集到新一集首帧之间为 true。
+     *
+     * 不加这层遮罩时，解析直链那几秒 SurfaceView 还挂着**上一集的最后一帧**，
+     * 标题却已经换成新一集，看着就像卡死；`Player.stop()` 又不清得掉那一帧，只能自己盖。
+     * 只改这个字段没用，要走 [setLoading] —— 黑幕和转圈是播放器里的原生 View。
+     */
+    private var loading = true
+
+    /** 装载黑幕：挂在 PlayerView 的画面框里，只盖画面，不盖控制条 */
+    private var shutterView: View? = null
+
+    /** 装载转圈：平台 ProgressBar，与 PlayerView 缓冲时那个是同款控件 */
+    private var loadingBar: View? = null
+
+    /**
+     * 装载代数。每开始一次装载加一，解析回来后只对号入座：
+     * 连点两下「下一集」会有两个解析在飞，晚到的那个不加闸就会把前一集的地址
+     * 喂给正在加载新一集的播放器。
+     */
+    private var playGeneration = 0
+
     /** 拖动进度时的目标时间提示（只是提示，不是控制条） */
     private var seekPreview by mutableStateOf<String?>(null)
     private var seekPreviewJob: Job? = null
+
+    /** 片尾预热下一集的任务，与它对应的那一分集行 id（一集只预热一次） */
+    private var prefetchJob: Job? = null
+    private var prefetchArmedFor = 0L
 
     /**
      * 缓冲提示（非空 = 正在「想播但没数据」），与 TV 端同一套文案。
@@ -306,6 +336,54 @@ class PhonePlayerActivity : ComponentActivity() {
         // 遥控器：控制条显示后不要过快自动隐藏，方便选择上下集
         view.controllerShowTimeoutMs = 5_000
         updateEpisodeButtons()
+
+        buildLoadingViews(view)
+    }
+
+    /**
+     * 装载用的黑幕与转圈。
+     *
+     * 黑幕挂进 PlayerView 的**画面框**（AspectRatioFrameLayout）而不是根节点：
+     * 根节点上的兄弟是按顺序叠放的，挂根节点会连控制条一起盖住，装载中点屏幕就没反应了。
+     * 转圈用平台 ProgressBar，和 PlayerView 缓冲时自己弹出来的那个是同款控件；
+     * 装载期把自带的缓冲圈关掉，免得两个圈同时出现在同一个位置。
+     */
+    private fun buildLoadingViews(view: PlayerView) {
+        val contentFrame =
+            view.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_content_frame) ?: view
+        shutterView = View(view.context).apply {
+            setBackgroundColor(android.graphics.Color.BLACK)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        contentFrame.addView(shutterView)
+
+        loadingBar = ProgressBar(view.context).apply {
+            isIndeterminate = true
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+            )
+        }
+        view.addView(loadingBar)
+        applyLoadingViews()
+    }
+
+    private fun setLoading(on: Boolean) {
+        loading = on
+        applyLoadingViews()
+    }
+
+    private fun applyLoadingViews() {
+        val visibility = if (loading) View.VISIBLE else View.GONE
+        shutterView?.visibility = visibility
+        loadingBar?.visibility = visibility
+        playerView?.setShowBuffering(
+            if (loading) PlayerView.SHOW_BUFFERING_NEVER else PlayerView.SHOW_BUFFERING_WHEN_PLAYING
+        )
     }
 
     /** 更新底部播放暂停按钮文字 */
@@ -471,9 +549,17 @@ class PhonePlayerActivity : ComponentActivity() {
         }
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头，再创建播放器
+        setLoading(true)
+        val gen = ++playGeneration
         lifecycleScope.launch {
-            val resolved = resolvePlayUrl(item)
-                ?: return@launch // 失败时 toastState 已在 resolvePlayUrl 内设置
+            val resolved = resolvePlayUrl(item, gen)
+            if (resolved == null) {
+                // 失败时 toastState 已在 resolvePlayUrl 内设置；黑幕必须撤，否则错误提示压在转圈下
+                if (gen == playGeneration) setLoading(false)
+                return@launch
+            }
+            // 解析在飞的这几秒里用户可能又切了一次，旧地址不能喂给新集
+            if (gen != playGeneration) return@launch
 
             // 必须先释放旧 player 再创建新的 —— SimpleCache 单例同一时刻只能被一个 player 引用
             player?.release()
@@ -494,7 +580,16 @@ class PhonePlayerActivity : ComponentActivity() {
             p.addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_ENDED) playNext()
+                    if (state == Player.STATE_READY) {
+                        armNextPrefetch()
+                        clearLoadingWhenFirstFrameLate(p)
+                    }
                     watchBuffering()
+                }
+
+                // 首帧真正上屏才撤黑幕：READY 只代表数据够播，从 READY 到出画还有几百毫秒
+                override fun onRenderedFirstFrame() {
+                    if (player === p) setLoading(false)
                 }
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -506,6 +601,7 @@ class PhonePlayerActivity : ComponentActivity() {
                 }
 
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    setLoading(false)
                     Log.e("PhonePlayer", "player error: ${error.errorCodeName} ${error.message}", error)
                     // 优先使用 OkHttp 层拦截时抛出的带中文提示的 IOException message
                     // （我们在 PlayerFactory Interceptor 里对 404/403/412 抛了明确中文消息）
@@ -534,9 +630,10 @@ class PhonePlayerActivity : ComponentActivity() {
     /**
      * 解析播放地址：云盘 scheme 与 http(s) 直链统一交给 [MediaRepository.resolveTvBoxPlayUrl]
      * （直链也会先问 spider，失败/超时自动回退原地址）；非 TVBox 来源原样返回。
-     * @return 解析结果（URL + headers）；解析失败返回 null，错误信息写入 [toastState]
+     * @param gen 本次装载的代数，与被取代的旧装载对不上就不写 [toastState]
+     * @return 解析结果（URL + headers）；解析失败返回 null
      */
-    private suspend fun resolvePlayUrl(item: MediaEntity): TvBoxClient.ResolvedPlayUrl? {
+    private suspend fun resolvePlayUrl(item: MediaEntity, gen: Int): TvBoxClient.ResolvedPlayUrl? {
         return runCatching {
             MediaRepository(this@PhonePlayerActivity).resolveTvBoxPlayUrl(item)
         }.fold(
@@ -544,7 +641,7 @@ class PhonePlayerActivity : ComponentActivity() {
             onFailure = {
                 val msg = it.message ?: "云盘解析失败"
                 Log.w("PhonePlayer", "resolvePlayUrl failed: $msg")
-                toastState = msg
+                if (gen == playGeneration) toastState = msg
                 null
             }
         )
@@ -572,8 +669,11 @@ class PhonePlayerActivity : ComponentActivity() {
             val list = runCatching {
                 MediaRepository(this@PhonePlayerActivity).episodes(item.seriesKey)
             }.getOrDefault(emptyList())
+                // 与电视端同一口径：上下集/选集只在同一个网盘、同一条线路里走，
+                // 否则「下一集」会跳到别的网盘（那一集常常还解析失败）。
+                .filter { item.playSource.isBlank() || it.playSource == item.playSource }
                 .filter { it.uri.isNotBlank() }
-                .sortedBy { it.episode }
+                .sortedWith(compareBy({ it.season }, { it.episode }))
             episodeList = list
             updateEpisodeButtons()
         }
@@ -600,17 +700,32 @@ class PhonePlayerActivity : ComponentActivity() {
 
     private fun playEpisode(episode: MediaEntity) {
         if (episode.uri.isBlank()) return
+        // 先落盘：saveProgress 按 current 写库，必须赶在切到新一集之前
         saveProgress(force = true)
+        // 停机：不停的话解析直链那几秒上一集还在放，标题却已经换成新一集
+        player?.pause()
 
         current = episode
         titleState = displayTitle(episode)
         titleView?.text = titleState
         updateEpisodeButtons()
 
+        setLoading(true)
+        bufferHint = null
+        // 上一集排的片尾预热作废：它按旧集的时长排，切集后时间点已经不对
+        prefetchJob?.cancel()
+        prefetchArmedFor = 0L
+
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
+        val gen = ++playGeneration
         lifecycleScope.launch {
-            val resolved = resolvePlayUrl(episode)
-                ?: return@launch
+            val resolved = resolvePlayUrl(episode, gen)
+            if (resolved == null) {
+                if (gen == playGeneration) setLoading(false)
+                return@launch
+            }
+            // 解析在飞的这几秒里用户可能又按了一次下一集，旧地址不能喂给新集
+            if (gen != playGeneration) return@launch
 
             // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
             // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
@@ -628,8 +743,18 @@ class PhonePlayerActivity : ComponentActivity() {
                 np.addListener(object : Player.Listener {
                     override fun onPlaybackStateChanged(state: Int) {
                         if (state == Player.STATE_ENDED) playNext()
+                        if (state == Player.STATE_READY) {
+                            armNextPrefetch()
+                            clearLoadingWhenFirstFrameLate(np)
+                        }
                         watchBuffering()
                     }
+
+                    // 首帧真正上屏才撤黑幕
+                    override fun onRenderedFirstFrame() {
+                        if (player === np) setLoading(false)
+                    }
+
                     override fun onIsPlayingChanged(isPlaying: Boolean) {
                         updatePlayPauseLabel()
                     }
@@ -637,6 +762,7 @@ class PhonePlayerActivity : ComponentActivity() {
                         rememberFormat(tracks)
                     }
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                        setLoading(false)
                         val causeMsg = error.cause?.message
                         toastState = when {
                             causeMsg?.startsWith("HTTP 404") == true -> causeMsg
@@ -650,7 +776,7 @@ class PhonePlayerActivity : ComponentActivity() {
                 })
                 np
             } else {
-                player ?: return@launch
+                player ?: run { setLoading(false); return@launch }
             }
 
             p.setMediaItem(MediaItem.fromUri(resolved.url))
@@ -673,6 +799,48 @@ class PhonePlayerActivity : ComponentActivity() {
         val prev = episodeList.getOrNull(index - 1) ?: return
         if (prev.id == current?.id) return
         playEpisode(prev)
+    }
+
+    /**
+     * 纯音频流和不回首帧事件的片子等不到 [Player.Listener.onRenderedFirstFrame]，
+     * READY 之后兜一把，否则黑幕和转圈永远撤不掉。
+     *
+     * 1.2 秒内用户可能又切走了，那时黑幕是给新一集的，不能由这一集的兜底撤掉。
+     */
+    private fun clearLoadingWhenFirstFrameLate(p: Player) {
+        if (!loading || player !== p) return
+        val readyEpisodeId = current?.id ?: 0L
+        lifecycleScope.launch {
+            delay(1_200L)
+            if (loading && current?.id == readyEpisodeId) setLoading(false)
+        }
+    }
+
+    /**
+     * 片尾前把同一条线路的下一集先解析好（刷分享令牌 + 问 spider 要直链，实测约 8 秒），
+     * 真到切集时命中 [MediaRepository] 的进程级直链缓存，直接起播。
+     *
+     * 一集只排一次：STATE_READY 在每次缓冲恢复后都会再来，重复排程就是反复敲源站。
+     * 不排在开播时 —— 直链带签名有有效期，45 分钟那一集看完早就凉了。
+     */
+    private fun armNextPrefetch() {
+        val epId = current?.id ?: return
+        if (prefetchArmedFor == epId) return
+        val p = player ?: return
+        val dur = p.duration
+        if (dur <= 0L) return
+        prefetchArmedFor = epId
+        val remaining = dur - p.currentPosition - PREFETCH_REMAINING_MS
+        prefetchJob?.cancel()
+        prefetchJob = lifecycleScope.launch {
+            delay(remaining.coerceAtLeast(0L))
+            val next = episodeList.getOrNull(episodeIndex() + 1) ?: return@launch
+            runCatching {
+                MediaRepository(this@PhonePlayerActivity).resolveTvBoxPlayUrl(next)
+            }.onFailure {
+                Log.w("PhonePlayer", "下一集预热失败 mediaId=${next.id}：${it.message}")
+            }
+        }
     }
 
     private fun cycleSpeed() {
@@ -880,6 +1048,9 @@ class PhonePlayerActivity : ComponentActivity() {
     private fun saveProgress(force: Boolean = false) {
         val item = current ?: return
         val p = player ?: return
+        // 装载期间播放器还挂着上一集（或刚创建、位置为 0），这时落盘会把错误的时间
+        // 写到 current（已经是新一集）头上。切集前已经强制落过盘，跳过不丢进度。
+        if (loading) return
         val now = System.currentTimeMillis()
         if (!force && now - lastSavedAt < 5_000L) return
         lastSavedAt = now
@@ -960,6 +1131,9 @@ class PhonePlayerActivity : ComponentActivity() {
 
         private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
 
+        /** 距结尾多少毫秒预热下一集：解析本身要 8 秒左右，留足余量又不至于提前太久失效 */
+        private const val PREFETCH_REMAINING_MS = 90_000L
+
         fun intent(context: Context, mediaId: Long): Intent =
             Intent(context, PhonePlayerActivity::class.java).putExtra(EXTRA_MEDIA_ID, mediaId)
     }
@@ -1004,6 +1178,10 @@ private fun PlayerScreen(
                 updateResizeMode(view)
             }
         )
+
+        // ---------- 装载中的黑幕与转圈 ----------
+        // 不是 Compose 浮层，而是挂在 PlayerView 里的原生 View（见 buildLoadingViews）：
+        // 黑幕只盖画面，控制条照常能弹出来，转圈和播放器缓冲时那个是同款控件。
 
         // 顶部标题仅在控制条里展示；这里只保留拖动进度预览与错误提示
         if (!seekPreview.isNullOrBlank()) {

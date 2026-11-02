@@ -25,3 +25,21 @@ fun MediaEntity.episodeLabel(): String = when {
  */
 val MediaEntity.continueTitle: String
     get() = parentTitle.ifBlank { title }
+
+/**
+ * 在另一条播放源（网盘 / 线路）里找「同一集」。
+ *
+ * 先认季 + 集号：两个号都是从源分集名解析出来的，跨网盘最稳；
+ * 号对不上（有的源整季都是 0）再认源分集原名。都对不上返回 null，
+ * 由调用方回到第一集 —— 猜错一集比回到第一集更难被用户发现。
+ */
+fun matchEpisodeInSource(anchor: MediaEntity?, list: List<MediaEntity>): MediaEntity? {
+    if (anchor == null || list.isEmpty()) return null
+    val byNumber = if (anchor.episode > 0) {
+        list.firstOrNull { it.season == anchor.season && it.episode == anchor.episode }
+    } else null
+    val byName = if (byNumber == null && anchor.title.isNotBlank()) {
+        list.firstOrNull { it.title == anchor.title }
+    } else null
+    return byNumber ?: byName
+}

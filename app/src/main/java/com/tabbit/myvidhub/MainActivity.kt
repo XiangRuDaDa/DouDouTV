@@ -1,6 +1,7 @@
 package com.tabbit.myvidhub
 
 import android.os.Bundle
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -43,6 +44,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 诊断：savedInstanceState 非空 = 本 Activity 是重建出来的（爬虫壳 finish、系统配置变更都算）。
+        Log.e("MyVidHubNav", "MainActivity.onCreate 重建恢复=${savedInstanceState != null} pid=${Process.myPid()}")
         setContent {
             // 判定只发生在最外层一次：系统 uiMode 为主，设置里的强制开关为辅，
             // 并对部分国产盒子 uiMode 上报不准的情况做了无触摸屏兜底。
@@ -102,5 +105,16 @@ class MainActivity : ComponentActivity() {
             Log.e("MyVidHubNav", "爬虫壳连续触发 finish() 超过 3 次，放行以免无限重建")
         }
         super.finish()
+    }
+
+    /**
+     * 诊断：区分两种「本 Activity 没了」的来路。
+     * isFinishing=true 是自己 finish 掉的（会先经过上面的 finish()）；
+     * isFinishing=false 是被系统按配置变更重建的 —— 那种情况不会留下任何 finish 堆栈，
+     * 只看 finish 日志会误判成「没人销毁过」。
+     */
+    override fun onDestroy() {
+        Log.e("MyVidHubNav", "MainActivity.onDestroy isFinishing=$isFinishing pid=${Process.myPid()}")
+        super.onDestroy()
     }
 }

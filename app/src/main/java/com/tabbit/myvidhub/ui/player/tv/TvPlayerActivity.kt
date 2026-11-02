@@ -60,6 +60,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.C
@@ -93,10 +94,16 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * 交互遵循遥控器心智，不做触摸手势、不做比例切换：
  *   · OK 键：暂停 / 继续，并显示进度条
- *   · 下方向键：弹出功能面板（倍速 / 字幕 / 音轨 / 选集），3 秒无操作自动收起
+ *   · 下方向键：弹出功能工具栏（只有一级按钮，不展开二级菜单）；
+ *     在某一个按钮上按确定才展开它的二级选项（倍速 / 字幕 / 音轨 / 字幕样式 / 选集）
  *   · 左右方向键：快退 / 快进 10 秒，带时间提示
- *   · 返回键：面板打开时先关面板，再按退出播放
+ *   · 返回键：按「二级菜单 → 工具栏 → 时间轴」逐层收起，都收起了才退出播放
+ *   · 工具栏 10 秒无按键自动收起（进度层仍是 3 秒）
  * 始终全屏，不提供「适应 / 铺满 / 缩放」切换。
+ *
+ * 按键一律在 [dispatchKeyEvent] 里拦，不用 onKeyDown：
+ * onKeyDown 是「View 树没人要」才轮到 Activity 的兜底回调，进度条出现后 Compose 焦点
+ * 还在页面上，方向键会被焦点搜索吃掉一次，表现就是「第一次能呼出、之后要按两次」。
  */
 @UnstableApi
 class TvPlayerActivity : ComponentActivity() {
@@ -112,11 +119,41 @@ class TvPlayerActivity : ComponentActivity() {
     private var episodes: List<MediaEntity> = emptyList()
 
     private val lastSavedAt = AtomicLong(0L)
+
+    /**
+     * 已经处理过「播完」的分集行 id。
+     * 连播只认第一次 END：换集时旧播放器可能把 END 补投到新集上，
+     * 没这道闸就会一集接一集地自己往下播。每次 play() 复位。
+     */
+    private var endedEpisodeId = 0L
+
+    /** 本集是否已经为下一集预热过直链：一集最多一次，失败也不重试，不去反复敲源站 */
+    private var prefetched = false
+
+    /**
+     * 装载代数。每调一次 [play] 加一，解析回来后只对号入座。
+     * 连点两下「下一集」时会有两个解析在飞，晚到的那个不加闸就会把前一集的地址
+     * 喂给正在加载新一集的播放器。
+     */
+    private var playGeneration = 0
+
     private val handler = Handler(Looper.getMainLooper())
 
     // ---------- 供 Compose 读取的界面状态 ----------
     private var overlayVisible by mutableStateOf(true)
+
+    /** 功能工具栏（一级按钮行）是否显示 —— 下键唤出，返回键收起 */
+    private var toolbarOpen by mutableStateOf(false)
+
+    /** 工具栏里当前展开的二级菜单；null = 只显示一级按钮，等用户按确定再展开 */
     private var panelTab by mutableStateOf<TvPanelTab?>(null)
+
+    /**
+     * 选集面板的窗口起点。
+     * 面板那一行是不滚动的 Row，整表铺进去会把胶囊挤出屏幕（电视上还收不回来），
+     * 所以一屏只显示以当前集为中心的一段，两端各挂一颗翻页胶囊。
+     */
+    private var epWindowStart by mutableStateOf(0)
     private var toast by mutableStateOf<String?>(null)
     private var seekHint by mutableStateOf<String?>(null)
     private var isPlaying by mutableStateOf(false)
@@ -146,13 +183,6 @@ class TvPlayerActivity : ComponentActivity() {
      */
     private var loading by mutableStateOf(true)
 
-    /**
-     * 播放器当前状态。
-     * 自挂转圈只在 IDLE（线路解析期）显示：一旦进入 BUFFERING，PlayerView 自带的
-     * exo_buffering 就会画圈，两个圈同时出现会叠在一起。
-     */
-    private var playerState by mutableStateOf(Player.STATE_IDLE)
-
     /** 经 TransferListener 累计的实收字节（每个带宽样本带自己那段窗口的字节数，逐条相加） */
     private var speedBytesTotal = 0L
 
@@ -171,6 +201,15 @@ class TvPlayerActivity : ComponentActivity() {
     /** 装载中进度圈：平台 ProgressBar，与 PlayerView 自带的缓冲转圈同款 */
     private var loadingView: ProgressBar? = null
 
+    /**
+     * 装载遮罩：一条黑幕，盖在 PlayerView 之上、进度圈之下。
+     *
+     * 存在的理由只有一个 —— 切集后到新一集首帧上屏之间要花十几秒（解析直链 + 首帧缓冲），
+     * 这段时间里 SurfaceView 仍然挂着**上一集的最后一帧**，屏幕上是「第 5 集的标题 + 第 4 集的画面」，
+     * 看着就像卡死。`Player.stop()` 在不同电视上并不保证清掉最后一帧，所以由我们自己盖。
+     */
+    private var shutterView: View? = null
+
     /** 字幕是否处于关闭态。自己记录而不是反查播放器，避免不同 Media3 小版本 API 差异 */
     private var textDisabled by mutableStateOf(false)
 
@@ -183,16 +222,23 @@ class TvPlayerActivity : ComponentActivity() {
 
     private val progressTicker = object : Runnable {
         override fun run() {
-            player?.let { p ->
-                positionMs = p.currentPosition.coerceAtLeast(0L)
-                durationMs = p.duration.takeIf { it > 0L } ?: 0L
-                isPlaying = p.isPlaying
-                sampleDownloadSpeed()
-                bufferHint = buildBufferHint(p)
-                // 缓冲时把进度层叫回来：不然后台在缓冲、屏幕上什么都看不到。
-                // 功能面板开着时不抢它的位子。
-                if (bufferHint != null && panelTab == null) overlayVisible = true
-                if (p.isPlaying) saveProgress(force = false)
+            // 装载期间（进播放器 / 切集）暂停 ticker：这时播放器还挂着上一集，
+            // 继续跑就会把上一集的进度、时长、缓冲提示写到新一集头上。
+            if (!loading) {
+                player?.let { p ->
+                    positionMs = p.currentPosition.coerceAtLeast(0L)
+                    durationMs = p.duration.takeIf { it > 0L } ?: 0L
+                    isPlaying = p.isPlaying
+                    sampleDownloadSpeed()
+                    bufferHint = buildBufferHint(p)
+                    // 缓冲时把进度层叫回来：不然后台在缓冲、屏幕上什么都看不到。
+                    // 工具栏开着时不抢它的位子。
+                    if (bufferHint != null && !toolbarOpen) overlayVisible = true
+                    if (p.isPlaying) {
+                        saveProgress(force = false)
+                        prefetchNextEpisode()
+                    }
+                }
             }
             handler.postDelayed(this, 500L)
         }
@@ -273,10 +319,14 @@ class TvPlayerActivity : ComponentActivity() {
                 // 首帧真正上屏才算「加载好了」：READY 只代表数据够播，电视上从 READY 到
                 // 出画还有几百毫秒，提前撤掉转圈会看到一段黑屏闪烁。
                 override fun onRenderedFirstFrame() {
-                    loading = false
+                    // 旧实例补投的首帧不该撤掉新集的黑幕
+                    if (player === p) loading = false
                 }
 
                 override fun onTracksChanged(tracks: Tracks) {
+                    // 轨道是解析首帧之后才齐的（进来时播放器还 IDLE / BUFFERING），
+                    // 不在这里刷一次，字幕/音轨二级菜单就只剩「关闭字幕」一项。
+                    refreshTracks()
                     val info = FormatProbe.fromTracks(tracks) ?: return
                     val item = current ?: return
                     lifecycleScope0 { repo.savePlaybackFormat(item, info) }
@@ -305,10 +355,20 @@ class TvPlayerActivity : ComponentActivity() {
                 }
 
                 override fun onPlaybackStateChanged(state: Int) {
-                    playerState = state
+                    // 换源重建播放器时，旧实例的回调可能还排在主线程队列里。
+                    // 不认实例，旧播放器的 READY / ENDED 会盖到正在加载的新集上。
+                    if (player !== p) return
                     // 兜底：纯音频流不触发首帧回调，不能让它一直转圈
                     if (state == Player.STATE_READY && loading) {
-                        handler.postDelayed({ loading = false }, 1_200L)
+                        // 1.2 秒内用户可能已经切走了，那时黑幕是给新一集的，不能由这一集的兜底撤掉
+                        val readyEpisodeId = current?.id ?: 0L
+                        handler.postDelayed({
+                            if (loading && current?.id == readyEpisodeId) loading = false
+                        }, 1_200L)
+                    }
+                    if (state == Player.STATE_ENDED && endedEpisodeId != (current?.id ?: 0L)) {
+                        endedEpisodeId = current?.id ?: 0L
+                        autoNextEpisode()
                     }
                 }
 
@@ -389,25 +449,41 @@ class TvPlayerActivity : ComponentActivity() {
             play(item, item.positionMs)
             refreshTracks()
             val list = runCatching { repo.episodes(item.seriesKey) }.getOrDefault(emptyList())
-            episodes = list.filter { it.seriesKey == item.seriesKey }
-                .sortedWith(compareBy({ it.season }, { it.episode }))
+            // 上下集只在同一个网盘 / 同一条线路里走：episodes(seriesKey) 是全量，
+            // 多线路的剧直接按它取下一集会跳到别的网盘（别的网盘还常常解析失败）。
+            // playSource 为空的源（Emby、单线路 TVBox）没有线路概念，仍按全量。
+            val source = item.playSource
+            episodes = list.filter {
+                it.seriesKey == item.seriesKey && (source.isBlank() || it.playSource == source)
+            }.sortedWith(compareBy({ it.season }, { it.episode }))
             refreshTracks()
         }
     }
 
     private fun play(item: MediaEntity, startMs: Long) {
         titleText = displayTitle(item)
+        // 装载遮罩与转圈立刻出现，不用等播放器回调
         loading = true
-        // 新一集从头开始：状态回到 IDLE，自挂转圈立刻出现，不用等播放器回调
-        playerState = Player.STATE_IDLE
+        // 进度层立刻归零：否则黑幕下面还挂着上一集的「40:12 / 45:00」
+        positionMs = 0L
+        durationMs = 0L
+        isPlaying = false
+        bufferHint = null
+        // 这一集还没播完过，闸门打开（否则「从头开始」再播到末尾不会连播下一集）
+        endedEpisodeId = 0L
+        prefetched = false
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
+        val gen = ++playGeneration
         CoroutineScope(SupervisorJob() + Dispatchers.Main).launch {
-            val resolved = resolvePlayUrl(item)
+            val resolved = resolvePlayUrl(item, gen)
                 ?: run {
-                    loading = false
+                    // 被更新的一次切集取代时别撤黑幕，那层黑幕现在是给新一集用的
+                    if (gen == playGeneration) loading = false
                     return@launch
                 }
+            // 解析在飞的这几秒里用户可能又按了一次下一集，旧地址不能喂给新集
+            if (gen != playGeneration) return@launch
 
             // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
             // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
@@ -440,9 +516,10 @@ class TvPlayerActivity : ComponentActivity() {
     /**
      * 解析播放地址：云盘 scheme 与 http(s) 直链统一交给 [MediaRepository.resolveTvBoxPlayUrl]
      * （直链也会先问 spider，失败/超时自动回退原地址）；非 TVBox 来源原样返回。
-     * @return 解析结果（URL + headers）；解析失败返回 null，错误信息写入 [toast]
+     * @param gen 本次装载的代数，与被取代的旧装载对不上就不写 [toast]，免得新一集还在转圈却弹出上一集的错
+     * @return 解析结果（URL + headers）；解析失败返回 null
      */
-    private suspend fun resolvePlayUrl(item: MediaEntity): TvBoxClient.ResolvedPlayUrl? {
+    private suspend fun resolvePlayUrl(item: MediaEntity, gen: Int): TvBoxClient.ResolvedPlayUrl? {
         return runCatching {
             repo.resolveTvBoxPlayUrl(item)
         }.fold(
@@ -451,16 +528,31 @@ class TvPlayerActivity : ComponentActivity() {
                 // 解析失败只弹 toast 时，logcat 里看不到任何线索；
                 // 电视 ROM 吞 D 级日志，取证只能靠 W。
                 Log.w("TvPlayer", "云盘解析失败 mediaId=${item.id} playSource=${item.playSource}：${it.message}")
-                toast = it.message ?: "云盘解析失败"
+                if (gen == playGeneration) toast = it.message ?: "云盘解析失败"
                 null
             }
         )
     }
 
+    /**
+     * 切集：先把上一集落盘并让播放器停下来，再去解析新一集。
+     *
+     * 顺序很关键：
+     *   · `saveProgress` 必须在 `current = ep` 之前 —— 它按 `current` 写库，
+     *     晚一步就会把上一集看到的时间写进新一集头上。
+     *   · `pause` 必须在解析之前 —— 解析要花好几秒，不停机就还是上一集在播，
+     *     屏幕上却是新一集的标题，看着像卡死；而且 ticker 会拿旧播放器的进度写新集。
+     */
     private fun switchEpisode(ep: MediaEntity) {
+        saveProgress(force = true)
+        player?.pause()
         current = ep
         play(ep, ep.positionMs)
+        // 进度层叫回来：黑幕上没有别的文字，这一条就是「切到第几集了」的凭据
+        overlayVisible = true
         panelTab = null
+        // 面板下次打开时要停在新一集上，不是停在老的那一段
+        centerEpisodeWindow()
         tick++
     }
 
@@ -473,6 +565,9 @@ class TvPlayerActivity : ComponentActivity() {
     private fun saveProgress(force: Boolean) {
         val item = current ?: return
         val p = player ?: return
+        // 装载期间播放器还挂着上一集（或刚创建、位置为 0），这时落盘会把
+        // 错误的时间写到 current（已经是新一集）头上，直接跳过。
+        if (loading) return
         val now = SystemClock.elapsedRealtime()
         if (!force && now - lastSavedAt.get() < 5_000L) return
         lastSavedAt.set(now)
@@ -514,6 +609,9 @@ class TvPlayerActivity : ComponentActivity() {
         // 用户可直接在同一行切换：关闭 → 字幕1 → 字幕2 …
         val textTracks = listOf(TvTrack("关闭字幕", C.TRACK_TYPE_TEXT, null, -1, textDisabled)) + texts
         trackOptions = audios + textTracks
+        // 一条 W 级证据：分清「片源真没内嵌字幕」还是「有轨没列出来」。
+        // 电视 ROM 吞 D 级日志，没这行就只能靠猜。
+        Log.w("TvPlayer", "轨道刷新 音轨=${audios.size} 字幕轨=${texts.size} 关闭字幕=${textDisabled}")
     }
 
     /** 应用字幕样式（背景透明度 + 字号），与手机端一致 */
@@ -537,18 +635,79 @@ class TvPlayerActivity : ComponentActivity() {
         sv.setFixedTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, subtitleTextSize)
     }
 
+    /** 当前播放分集在列表里的下标；-1 = 电影、或列表还没加载出来 */
+    private fun currentEpisodeIndex(): Int = episodes.indexOfFirst { it.id == current?.id }
+
     /** 上一集：当前集在列表中的前一个 */
     private fun prevEpisode() {
-        val idx = episodes.indexOfFirst { it.id == current?.id }
+        val idx = currentEpisodeIndex()
         if (idx > 0) switchEpisode(episodes[idx - 1])
         else toast = "已经是第一集"
     }
 
     /** 下一集：当前集在列表中的后一个 */
     private fun nextEpisode() {
-        val idx = episodes.indexOfFirst { it.id == current?.id }
+        val idx = currentEpisodeIndex()
         if (idx >= 0 && idx < episodes.size - 1) switchEpisode(episodes[idx + 1])
         else toast = "已经是最后一集"
+    }
+
+    /**
+     * 播完自动接下一集（对齐 TVBox 的 playbackEnded → nextEpisode）：
+     * 只在当前这条网盘线路内往下走，末集不循环、只提示。
+     */
+    private fun autoNextEpisode() {
+        val idx = currentEpisodeIndex()
+        if (idx < 0 || idx >= episodes.size - 1) {
+            if (idx >= 0) toast = "本剧已播完"
+            return
+        }
+        // 落盘由 switchEpisode 统一负责（它必须在切走之前把这一集写完）
+        switchEpisode(episodes[idx + 1])
+    }
+
+    /**
+     * 临近结束时预热同一条线路的下一集：提前把「刷分享令牌 + 问 spider 要直链」这两跳付掉，
+     * 实测约 8 秒，正是切集最慢的一段；真到切集时命中进程级缓存，直接起播。
+     *
+     * 为什么不在开播 15 秒就预热（TVBox 是这么做的）：直链带签名、有时效，
+     * 一集 45 分钟，早解析那条到下一集早就过期了，白敲一次源站还占着缓存。
+     */
+    private fun prefetchNextEpisode() {
+        if (prefetched) return
+        val p = player ?: return
+        val dur = p.duration
+        if (dur <= 0L || dur - p.currentPosition > PREFETCH_REMAINING_MS) return
+        prefetched = true
+        val idx = currentEpisodeIndex()
+        if (idx < 0 || idx >= episodes.size - 1) return
+        val next = episodes[idx + 1]
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { repo.resolveTvBoxPlayUrl(next) }
+                .onFailure { Log.w("TvPlayer", "下一集预热失败 mediaId=${next.id}：${it.message}") }
+        }
+    }
+
+    /** 把选集窗口挪到当前集居中；整表不足一窗时贴左 */
+    private fun centerEpisodeWindow() {
+        val idx = currentEpisodeIndex()
+        val lastStart = (episodes.size - EPISODE_WINDOW_SIZE).coerceAtLeast(0)
+        epWindowStart = if (idx < 0) 0
+        else (idx - EPISODE_WINDOW_SIZE / 2).coerceIn(0, lastStart)
+    }
+
+    /**
+     * 选集面板翻页，一步一整窗。
+     * 两端到底时胶囊留在原地只提示，不把它从组合树里摘掉 —— 焦点正挂在它上面，
+     * 节点一消失焦点就不知道去哪了。
+     */
+    private fun stepEpisodeWindow(delta: Int) {
+        val lastStart = (episodes.size - EPISODE_WINDOW_SIZE).coerceAtLeast(0)
+        val next = (epWindowStart + delta * EPISODE_WINDOW_SIZE).coerceIn(0, lastStart)
+        if (next == epWindowStart) {
+            toast = if (delta < 0) "前面没有更多集了" else "后面没有更多集了"
+        }
+        epWindowStart = next
     }
 
     private fun selectTrack(track: TvTrack) {
@@ -597,25 +756,54 @@ class TvPlayerActivity : ComponentActivity() {
         tick++
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        // 面板打开时，方向键交给 Compose 焦点系统在选项间移动
-        if (panelTab != null) {
-            if (keyCode == KeyEvent.KEYCODE_BACK) {
-                panelTab = null
-                tick++
-                return true
+    /**
+     * 遥控器按键的唯一入口。
+     *
+     * 这里用 [dispatchKeyEvent] 而不是 onKeyDown：onKeyDown 只有在整条 View 链都不要这个键时
+     * 才会被调用，进度条/工具栏一出现，Compose 的焦点搜索就可能吃掉下键，表现就是
+     * 「第一次能呼出、之后要按两次」。dispatchKeyEvent 在最外层，先由我们决定归属。
+     *
+     * 工具栏打开时方向键 / 确定键交给 Compose 焦点系统（一级按钮行 + 二级选项都在里面），
+     * 我们只处理返回键的分层收起。
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
+
+        if (toolbarOpen) {
+            val closed = when (event.keyCode) {
+                // 返回键：二级菜单 → 工具栏 → 时间轴，一层一层收，不直接退出播放
+                KeyEvent.KEYCODE_BACK ->
+                    if (panelTab != null) {
+                        panelTab = null
+                        tick++
+                        true
+                    } else {
+                        closeToolbar()
+                    }
+                KeyEvent.KEYCODE_MENU -> closeToolbar()
+                else -> false
             }
-            if (keyCode == KeyEvent.KEYCODE_MENU) {
-                panelTab = null
-                return true
-            }
-            return super.onKeyDown(keyCode, event)
+            if (closed) return true
+            // 方向键 / 确定交给 Compose 焦点系统在按钮和选项间移动；
+            // 顺手重置自动收起计时，否则用户正横向挑选项，工具栏中途消失。
+            tick++
+            return super.dispatchKeyEvent(event)
         }
-        // 面板关闭时直接在 Activity 层处理，不依赖 Compose 焦点
-        // —— 否则首次按键可能被 PlayerView 吃掉，需要按两次才能唤起面板
-        return when (keyCode) {
+
+        return when (event.keyCode) {
+            KeyEvent.KEYCODE_BACK ->
+                if (overlayVisible) {
+                    // 时间轴还挂着：先把它收掉，别把用户退出播放
+                    overlayVisible = false
+                    tick++
+                    true
+                } else {
+                    super.dispatchKeyEvent(event)
+                }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
-                panelTab = TvPanelTab.SPEED
+                // 只呼出工具栏，二级菜单等用户在按钮上按确定再展开
+                toolbarOpen = true
+                panelTab = null
                 overlayVisible = false
                 tick++
                 true
@@ -628,8 +816,16 @@ class TvPlayerActivity : ComponentActivity() {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayPause(); true }
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { seekBy(30_000L); true }
             KeyEvent.KEYCODE_MEDIA_REWIND -> { seekBy(-10_000L); true }
-            else -> super.onKeyDown(keyCode, event)
+            else -> super.dispatchKeyEvent(event)
         }
+    }
+
+    /** 收起工具栏（返回键 / MENU 键），返回 true 表示事件已消费 */
+    private fun closeToolbar(): Boolean {
+        toolbarOpen = false
+        panelTab = null
+        tick++
+        return true
     }
 
     override fun onPause() {
@@ -687,11 +883,21 @@ class TvPlayerActivity : ComponentActivity() {
             handler.post(progressTicker)
         }
 
-        // 进度层 3 秒自动隐藏（面板不自动隐藏，由返回键 / 停止操作时关闭）
-        LaunchedEffect(tick, panelTab, isPlaying) {
-            if (panelTab == null && overlayVisible && isPlaying && seekHint == null) {
+        // 进度层 3 秒自动隐藏（工具栏另有一条 10 秒计时，见下）
+        LaunchedEffect(tick, toolbarOpen, panelTab, isPlaying) {
+            if (!toolbarOpen && overlayVisible && isPlaying && seekHint == null) {
                 delay(3_000L)
                 overlayVisible = false
+            }
+        }
+
+        // 工具栏 10 秒无操作自动收起（含二级菜单一起收）。
+        // 比进度条长：这里要横向逛一圈按钮、再按确定进二级、再选一项。
+        LaunchedEffect(tick, toolbarOpen) {
+            if (toolbarOpen) {
+                delay(TOOLBAR_AUTO_HIDE_MS)
+                toolbarOpen = false
+                panelTab = null
             }
         }
 
@@ -732,10 +938,19 @@ class TvPlayerActivity : ComponentActivity() {
                         this@TvPlayerActivity.playerView = this
                         this@TvPlayerActivity.applySubtitleStyle()
 
-                        // 装载转圈：必须是平台 ProgressBar 且不加任何自定义样式，
-                        // 才会和 PlayerView 自带的缓冲转圈（exo_buffering）完全一致。
-                        // 但它只在 STATE_BUFFERING 显示，线路解析期间播放器还是 IDLE，
-                        // 所以由自己挂在 PlayerView 顶层，按 loading 状态开关。
+                        // 黑幕先加、转圈后加：FrameLayout 按加入顺序叠放，转圈才在黑幕之上。
+                        // 转圈用平台 ProgressBar 且不加任何自定义样式，和 PlayerView 自带那个同款；
+                        // 解析期和缓冲期都由它负责（自带那个被黑幕盖住，不会两个圈重影）。
+                        val shutter = View(c).apply {
+                            setBackgroundColor(android.graphics.Color.BLACK)
+                            layoutParams = FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.MATCH_PARENT
+                            )
+                        }
+                        addView(shutter)
+                        this@TvPlayerActivity.shutterView = shutter
+
                         val bar = ProgressBar(c).apply {
                             isIndeterminate = true
                             layoutParams = FrameLayout.LayoutParams(
@@ -750,10 +965,11 @@ class TvPlayerActivity : ComponentActivity() {
                 },
                 update = { view ->
                     view.player = this@TvPlayerActivity.player
-                    // 只在 IDLE（线路解析 / setMediaItem 之前）画自挂的圈；
-                    // BUFFERING 之后交给 PlayerView 自带的 exo_buffering，避免两个圈重叠。
-                    val showLoading = loading && playerState == Player.STATE_IDLE
-                    loadingView?.visibility = if (showLoading) View.VISIBLE else View.GONE
+                    // 从按下到新一集首帧上屏，全程黑幕 + 转圈：解析期播放器是 IDLE、
+                    // 缓冲期是 BUFFERING，两段连起来才不露出上一集的画面。
+                    val show = if (loading) View.VISIBLE else View.GONE
+                    loadingView?.visibility = show
+                    shutterView?.visibility = show
                 }
             )
 
@@ -763,7 +979,7 @@ class TvPlayerActivity : ComponentActivity() {
 
             // ---------- 进度层 ----------
             AnimatedVisibility(
-                visible = overlayVisible,
+                visible = overlayVisible && !toolbarOpen,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter)
@@ -777,28 +993,36 @@ class TvPlayerActivity : ComponentActivity() {
                 )
             }
 
-            // ---------- 功能面板（下键唤出） ----------
+            // ---------- 功能工具栏（下键唤出） ----------
             AnimatedVisibility(
-                visible = panelTab != null,
+                visible = toolbarOpen,
                 enter = slideInVertically { it / 3 } + fadeIn(),
                 exit = slideOutVertically { it / 3 } + fadeOut(),
                 modifier = Modifier.align(Alignment.BottomCenter)
             ) {
                 TvFunctionPanel(
-                    tab = panelTab ?: TvPanelTab.SPEED,
+                    tab = panelTab,
                     speed = speed,
                     tracks = trackOptions,
                     episodes = episodes,
                     currentId = current?.id ?: 0L,
+                    epWindowStart = epWindowStart,
                     subtitleBgAlpha = subtitleBgAlpha,
                     subtitleTextSize = subtitleTextSize,
                     hasEpisodes = episodes.isNotEmpty(),
-                    onTabChange = { panelTab = it; tick++ },
+                    // 一级按钮：按确定展开/收起它的二级选项（同一个按钮再按一次收起）
+                    onTabChange = {
+                        // 展开选集时先把窗口对到当前集，否则看到的还是上一次那一段
+                        if (it == TvPanelTab.EPISODE) centerEpisodeWindow()
+                        panelTab = if (panelTab == it) null else it
+                        tick++
+                    },
                     onSpeed = { cycleSpeed(it); panelTab = null },
                     onTrack = { selectTrack(it); panelTab = null },
                     onEpisode = { switchEpisode(it) },
                     onPrevEpisode = { prevEpisode() },
                     onNextEpisode = { nextEpisode() },
+                    onEpisodeWindow = { stepEpisodeWindow(it) },
                     onSubtitleStyle = { bg, size ->
                         subtitleBgAlpha = bg
                         subtitleTextSize = size
@@ -838,6 +1062,9 @@ class TvPlayerActivity : ComponentActivity() {
         private const val EXTRA_MEDIA_ID = "media_id"
         private const val DEFAULT_SUBTITLE_BG_ALPHA = 0.0f
         private const val DEFAULT_SUBTITLE_TEXT_SIZE = 22f
+
+        /** 工具栏无操作自动收起：10 秒（要横向逛按钮 + 按确定进二级，比进度条的 3 秒宽松） */
+        private const val TOOLBAR_AUTO_HIDE_MS = 10_000L
 
         fun intent(context: android.content.Context, mediaId: Long) =
             android.content.Intent(context, TvPlayerActivity::class.java)
@@ -936,11 +1163,12 @@ private fun TvProgressBar(
 
 @Composable
 private fun TvFunctionPanel(
-    tab: TvPanelTab,
+    tab: TvPanelTab?,
     speed: Float,
     tracks: List<TvTrack>,
     episodes: List<MediaEntity>,
     currentId: Long,
+    epWindowStart: Int,
     subtitleBgAlpha: Float,
     subtitleTextSize: Float,
     hasEpisodes: Boolean,
@@ -950,10 +1178,17 @@ private fun TvFunctionPanel(
     onEpisode: (MediaEntity) -> Unit,
     onPrevEpisode: () -> Unit,
     onNextEpisode: () -> Unit,
+    onEpisodeWindow: (Int) -> Unit,
     onSubtitleStyle: (bgAlpha: Float, textSize: Float) -> Unit
 ) {
+    // tab 为 null = 工具栏只显示一级按钮；焦点要落在按钮行的第一个上，
+    // 展开某个功能后焦点留在该按钮，按 ↓ 才进二级选项。
     val tabFocus = remember { FocusRequester() }
-    LaunchedEffect(tab) { runCatching { tabFocus.requestFocus() } }
+    val rowFocus = remember { FocusRequester() }
+    val firstTab = TvPanelTab.entries.first()
+    LaunchedEffect(tab) {
+        runCatching { (if (tab == null) rowFocus else tabFocus).requestFocus() }
+    }
 
     Column(
         Modifier
@@ -971,23 +1206,39 @@ private fun TvFunctionPanel(
         // 第一行：上一集 / 下一集 + 一级标签（倍速、字幕…），统一在同一行
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (hasEpisodes) {
-                TvChip(text = "上一集", selected = false, onClick = onPrevEpisode)
+                TvChip(
+                    text = "上一集",
+                    selected = false,
+                    modifier = if (tab == null) Modifier.focusRequester(rowFocus) else Modifier,
+                    onClick = onPrevEpisode
+                )
                 TvChip(text = "下一集", selected = false, onClick = onNextEpisode)
             }
             TvPanelTab.entries.forEach { t ->
                 val selected = t == tab
+                val focusModifier = when {
+                    selected -> Modifier.focusRequester(tabFocus)
+                    tab == null && !hasEpisodes && t == firstTab -> Modifier.focusRequester(rowFocus)
+                    else -> Modifier
+                }
                 TvChip(
                     text = t.label,
                     selected = selected,
-                    modifier = if (selected) Modifier.focusRequester(tabFocus) else Modifier,
+                    modifier = focusModifier,
                     onClick = { onTabChange(t) }
                 )
             }
         }
 
-        // 二级选项（Column，字幕样式需要两行）
+        // 二级选项：只有确定展开了才画出来（未展开时给一行提示）
+        // 二级选项（Column，字幕样式需要两行）：tab 为 null 时只留一行提示，
+        // 等用户在一级按钮上按确定才展开对应内容。
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             when (tab) {
+                null -> {
+                    // 未展开二级时这里什么都不画：不占位、不写提示文字
+                }
+
                 TvPanelTab.SPEED -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     TvPlayerActivity.SPEEDS.forEach { v ->
                         TvChip(
@@ -1059,13 +1310,22 @@ private fun TvFunctionPanel(
                     if (episodes.isEmpty()) {
                         TvHint("当前不是剧集，没有可选分集")
                     } else {
-                        episodes.take(12).forEach { ep ->
+                        val lastStart = (episodes.size - EPISODE_WINDOW_SIZE).coerceAtLeast(0)
+                        val start = epWindowStart.coerceIn(0, lastStart)
+                        // 翻页胶囊放在两端，一屏永远只有 EPISODE_WINDOW_SIZE 颗集名胶囊：
+                        // 这一行不滚动，多铺的胶囊会直接掉到屏幕外，遥控器按不到也看不见。
+                        TvChip(text = "更早", selected = false, onClick = { onEpisodeWindow(-1) })
+                        episodes.drop(start).take(EPISODE_WINDOW_SIZE).forEach { ep ->
                             TvChip(
                                 text = ep.episodeLabel(),
                                 selected = ep.id == currentId,
+                                // 等宽分摊：胶囊文字是网盘原文件名，长短差几十倍，
+                                // 用 weight 才不会出现一颗把同行其余挤出屏幕的情况
+                                modifier = Modifier.weight(1f),
                                 onClick = { onEpisode(ep) }
                             )
                         }
+                        TvChip(text = "更新", selected = false, onClick = { onEpisodeWindow(1) })
                     }
                 }
             }
@@ -1128,12 +1388,22 @@ private fun TvChip(
             },
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
 
 // ---------- 工具 ----------
+
+/**
+ * 选集面板一屏的集数（奇数，当前集正好落中间）。
+ * 电视一屏要同时装下这颗行 + 两端翻页胶囊，再多的胶囊就得到屏幕外了。
+ */
+private const val EPISODE_WINDOW_SIZE = 7
+
+/** 距结尾多少毫秒开始预热下一集：解析本身要 8 秒左右，留足余量又不至于提前太久失效 */
+private const val PREFETCH_REMAINING_MS = 90_000L
 
 private fun displayTitle(item: MediaEntity): String = when {
     item.kind == com.tabbit.myvidhub.data.model.MediaKind.EPISODE && item.usesSourceEpisodeName ->

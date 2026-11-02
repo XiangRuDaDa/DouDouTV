@@ -17,9 +17,26 @@ interface MediaDao {
     )
     fun observeLibrary(): Flow<List<MediaEntity>>
 
+    /**
+     * 「继续观看」：一部剧只留最新的那条记录。
+     *
+     * TVBox 每个线路、每一集都是独立的一行，各自存进度，直接按行列出来就是
+     * 「同一部剧出现好几遍，而且都是早先看过的集」。这里在查询层就按 seriesKey 归组，
+     * 只保留组内 lastPlayedAt 最大的那行（时间相同再比 id，保证只剩一行）。
+     *
+     * 只影响这个列表，不改库：分集行各自的 positionMs 保留，
+     * 详情页选集卡上的「已看」标记和每集进度条靠它们。
+     * 电影行的 seriesKey 为空，NOT EXISTS 里那一条件恒不成立，自然不会被归组。
+     */
     @Query(
         "SELECT m.* FROM media m JOIN sources s ON m.sourceId = s.id " +
             "WHERE s.enabled = 1 AND m.positionMs > 5000 AND m.kind IN ('MOVIE','EPISODE') " +
+            "AND NOT EXISTS (" +
+            "  SELECT 1 FROM media n WHERE n.positionMs > 5000 AND n.kind = 'EPISODE' " +
+            "    AND m.seriesKey != '' AND n.seriesKey = m.seriesKey " +
+            "    AND (n.lastPlayedAt > m.lastPlayedAt " +
+            "         OR (n.lastPlayedAt = m.lastPlayedAt AND n.id > m.id))" +
+            ") " +
             "ORDER BY m.lastPlayedAt DESC LIMIT 20"
     )
     fun observeContinueWatching(): Flow<List<MediaEntity>>
@@ -143,6 +160,14 @@ interface MediaDao {
     /** 清除观看记录：只归零进度，不删行（行删了分集要重新联网拉） */
     @Query("UPDATE media SET positionMs = 0, lastPlayedAt = 0 WHERE id = :id")
     suspend fun clearProgress(id: Long)
+
+    /**
+     * 清除整部剧的观看记录：「继续观看」现在一部剧只露一条（见 observeContinueWatching），
+     * 用户清掉的就是这部剧，只归零当前那行会让更早的分集顶上来的同一条位置。
+     * 同样是归零不删行。
+     */
+    @Query("UPDATE media SET positionMs = 0, lastPlayedAt = 0 WHERE seriesKey = :seriesKey AND kind = 'EPISODE'")
+    suspend fun clearProgressBySeries(seriesKey: String)
 
     @Query("DELETE FROM media WHERE sourceId = :sourceId")
     suspend fun deleteBySource(sourceId: Long)

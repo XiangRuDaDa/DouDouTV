@@ -357,26 +357,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** TVBoxCategoryScreen 分页拉取：typeId + page → 该页 MediaEntity 列表 */
-    /**
-     * 分类浏览页取某一页（不落库，见 MediaRepository.tvBoxCategory）。
-     *
-     * 这里故意不吞异常：调用方（Compose 的 LaunchedEffect）需要区分「真失败」和
-     * 「协程被取消」—— 吞成空列表会让取消看起来像「没有下一页」，列表就停在页边界上。
-     */
-    suspend fun tvBoxCategoryPage(typeId: String, page: Int): List<MediaEntity> {
-        val sourceId = homeSourceId ?: return emptyList()
-        val site = activeSite ?: return emptyList()
-        val src = repo.getSource(sourceId) ?: return emptyList()
-        return repo.tvBoxCategory(src, site, typeId, page)
-    }
-
-    // ---------- 分类「查看全部」分页缓存（TV 端） ----------
+    // ---------- 分类「查看全部」分页缓存（双端） ----------
 
     /**
      * 一条分类浏览游标：已加载的条目 + 翻到第几页。
      *
-     * 放在 ViewModel 而不是页面里，是因为 TV 端进详情会把这一页的子树整个销毁重建：
+     * 放在 ViewModel 而不是页面里，是因为进详情会把这一页的子树整个销毁重建：
      * 页面自己记的数据随组合一起没了，返回就只能重新请求 —— 而源站每一页返回的同一条影片
      * 会拿到一个新的内存负 id（MediaRepository.browseEntity），旧的落点记录再也对不上，
      * 焦点与滚动位置双双失效。数据留在这儿，id 就留着，返回时原样恢复。

@@ -35,7 +35,7 @@
 
         <activity
             android:name=".MainActivity"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density|layoutDirection"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="fullSensor"

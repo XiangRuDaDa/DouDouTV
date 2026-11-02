@@ -362,8 +362,29 @@ class MediaRepository(private val context: Context) {
      *
      * @param episode 分集实体（需包含 sourceId、seriesKey、playSource、uri）
      * @return 解析结果（URL + headers）；非 TVBox 来源原样返回 uri
+     *
+     * 结果按「分集 id|uri」缓存 [RESOLVED_URL_TTL_MS]：播放器会在本集临近结束时预热下一集，
+     * 真到切集时命中缓存，省掉刷令牌 + 问 spider 要直链这两跳。
      */
-    suspend fun resolveTvBoxPlayUrl(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl = withContext(Dispatchers.IO) {
+    suspend fun resolveTvBoxPlayUrl(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl =
+        withContext(Dispatchers.IO) {
+            val key = "${episode.id}|${episode.uri}"
+            RESOLVED_URLS[key]?.takeIf {
+                System.currentTimeMillis() - it.at < RESOLVED_URL_TTL_MS
+            }?.let {
+                Log.w("SpiderProxy", "直链命中预热缓存，跳过解析 mediaId=${episode.id}")
+                return@withContext it.value
+            }
+            val resolved = resolveTvBoxPlayUrlUncached(episode)
+            if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) {
+                RESOLVED_URLS.entries.removeAll { System.currentTimeMillis() - it.value.at >= RESOLVED_URL_TTL_MS }
+                if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) RESOLVED_URLS.clear()
+            }
+            RESOLVED_URLS[key] = CachedPlayUrl(resolved, System.currentTimeMillis())
+            resolved
+        }
+
+    private suspend fun resolveTvBoxPlayUrlUncached(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl = withContext(Dispatchers.IO) {
         val source = sourceDao.get(episode.sourceId)
             ?: return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
         if (source.kind != SourceKind.TVBOX) return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
@@ -1140,14 +1161,42 @@ class MediaRepository(private val context: Context) {
     /**
      * 清除观看记录：进度与最后播放时间归零，条目随即离开「继续观看」。
      * 刻意不删媒体行 —— 分集行删掉后详情页要重新联网拉一次，代价和风险都比归零大。
+     *
+     * 分集行按整部剧清：列表里一部剧只露最新的那条，只归零这一条的话，
+     * 同剧更早的分集会顶上来，看着就像「清除没生效」。
      */
     suspend fun clearProgress(mediaId: Long) {
-        mediaDao.clearProgress(mediaId)
+        val row = mediaDao.get(mediaId)
+        if (row != null && row.kind == MediaKind.EPISODE && row.seriesKey.isNotBlank()) {
+            mediaDao.clearProgressBySeries(row.seriesKey)
+        } else {
+            mediaDao.clearProgress(mediaId)
+        }
     }
+
+    /** 预热出来的直链 + 解析时刻 */
+    private data class CachedPlayUrl(val value: TvBoxClient.ResolvedPlayUrl, val at: Long)
 
     private companion object {
         /** 云盘分享令牌的保守有效期：入库超过这个时长就重新拉一次详情换新令牌 */
         const val CLOUD_URI_TTL_MS = 5 * 60 * 1000L
+
+        /**
+         * 预热直链的复用窗口。
+         * 比云盘令牌的 5 分钟更短：直链是带签名的临时地址，宁可切集时重新解析一次慢 8 秒，
+         * 也不要拿一条已失效的地址去起播 —— 那是直接报错，比慢更难交代。
+         */
+        const val RESOLVED_URL_TTL_MS = 3 * 60 * 1000L
+
+        /**
+         * 「分集 id|uri」→ 已解析直链。
+         * 进程级：预取跑在当前播放器里，读它的是切集后的新起播路径；
+         * key 带上 uri，分享令牌一换新，旧条目自然落空。
+         */
+        val RESOLVED_URLS = java.util.concurrent.ConcurrentHashMap<String, CachedPlayUrl>()
+
+        /** 追剧会一集攒一条（每条带签名 URL 和 Cookie），先给个够一晚用完的上限，超了就丢过期的 */
+        const val RESOLVED_URL_MAX = 64
 
         /**
          * seriesKey → 上次刷新 uri 的时间。

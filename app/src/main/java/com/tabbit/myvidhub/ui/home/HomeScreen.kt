@@ -1458,60 +1458,31 @@ fun TvBoxCategoryScreen(
     val categories = vm.homeCategories
     val currentName = categories.firstOrNull { it.typeId == currentTypeId }?.typeName ?: typeName
 
-    var vods by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
-    var page by remember { mutableIntStateOf(1) }
-    var loading by remember { mutableStateOf(true) }
-    var loadingMore by remember { mutableStateOf(false) }
-    var exhausted by remember { mutableStateOf(false) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    var retryTick by remember { mutableIntStateOf(0) }
-    val scope = rememberCoroutineScope()
+    /**
+     * 数据、页码、到底/失败状态全部住在 ViewModel 的分类缓存里（browseItems 那组接口），
+     * 和电视端「查看全部」同一套。
+     *
+     * 原来这些数据记在本页的 remember 里，而进详情页会把这一页的子树整个销毁重建 ——
+     * 返回即重新联网拉第 1 页，整屏先空一下再出内容；同一部影片还会被重新分配一个内存负 id，
+     * 每个分类各记的滚动位置也就对不上了。改成缓存复用之后：只有第一次进入（以及刷新 /
+     * 换线路）请求第 1 页，点「加载更多」请求下一页，返回上层一个请求都不发。
+     */
+    val vods = vm.browseItems(currentTypeId)
+    val loadError = vm.browseItemsError(currentTypeId)
+    val exhausted = vm.browseItemsEnded(currentTypeId)
+    val loadingMore = vods.isNotEmpty() && vm.browseItemsLoading(currentTypeId)
+    // 来源/线路还没选中（冷启动直接进这一页）时不该画骨架屏，否则永远转圈
+    val browseReady = vm.homeSourceId != null && vm.homeSiteKey != null
+    val loading = vods.isEmpty() && loadError == null && !exhausted && browseReady
+
     // 每个分类各记一份滚动位置
     val gridState = ReturnSpot.listState("phone_cat_$currentTypeId")
 
-    LaunchedEffect(currentTypeId, retryTick) {
-        loading = true
-        loadingMore = false
-        loadError = null
-        exhausted = false
-        vods = emptyList()
-        page = 1
-        val result = runCatching { vm.tvBoxCategoryPage(currentTypeId, 1) }
-        result.onFailure { loadError = it.message ?: "网络或接口异常" }
-        vods = result.getOrDefault(emptyList())
-        page = 2
-        loading = false
+    LaunchedEffect(currentTypeId, vm.homeRefreshEpoch) {
+        vm.ensureBrowsePage(currentTypeId)
     }
 
-    val loadMore: () -> Unit = {
-        if (!loadingMore) {
-            loadingMore = true
-            val reqTypeId = currentTypeId
-            scope.launch {
-                val result = runCatching { vm.tvBoxCategoryPage(reqTypeId, page) }
-                if (reqTypeId != currentTypeId) {
-                    loadingMore = false
-                    return@launch
-                }
-                result.onFailure { loadError = it.message ?: "网络或接口异常" }
-                val more = result.getOrDefault(emptyList())
-                if (more.isEmpty()) {
-                    exhausted = true
-                } else {
-                    val seen = vods.mapTo(HashSet(vods.size)) { it.id }
-                    val fresh = more.filter { seen.add(it.id) }
-                    // 源站忽略 page 时每页都相同：没有新增就当到底，
-                    // 否则 page 一直加、列表永远停在原地（用户看到的就是「只有 40 部」）。
-                    if (fresh.isEmpty()) exhausted = true
-                    else {
-                        vods = vods + fresh
-                        page += 1
-                    }
-                }
-                loadingMore = false
-            }
-        }
-    }
+    val loadMore: () -> Unit = { vm.loadMoreBrowsePage(currentTypeId) }
 
     // 同 GenreScreen：根容器不滚动，统一背景直接挂在它上，替掉原来那条写死的顶部渐变
     Column(
@@ -1604,7 +1575,7 @@ fun TvBoxCategoryScreen(
                 if (loadError != null) {
                     Spacer(Modifier.height(12.dp))
                     Button(
-                        onClick = { retryTick++ },
+                        onClick = { vm.retryBrowsePage(currentTypeId) },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = AppColors.SurfaceHi,
                             contentColor = AppColors.TextPrimary
@@ -1646,7 +1617,7 @@ fun TvBoxCategoryScreen(
                             )
 
                             loadError != null -> Button(
-                                onClick = { loadError = null; loadMore() },
+                                onClick = { vm.retryBrowsePage(currentTypeId) },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = AppColors.SurfaceHi,
                                     contentColor = AppColors.TextPrimary
