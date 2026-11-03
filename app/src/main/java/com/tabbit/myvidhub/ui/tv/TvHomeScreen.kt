@@ -693,7 +693,7 @@ private fun TvSourceChainPill(
 }
 
 /** 一张精选在 Hero 上停留的秒数；右下进度条按这个时长走满，走满即换页。 */
-private const val HERO_DWELL_SECONDS = 9f
+internal const val HERO_DWELL_SECONDS = 9f
 
 /**
  * Hero 与页面背景之间的收色带：把两者共用的那条接缝挪进渐变中段。
@@ -703,7 +703,7 @@ private const val HERO_DWELL_SECONDS = 9f
  * 底下并没有内容，40dp 时它和标题行的上间距叠起来，把轮播和分类推得很开，收到 20dp。
  */
 @Composable
-private fun TvHeroSeamFade(modifier: Modifier = Modifier) {
+internal fun TvHeroSeamFade(modifier: Modifier = Modifier) {
     Box(modifier.themeSeamFade(20.dp))
 }
 
@@ -717,7 +717,7 @@ private fun TvHeroSeamFade(modifier: Modifier = Modifier) {
  * 因此按比例取，同时夹在 430~620dp 之间：小屏不至于挤内容，大屏也不会顶掉整个首屏。
  */
 @Composable
-private fun tvHeroHeight(): Dp {
+internal fun tvHeroHeight(): Dp {
     val screenH = LocalConfiguration.current.screenHeightDp.dp
     return (screenH * 0.72f).coerceIn(430.dp, 620.dp)
 }
@@ -733,7 +733,7 @@ private fun tvHeroHeight(): Dp {
  *      缩放值只在 graphicsLayer 的 lambda 里读取，走 draw 阶段，画面在动但 Composable 不重组；
  *    · 缩放后的画面必须裁在 Hero 边界内，否则会溢出盖住下面一行和渐隐遮罩。 */
 @Composable
-private fun TvHero(
+internal fun TvHero(
     item: MediaEntity,
     heroIndex: Int,
     heroTotal: Int,
@@ -958,7 +958,7 @@ private fun TvHero(
 /** 空态主视觉：轮播区常驻，但没有可推荐内容时占位。
  *  高度走同一个 [tvHeroHeight]，避免首页在「加载中 / 空库」之间上下跳版。 */
 @Composable
-private fun TvHeroEmpty(
+internal fun TvHeroEmpty(
     libraryIsEmpty: Boolean,
     hasCategories: Boolean,
     error: String?,
@@ -1296,7 +1296,7 @@ private fun TvContinueRow(
  * 行样式复用 [TvMenuRow]，与来源页功能菜单同一套视觉。
  */
 @Composable
-private fun TvContinueActionDialog(
+internal fun TvContinueActionDialog(
     item: MediaEntity,
     onPlay: () -> Unit,
     onDetail: () -> Unit,

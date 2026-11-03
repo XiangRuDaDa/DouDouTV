@@ -98,6 +98,8 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     // 缩略图档位单独留一份状态：Prefs 背后是 SharedPreferences，读它不会触发重组，
     // 只写不读状态的话选中圆点永远停在按下前那一格（手机端设置页同样是这么处理的）
     var posterSize by remember { mutableStateOf(Prefs.posterSize) }
+    // 同上：布局风格也要留一份可重组的状态，否则选中态停在切换前那一格
+    var tvLayout by remember { mutableStateOf(Prefs.tvLayout) }
     var tmdbOn by remember { mutableStateOf(Prefs.tmdbEnabled) }
     var tmdbToken by remember { mutableStateOf(Prefs.tmdbReadToken) }
     var engineTick by remember { mutableStateOf(0) }
@@ -169,6 +171,20 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                         value = if (forceTv) "已开启" else "已关闭",
                         accent = forceTv
                     )
+
+                    TvSettingRow(title = "TV 布局风格", hint = "退出本页即生效，两套布局的页面都在，只换进哪一套") {
+                        Prefs.TvLayout.values().forEach { s ->
+                            Spacer(Modifier.width(10.dp))
+                            TvFilterChip(
+                                text = when (s) {
+                                    Prefs.TvLayout.CLASSIC -> "经典"
+                                    Prefs.TvLayout.NETFLIX -> "Netflix 风格"
+                                },
+                                selected = s == tvLayout,
+                                onClick = { Prefs.tvLayout = s; tvLayout = s }
+                            )
+                        }
+                    }
 
                     TvSettingRow(title = "缩略图大小", hint = null) {
                         Prefs.PosterSize.values().forEach { s ->

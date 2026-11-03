@@ -3,9 +3,7 @@ package com.tabbit.myvidhub.ui.tv
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
-import android.os.Process
 import android.os.SystemClock
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -34,10 +32,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.player.tv.TvPlayerActivity
 import com.tabbit.myvidhub.ui.sources.TvSourcesScreen
+import com.tabbit.myvidhub.ui.tv.nf.NfBrowseScreen
+import com.tabbit.myvidhub.ui.tv.nf.NfHomeScreen
+import com.tabbit.myvidhub.ui.tv.nf.NfMineScreen
+import com.tabbit.myvidhub.ui.tv.nf.NfSearchScreen
+import com.tabbit.myvidhub.ui.tv.nf.NfTab
 import com.tabbit.myvidhub.ui.theme.TvText
 import com.tabbit.myvidhub.ui.theme.Radius
 import com.tabbit.myvidhub.ui.theme.Motion
@@ -54,12 +58,28 @@ import kotlinx.coroutines.delay
  */
 internal sealed interface TvRoute {
     data object Home : TvRoute
+
+    /** 以下三颗只在 Netflix 版布局的常驻导航条上出现（旧布局没有一级 tab） */
+    data object Browse : TvRoute
+    data object Mine : TvRoute
     data object Search : TvRoute
     data class Detail(val mediaId: Long) : TvRoute
     data class Genre(val kind: String?, val genre: String?) : TvRoute
     data class Category(val typeId: String, val typeName: String) : TvRoute
     data object Sources : TvRoute
     data object Settings : TvRoute
+}
+
+/**
+ * 一级 tab 之间互切的栈规则（Netflix 版布局的导航条用）。
+ *
+ * 栈底永远是首页，tab 页最多一颗压在它上面：
+ * 首页 → 分类 → 我的 只留 [Home, Mine]，返回键一下回首页、两下走「双返回」退出，
+ * 不会像逐个 push 那样要按四次才出去。旧布局不用这条，仍然是 push/出栈。
+ */
+private fun tabStack(current: List<TvRoute>, route: TvRoute): List<TvRoute> {
+    val root = if (current.firstOrNull() is TvRoute.Home) current.take(1) else listOf(TvRoute.Home)
+    return if (route is TvRoute.Home) root else root + route
 }
 
 /**
@@ -97,26 +117,21 @@ fun TvApp(vm: LibraryViewModel) {
     val context = LocalContext.current
     var navStack by remember { mutableStateOf(restorableStack(TvNavHistory.stack)) }
     LaunchedEffect(navStack) { TvNavHistory.stack = navStack }
-    // 取证用：每次本 Activity 装配都打一行，能直接分清
-    // 「没重建但栈里只有 Home」（压根没进详情，如从继续观看直接播放）和「重建后恢复失败」。
-    // 放在 remember 里：这一列是 Composable 体，写在外面每次重组都会打一行。
-    remember {
-        Log.w("MyVidHubNav", "TvApp 装配 pid=${Process.myPid()} 存档栈=${TvNavHistory.stack} 本次栈=$navStack")
-        Unit
-    }
     // 搜索页状态放在导航层：进详情再返回时结果不丢，真正退出搜索页才清空
     val searchState = remember { TvSearchUiState() }
     val push: (TvRoute) -> Unit = {
-        Log.w("MyVidHubNav", "导航入栈 $it")
         navStack = navStack + it
     }
     val pop: () -> Unit = {
         if (navStack.size > 1) {
-            Log.w("MyVidHubNav", "导航出栈 ${navStack.last()}")
             if (navStack.last() is TvRoute.Search) searchState.clear()
             if (navStack.last() is TvRoute.Detail) TvNavHistory.forgetEpisode()
             navStack = navStack.dropLast(1)
         }
+    }
+    // Netflix 版导航条：四颗 tab 互切走 tabStack 规则，并带上当前布局风格（切风格要重建栈底）
+    val switchTab: (TvRoute) -> Unit = { route ->
+        navStack = tabStack(navStack, route)
     }
 
     BackHandler(enabled = navStack.size > 1) { pop() }
@@ -141,6 +156,15 @@ fun TvApp(vm: LibraryViewModel) {
         exitHintAt = -1L
     }
 
+    // Netflix 口径：退出播放器落详情页，而不是回到起播那张卡。
+    // 轮播 / 继续观看是直接起播的，起播前先把这一条目的详情页压进栈；已经在详情页就不重复压。
+    // 首页的滚动与落点由 ReturnSpot 记着，从详情页再返回时还站在原来那张卡上。
+    // 两套布局（旧首页 / Netflix 版首页）共用这一条起播路径，行为完全一致。
+    val playFromRoot: (MediaEntity) -> Unit = { item ->
+        if (navStack.last() !is TvRoute.Detail) push(TvRoute.Detail(item.id))
+        context.startActivity(TvPlayerActivity.intent(context, item.id))
+    }
+
     Box(Modifier.fillMaxSize()) {
         AnimatedContent(
             targetState = navStack.last(),
@@ -149,25 +173,53 @@ fun TvApp(vm: LibraryViewModel) {
             modifier = Modifier.fillMaxSize()
         ) { target ->
             when (target) {
-                is TvRoute.Home -> TvHomeScreen(
+                is TvRoute.Home -> if (Prefs.tvLayout == Prefs.TvLayout.NETFLIX) {
+                    NfHomeScreen(
+                        vm = vm,
+                        onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                        onDetail = { id -> push(TvRoute.Detail(id)) },
+                        onPlay = playFromRoot,
+                        onSources = { push(TvRoute.Sources) },
+                        onSettings = { push(TvRoute.Settings) }
+                    )
+                } else TvHomeScreen(
                     vm = vm,
                     onSearch = { push(TvRoute.Search) },
                     onDetail = { id -> push(TvRoute.Detail(id)) },
                     onGenre = { kind, genre -> push(TvRoute.Genre(kind, genre)) },
                     onCategory = { typeId, typeName -> push(TvRoute.Category(typeId, typeName)) },
-                    onPlay = { item: MediaEntity ->
-                        // Netflix 口径：退出播放器落详情页，而不是回到起播那张卡。
-                        // 轮播 / 继续观看是直接起播的，起播前先把这一条目的详情页压进栈；
-                        // 已经在详情页就不重复压。首页的滚动与落点由 ReturnSpot 记着，
-                        // 从详情页再返回时还站在原来那张卡上。
-                        if (navStack.last() !is TvRoute.Detail) push(TvRoute.Detail(item.id))
-                        context.startActivity(TvPlayerActivity.intent(context, item.id))
-                    },
+                    onPlay = playFromRoot,
                     onSources = { push(TvRoute.Sources) },
                     onSettings = { push(TvRoute.Settings) }
                 )
 
-                is TvRoute.Search -> TvSearchScreen(
+                is TvRoute.Browse -> NfBrowseScreen(
+                    vm = vm,
+                    onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                    onDetail = { id -> push(TvRoute.Detail(id)) },
+                    onSources = { push(TvRoute.Sources) },
+                    onSettings = { push(TvRoute.Settings) }
+                )
+
+                is TvRoute.Mine -> NfMineScreen(
+                    vm = vm,
+                    onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                    onDetail = { id -> push(TvRoute.Detail(id)) },
+                    onSources = { push(TvRoute.Sources) },
+                    onSettings = { push(TvRoute.Settings) }
+                )
+
+                is TvRoute.Search -> if (Prefs.tvLayout == Prefs.TvLayout.NETFLIX) {
+                    // Netflix 版：搜索是导航条上的第四颗 tab，外壳和其他三页完全一样
+                    NfSearchScreen(
+                        vm = vm,
+                        state = searchState,
+                        onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                        onDetail = { id -> push(TvRoute.Detail(id)) },
+                        onSources = { push(TvRoute.Sources) },
+                        onSettings = { push(TvRoute.Settings) }
+                    )
+                } else TvSearchScreen(
                     vm = vm,
                     state = searchState,
                     onBack = pop,
@@ -232,6 +284,14 @@ fun TvApp(vm: LibraryViewModel) {
 
 /** 双返回退出的确认窗口：比 Android 惯例的 2 秒稍长一点，电视上按键到屏幕回显有延迟 */
 private const val EXIT_CONFIRM_WINDOW_MS = 2500L
+
+/** 导航条的四颗 tab → 路由 */
+private fun nfRouteOf(tab: NfTab): TvRoute = when (tab) {
+    NfTab.Home -> TvRoute.Home
+    NfTab.Browse -> TvRoute.Browse
+    NfTab.Mine -> TvRoute.Mine
+    NfTab.Search -> TvRoute.Search
+}
 
 /**
  * 恢复导航栈时把不能原样加载的路由换掉或丢弃。

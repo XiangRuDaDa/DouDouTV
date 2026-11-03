@@ -137,6 +137,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     var homeSitesLoading by mutableStateOf(false)
         private set
 
+    /**
+     * 当前线路的 homeContent（分类名 + 轮播条目）是否正在拉。
+     * 分类页据此在骨架期显示「正在读取这条线路的分类…」，而不是立刻判成「这条线路没有下发分类」。
+     */
+    var homeSiteLoading by mutableStateOf(false)
+        private set
+
     /** 首页来源/线路加载失败的真实原因，供空状态提示（壳初始化超时等） */
     var homeSitesError by mutableStateOf<String?>(null)
         private set
@@ -258,7 +265,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     fun selectHomeSource(sourceId: Long?) {
         if (homeSourceId == sourceId) {
             // 重复点同一个来源不算切换，但把线路列表（重新）拉一次，避免之前失败留下空列表
-            sourceId?.let { loadHomeSites(it) }
+            sourceId?.let { loadHomeSites(it); rebindActiveSite(it) }
             return
         }
         homeSourceId = sourceId
@@ -272,7 +279,35 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         activeSite = null
         Prefs.homeSourceId = sourceId ?: -1L
         Prefs.homeSiteKey = homeSiteKey.orEmpty()
-        if (sourceId != null) loadHomeSites(sourceId)
+        if (sourceId != null) {
+            loadHomeSites(sourceId)
+            // 线路列表已经在缓存里时 loadHomeSites 直接返回，恢复动作得自己补一次
+            rebindActiveSite(sourceId)
+        }
+    }
+
+    /**
+     * 把这条来源「记忆中的线路」接回运行时：[activeSite] 和该线路的分类/轮播内容都只在这一步补齐。
+     *
+     * 之前只有 [loadHomeSites] 真正发请求之后才会做这个恢复，而线路列表一旦进过缓存它就直接返回 ——
+     * 于是「切到一个已经拉过线路的 TVBox 来源」会出现 `homeSiteKey` 有值、`activeSite` 却是 null 的半状态：
+     * 分类页既拿不到 `homeCategories`（空 → 「这条线路没有下发分类」），
+     * 分页请求也在 [loadBrowsePage] 里因为 activeSite 为 null 被收口成 ended，整页没有数据。
+     * 现在缓存命中和重新拉取两条路都走这里。
+     */
+    private fun rebindActiveSite(sourceId: Long) {
+        val sites = _homeSitesBySource[sourceId].orEmpty().filter { it.key.isNotBlank() }
+        if (sites.isEmpty() || homeSourceId != sourceId) return
+        val key = homeSiteKey
+        val restored = key?.let { k -> sites.firstOrNull { it.key == k } }
+        when {
+            // 记忆里有条线路，且当前还站在「全部站点」上：按那条线路把内容拉回来
+            restored != null && activeSite == null -> selectHomeSite(restored.key, restored)
+            // 记录的线路在配置里已不存在（站点被删/改 key）：清掉，否则首页会按不存在的 key 过滤成空白
+            key != null && restored == null -> selectHomeSite(null, null)
+            // 只有一条线路的来源：自动选中，避免首页空白又没按钮可点
+            key == null && sites.size == 1 -> sites.first().let { selectHomeSite(it.key, it) }
+        }
     }
 
     fun selectHomeSite(siteKey: String?, site: TvBoxSite? = null) {
@@ -289,11 +324,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         activeSite = site
         val sourceId = homeSourceId ?: return
         val s = site ?: return
+        homeSiteLoading = true
         viewModelScope.launch {
-            val src = repo.getSource(sourceId) ?: return@launch
             // 每次切线路都拉一次首页：取 homeContent 的 class 分类名
             // 分类内容（categoryContent）按需懒加载，每个分类的 section 在 UI 首次可见时触发
             try {
+                val src = repo.getSource(sourceId) ?: return@launch
                 val sync = repo.syncTvBoxSite(src, s)
                 // 请求期间用户可能又切了线路：旧结果不能盖掉新线路的分类/轮播
                 if (homeSiteKey != s.key) return@launch
@@ -304,6 +340,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: Exception) {
                 if (homeSiteKey != s.key) return@launch
                 homeSitesError = "线路「${s.name}」加载失败：${e.message ?: "网络或接口异常"}"
+            } finally {
+                // 只有仍站在发起这次请求的线路上才收口，否则新的请求正在跑，会把它的骨架擦掉
+                if (homeSiteKey == s.key) homeSiteLoading = false
             }
         }
     }
@@ -504,7 +543,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun loadHomeSites(sourceId: Long) {
         // 之前只要走过一次（哪怕拿到的是空列表）就不再重试，导致切到第二个来源后永远没有线路可选
-        if (_homeSitesBySource[sourceId]?.isNotEmpty() == true) return
+        if (_homeSitesBySource[sourceId]?.isNotEmpty() == true) {
+            // 列表已经在缓存里：不发请求，但线路恢复照样要做（见 [rebindActiveSite]）
+            rebindActiveSite(sourceId)
+            return
+        }
         viewModelScope.launch {
             homeSitesLoading = true
             homeSitesError = null
@@ -518,18 +561,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             _homeSitesBySource[sourceId] = sites
             homeSitesLoading = false
             // 冷启动恢复上次选中的线路时，重新拉一次首页分类（分类只在 homeContent 里，重启后需重新获取）
-            val restored = homeSiteKey?.let { key -> sites.firstOrNull { it.key == key } }
-            when {
-                restored != null && activeSite == null -> selectHomeSite(restored.key, restored)
-                // 记录的线路在配置里已不存在（站点被删/改 key）：清掉，否则首页会按不存在的 key
-                // 过滤成空白
-                homeSiteKey != null && restored == null && sites.isNotEmpty() ->
-                    selectHomeSite(null, null)
-                // 只有一条线路的来源：自动选中，避免首页空白又没按钮可点。
-                // 多线路（如 38 个站点的配置）保持「全部站点」聚合视图，由用户自己挑线路。
-                homeSiteKey == null && homeSourceId == sourceId && sites.size == 1 ->
-                    sites.first().let { selectHomeSite(it.key, it) }
-            }
+            // 只有一条线路的来源：自动选中，避免首页空白又没按钮可点。
+            // 多线路（如 38 个站点的配置）保持「全部站点」聚合视图，由用户自己挑线路。
+            rebindActiveSite(sourceId)
         }
     }
 

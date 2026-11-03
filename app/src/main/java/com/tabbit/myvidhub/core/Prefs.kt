@@ -14,6 +14,7 @@ object Prefs {
     private const val KEY_TMDB_READ_TOKEN = "tmdb_read_token"
     private const val KEY_TMDB_ENABLED = "tmdb_enabled"
     private const val KEY_POSTER_SIZE = "poster_size"
+    private const val KEY_TV_LAYOUT = "tv_layout_style"
     private const val KEY_TONE_PREFIX = "detail_tone_"
     private const val KEY_HOME_SOURCE_ID = "home_source_id"
     private const val KEY_HOME_SITE_KEY = "home_site_key"
@@ -36,6 +37,25 @@ object Prefs {
         set(value) {
             sp.edit().putString(KEY_POSTER_SIZE, value.name).apply()
         }
+
+    /**
+     * 电视端布局风格。
+     *
+     * [TvLayout.CLASSIC] 走 ui/tv 里那套（首页顶栏 + 分类行全部铺开），
+     * [TvLayout.NETFLIX] 走 ui/tv/nf 里另拉的一套（常驻导航条 + 首页只留轮播和继续观看）。
+     * 两套页面并存，切换只改这一个值，不动任何一边的代码。
+     */
+    var tvLayout: TvLayout
+        get() {
+            val name = sp.getString(KEY_TV_LAYOUT, TvLayout.NETFLIX.name)
+            return runCatching { TvLayout.valueOf(name.orEmpty()) }.getOrDefault(TvLayout.NETFLIX)
+        }
+        set(value) {
+            sp.edit().putString(KEY_TV_LAYOUT, value.name).apply()
+        }
+
+    /** TV 端布局风格的两个取值；默认 NETFLIX，让新那套在真机上先被看到 */
+    enum class TvLayout { CLASSIC, NETFLIX }
 
     private lateinit var sp: SharedPreferences
 
