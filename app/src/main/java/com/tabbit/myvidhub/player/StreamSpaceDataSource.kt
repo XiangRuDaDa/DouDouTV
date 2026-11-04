@@ -344,10 +344,16 @@ internal class VideoCacheDataSource(
     private val pipeline: CloudCachePipeline,
     private val httpFactory: DataSource.Factory,
     private val onStreamMiss: (url: String, streamPos: Long) -> Unit,
+    private val onStreamRead: (url: String, streamPos: Long) -> Unit,
 ) : DataSource {
 
     private val listeners = ArrayList<TransferListener>()
     private var active: DataSource? = null
+
+    /** 走了缓存的那条直链，本次 open 已交付到哪个流位置；没走缓存时为 null */
+    private var trackedUrl: String? = null
+    private var readUntil = 0L
+    private var lastReportedUntil = 0L
 
     override fun addTransferListener(transferListener: TransferListener) {
         listeners += transferListener
@@ -355,15 +361,26 @@ internal class VideoCacheDataSource(
 
     @Throws(IOException::class)
     override fun open(dataSpec: DataSpec): Long {
-        val delegate = cacheSourceFor(dataSpec) ?: httpFactory.createDataSource()
+        val delegate = cacheSourceFor(dataSpec) ?: httpFactory.createDataSource().also { trackedUrl = null }
         listeners.forEach { delegate.addTransferListener(it) }
         active = delegate
         return delegate.open(dataSpec)
     }
 
     @Throws(IOException::class)
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
-        checkNotNull(active).read(buffer, offset, length)
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val n = checkNotNull(active).read(buffer, offset, length)
+        val url = trackedUrl
+        if (n > 0 && url != null) {
+            readUntil += n
+            // 预读只需要知道播放器大致读到哪，不必每 16KB 通知一次
+            if (readUntil - lastReportedUntil >= READ_REPORT_STEP) {
+                lastReportedUntil = readUntil
+                onStreamRead(url, readUntil)
+            }
+        }
+        return n
+    }
 
     private fun cacheSourceFor(dataSpec: DataSpec): DataSource? {
         val url = dataSpec.uri.toString()
@@ -377,6 +394,9 @@ internal class VideoCacheDataSource(
         dropIfStale(bundle.cache, key, plan)
         // 播放器要的是缓存里没有的字节 —— 预读器从它前面开始攒
         onStreamMiss(url, dataSpec.position)
+        trackedUrl = url
+        readUntil = dataSpec.position
+        lastReportedUntil = dataSpec.position
         return bundle.newPlaybackSource()
     }
 
@@ -400,6 +420,7 @@ internal class VideoCacheDataSource(
 
     @Throws(IOException::class)
     override fun close() {
+        trackedUrl = null
         val source = active ?: return
         active = null
         source.close()
@@ -409,8 +430,14 @@ internal class VideoCacheDataSource(
         private val pipeline: CloudCachePipeline,
         private val httpFactory: DataSource.Factory,
         private val onStreamMiss: (String, Long) -> Unit,
+        private val onStreamRead: (String, Long) -> Unit,
     ) : DataSource.Factory {
         override fun createDataSource(): DataSource =
-            VideoCacheDataSource(pipeline, httpFactory, onStreamMiss)
+            VideoCacheDataSource(pipeline, httpFactory, onStreamMiss, onStreamRead)
+    }
+
+    private companion object {
+        /** 播放器每读够这么多字节才回灌一次游标，够预读用，又不至于每 16KB 通知一次 */
+        const val READ_REPORT_STEP = 4L * 1024 * 1024
     }
 }

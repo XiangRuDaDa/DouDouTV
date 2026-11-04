@@ -353,10 +353,16 @@ object PlayerFactory {
         val buffering = AtomicBoolean(false)
         val playingUrl = AtomicReference<String?>()
         val filler = VideoCacheFiller(pipeline, chunkSize) { buffering.get() }
-        val dataSourceFactory = VideoCacheDataSource.Factory(pipeline, httpFactory) { url, streamPos ->
-            playingUrl.set(url)
-            filler.onPlayerMiss(url, streamPos)
-        }
+        val dataSourceFactory = VideoCacheDataSource.Factory(
+            pipeline,
+            httpFactory,
+            onStreamMiss = { url, streamPos ->
+                playingUrl.set(url)
+                filler.onPlayerMiss(url, streamPos)
+            },
+            // 加载器一次 open 会连着读掉几十个分块才重新开口，只盯 open 位的话预读一路追在播放器后面
+            onStreamRead = { url, streamPos -> filler.onPlayerRead(url, streamPos) },
+        )
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(

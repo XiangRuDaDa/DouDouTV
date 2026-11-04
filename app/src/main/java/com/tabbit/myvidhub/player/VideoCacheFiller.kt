@@ -36,7 +36,7 @@ internal class VideoCacheFiller(
 ) {
 
     private class Session(val url: String, val key: String) {
-        /** 播放器最近一次开口的位置；预读游标从它后面两个分块起攒 */
+        /** 播放器最近一次读到的流位置（开口位 + 已交付字节）；预读游标从它后面两个分块起攒 */
         @Volatile
         var playerPos = 0L
 
@@ -50,6 +50,8 @@ internal class VideoCacheFiller(
     private var cancelled = false
 
     private var worker: Thread? = null
+
+    @Volatile
     private var current: Session? = null
 
     /** 已经收工（或看完作废）的 key，别再为它重开线程 */
@@ -87,6 +89,18 @@ internal class VideoCacheFiller(
             worker = thread
             thread.start()
         }
+    }
+
+    /**
+     * 播放器每读一段调一次（由 [VideoCacheDataSource] 转过来）—— 只更新已有会话的游标。
+     *
+     * 一次 open 之后加载器会连着读掉几十个分块才重新开口，只盯 open 位的话，
+     * 播放器都跑到 800MB 了游标还停在 490MB，预读就变成在它屁股后面反复读盘。
+     * 读回调永远晚于开口，所以这里绝不新建会话，免得给 Emby/m3u8 之外的路径惹出新线程。
+     */
+    fun onPlayerRead(playUrl: String, streamPos: Long) {
+        val session = current ?: return
+        if (session.url == playUrl) session.playerPos = streamPos
     }
 
     /**
@@ -193,13 +207,13 @@ internal class VideoCacheFiller(
                 // 紧贴着 playerPos 的话，两边抢同一段，预读只能等锁然后把播放器刚写的字节再读一遍
                 val posAtPlan = session.playerPos
                 val pos = (posAtPlan + AHEAD_CHUNKS * chunkBytes).coerceIn(0L, total)
-                val cachedAhead = runCatching { cache.getCachedBytes(session.key, pos, total - pos) }
+                // 只跳「从 pos 起连续已缓存」的那一段。以前用的是 getCachedBytes，
+                // 那是「窗口内已缓存的总字节数」：拿它当跳过量会一步跨过中间没缓存的洞，
+                // 洞永远补不上，而且落点还在下一段已缓存里 —— 预读于是整块整块地读盘。
+                val cachedRun = runCatching { cache.getCachedLength(session.key, pos, total - pos) }
                     .getOrDefault(0L)
-                // 取证：getCachedBytes 是「窗口内已缓存的总字节数」，getCachedLength 才是
-                // 「从 pos 起连续已缓存的长度（未缓存时为负的洞长）」，两者只对一次再判该用哪个
-                val cachedRun = runCatching { cache.getCachedLength(session.key, pos, chunkBytes) }
-                    .getOrDefault(0L)
-                val cursor = pos + cachedAhead
+                    .coerceAtLeast(0L)
+                val cursor = (pos + cachedRun).coerceAtMost(total)
                 if (cursor >= total) {
                     retire(session, "尾段已全部缓存 流长=${total / 1048576}MB")
                     return
@@ -224,7 +238,7 @@ internal class VideoCacheFiller(
                         "用时=${cost}ms 速率=${if (cost > 0) written / 1024 * 1000 / cost else 0}KB/s " +
                         "档=${Prefs.videoCacheTier.label} 占用=${usedBytesSafely(cache) / 1048576}MB " +
                         "播位=${posAtPlan / 1048576}MB 计划位=${pos / 1048576}MB " +
-                        "窗口已缓存=${cachedAhead}B 连续已缓存=${cachedRun}B 起读=${cursor / 1048576}MB"
+                        "连续已缓存=${cachedRun / 1048576}MB 起读=${cursor / 1048576}MB"
                 )
             }
             leave("被砍掉（cancelled=$cancelled stop=${session.stop}）", startedAt, blocks)
