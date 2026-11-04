@@ -2,19 +2,20 @@ package com.tabbit.myvidhub.ui.settings
 
 import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -36,10 +37,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.core.AppCache
 import com.tabbit.myvidhub.core.Prefs
+import com.tabbit.myvidhub.core.VideoCache
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.components.TmdbDisclaimer
 import com.tabbit.myvidhub.ui.components.ThemeSwatch
@@ -68,7 +72,20 @@ fun Context.setForceTvMode(enabled: Boolean) {
         .edit().putBoolean(KEY_FORCE_TV, enabled).apply()
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/** 设置页上「点开才展开选项」的那几组，一次只开一个弹窗 */
+internal enum class SettingChoice { TvLayout, PosterSize, Theme, VideoTier }
+
+internal fun Prefs.PosterSize.label(): String = when (this) {
+    Prefs.PosterSize.SMALL -> "小"
+    Prefs.PosterSize.MEDIUM -> "中"
+    Prefs.PosterSize.LARGE -> "大"
+}
+
+internal fun Prefs.TvLayout.label(): String = when (this) {
+    Prefs.TvLayout.CLASSIC -> "经典"
+    Prefs.TvLayout.NETFLIX -> "Netflix 风格"
+}
+
 @Composable
 fun SettingsScreen(vm: LibraryViewModel) {
     val sources by vm.sources.collectAsStateWithLifecycle()
@@ -88,6 +105,22 @@ fun SettingsScreen(vm: LibraryViewModel) {
 
     // 写操作放到副作用里：凭据一变就同步给全局，供其他页面读取
     LaunchedEffect(engineTick) { ScrapeStrategy.refresh() }
+
+    // 界面与缓存的可选项收进弹窗：页面上只留「分组 + 当前值」，点哪一行才展开那一组的档位
+    var choice by remember { mutableStateOf<SettingChoice?>(null) }
+    // Prefs 背后是 SharedPreferences，写它不会触发重组；行上的当前值得自己留一份状态
+    var posterSize by remember { mutableStateOf(Prefs.posterSize) }
+    var tvLayout by remember { mutableStateOf(Prefs.tvLayout) }
+    var videoTier by remember { mutableStateOf(Prefs.videoCacheTier) }
+    var videoCacheBytes by remember { mutableStateOf(0L) }
+    var imageCacheBytes by remember { mutableStateOf(0L) }
+    val scope = rememberCoroutineScope()
+    // 体积要读 SQLite 索引（缓存没建起来时是遍历目录），不能压在主线程；
+    // 换档与清空都在 IO 线程就地重读，这里只在进页时读一次
+    LaunchedEffect(Unit) {
+        videoCacheBytes = withContext(Dispatchers.IO) { VideoCache.usedBytes() }
+        imageCacheBytes = withContext(Dispatchers.IO) { AppCache.sizeBytes(ctx) }
+    }
 
     // 背景光晕画在不滚动的外层：挂在 verticalScroll 节点上，光晕会跟着内容一起滚走，
     // 滚到底就只剩一片纯黑，尺寸也要按整页内容高算。
@@ -118,7 +151,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 )
             }
 
-            // ---------- 界面（合并 TV 强制模式 + 海报尺寸） ----------
+            // ---------- 界面 ----------
             SettingCard(title = "界面") {
                 Row(
                     Modifier
@@ -134,7 +167,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
                             color = AppColors.TextPrimary
                         )
                         Text(
-                            "手机上开启可模拟 TV 界面布局",
+                            "手机上开启可模拟 TV 界面布局，重启后生效",
                             style = MaterialTheme.typography.labelSmall,
                             color = AppColors.TextTertiary
                         )
@@ -145,62 +178,8 @@ fun SettingsScreen(vm: LibraryViewModel) {
                     )
                 }
 
-                Text(
-                    "缩略图大小",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = AppColors.TextPrimary
-                )
-                val sizes = Prefs.PosterSize.values()
-                var current by remember { mutableStateOf(Prefs.posterSize) }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    sizes.forEach { s ->
-                        val selected = s == current
-                        AssistChip(
-                            onClick = { Prefs.posterSize = s; current = s },
-                            label = {
-                                Text(
-                                    when (s) {
-                                        Prefs.PosterSize.SMALL -> "小"
-                                        Prefs.PosterSize.MEDIUM -> "中"
-                                        Prefs.PosterSize.LARGE -> "大"
-                                    }
-                                )
-                            },
-                            colors = AssistChipDefaults.assistChipColors(
-                                containerColor = if (selected) AppColors.Brand.copy(alpha = 0.18f) else AppColors.Surface,
-                                labelColor = if (selected) AppColors.Brand else AppColors.TextSecondary
-                            )
-                        )
-                    }
-                }
-
-                Text(
-                    "主题色",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = AppColors.TextPrimary
-                )
-                // 七颗色卡横排约 390dp，手机上（卡片内宽常在 340dp 上下）会被裁掉最后一两颗，
-                // 所以用 FlowRow 让它自动换行，而不是把色卡缩到按不准
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    ThemePalettes.forEach { palette ->
-                        ThemeSwatch(
-                            palette = palette,
-                            selected = palette.id == AppPalette.current.id,
-                            onClick = { AppPalette.select(palette.id) }
-                        )
-                    }
-                }
-                Text(
-                    "只换强调色与背景氛围，文字层级与中性底色保持不变。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = AppColors.TextTertiary
-                )
+                ValueRow("缩略图大小", posterSize.label()) { choice = SettingChoice.PosterSize }
+                ValueRow("主题色", AppPalette.current.label) { choice = SettingChoice.Theme }
             }
 
             // ---------- 刮削 ----------
@@ -285,7 +264,6 @@ fun SettingsScreen(vm: LibraryViewModel) {
                         // ---- 缓存大小 + 清除 ----
                         var cacheCount by remember { mutableStateOf(vm.scrapeCacheSize()) }
                         var clearing by remember { mutableStateOf(false) }
-                        val scope = rememberCoroutineScope()
 
                         Row(
                             Modifier.fillMaxWidth(),
@@ -336,44 +314,37 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 }
             }
 
-            // ---------- 图片缓存 ----------
-            SettingCard(title = "图片缓存") {
-                var cacheBytes by remember { mutableStateOf(0L) }
-                val scope = rememberCoroutineScope()
-                // 读体积是磁盘遍历（图片缓存有几万个条目），不能压在主线程
-                LaunchedEffect(Unit) {
-                    cacheBytes = withContext(Dispatchers.IO) { AppCache.sizeBytes(ctx) }
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "当前占用：${PlayerFactory.formatBytes(cacheBytes)}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = AppColors.TextPrimary
-                    )
-                    Button(
-                        onClick = {
-                            // 清缓存同样是磁盘操作，不能压在点击回调里同步跑
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    AppCache.clear(ctx)
-                                    cacheBytes = AppCache.sizeBytes(ctx)
-                                }
+            // ---------- 缓存 ----------
+            SettingCard(title = "缓存") {
+                ValueRow("视频缓存容量上限", videoTier.label) { choice = SettingChoice.VideoTier }
+                ActionRow(
+                    label = "视频缓存占用",
+                    value = PlayerFactory.formatBytes(videoCacheBytes),
+                    hint = "看过的内容在本机留一份：往回拖进度、重看同一集不再重复下载；看完的自动删。",
+                    actionLabel = "清空",
+                    onClick = {
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                VideoCache.clearAll()
+                                videoCacheBytes = VideoCache.usedBytes()
                             }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = AppColors.Brand,
-                            contentColor = Color.White
-                        )
-                    ) { Text("清除缓存") }
-                }
-                Text(
-                    "封面与海报的本地缓存，清除后浏览时重新下载。不影响观看进度、网盘登录状态和爬虫库。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = AppColors.TextTertiary
+                        }
+                    }
+                )
+                ActionRow(
+                    label = "图片缓存占用",
+                    value = PlayerFactory.formatBytes(imageCacheBytes),
+                    hint = "封面与海报的本地副本，清除后浏览时重新下载。",
+                    actionLabel = "清除",
+                    onClick = {
+                        // 清缓存同样是磁盘操作，不能压在点击回调里同步跑
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                AppCache.clear(ctx)
+                                imageCacheBytes = AppCache.sizeBytes(ctx)
+                            }
+                        }
+                    }
                 )
             }
 
@@ -398,6 +369,195 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 color = AppColors.TextTertiary.copy(alpha = 0.7f)
             )
         }
+
+        // ---------- 选项弹窗：一次只开一个 ----------
+        when (choice) {
+            SettingChoice.PosterSize -> ChoiceDialog(
+                title = "缩略图大小",
+                options = Prefs.PosterSize.values().toList(),
+                label = { it.label() },
+                selected = posterSize,
+                hint = null,
+                onPick = { Prefs.posterSize = it; posterSize = it },
+                onDismiss = { choice = null }
+            )
+
+            SettingChoice.Theme -> ChoiceDialog(
+                title = "主题色",
+                options = ThemePalettes,
+                label = { it.label },
+                selected = AppPalette.current,
+                swatch = { palette ->
+                    ThemeSwatch(palette, selected = palette.id == AppPalette.current.id, onClick = { })
+                },
+                hint = "只换强调色与背景氛围，文字层级与中性底色保持不变。",
+                onPick = { AppPalette.select(it.id) },
+                onDismiss = { choice = null }
+            )
+
+            SettingChoice.VideoTier -> ChoiceDialog(
+                title = "视频缓存容量上限",
+                options = Prefs.VideoCacheTier.values().toList(),
+                label = { it.label },
+                selected = videoTier,
+                hint = "只给看过的网盘内容留一份，看完的自动删，超出上限先清最久没看的。",
+                onPick = { t ->
+                    val previous = Prefs.videoCacheTier
+                    if (previous != t) {
+                        Prefs.videoCacheTier = t
+                        videoTier = t
+                        // 降档（含关闭）要清空目录，占用数字跟着重读；都在 IO 线程做
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                VideoCache.applyTier(t.maxBytes, previous.maxBytes)
+                                videoCacheBytes = VideoCache.usedBytes()
+                            }
+                        }
+                    }
+                },
+                onDismiss = { choice = null }
+            )
+
+            SettingChoice.TvLayout, null -> Unit
+        }
+    }
+}
+
+/**
+ * 通用选项弹窗：标题 + 一行一个档位 + 底部一句说明。
+ *
+ * 选中即生效但弹窗不关（多档设置常连着调），退出走返回键或点弹窗外。
+ */
+@Composable
+private fun <T> ChoiceDialog(
+    title: String,
+    options: List<T>,
+    label: (T) -> String,
+    selected: T,
+    swatch: (@Composable (T) -> Unit)? = null,
+    hint: String?,
+    onPick: (T) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(Modifier.fillMaxSize().padding(horizontal = 32.dp), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 360.dp)
+                    .background(AppColors.Surface, Radius.Lg)
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = AppColors.Brand
+                )
+                options.forEach { option ->
+                    val isCurrent = option == selected
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (isCurrent) AppColors.Brand.copy(alpha = 0.16f) else AppColors.SurfaceHi,
+                                Radius.Sm
+                            )
+                            .clickable { onPick(option) }
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        swatch?.invoke(option)
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            label(option),
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isCurrent) AppColors.Brand else AppColors.TextPrimary
+                        )
+                        if (isCurrent) {
+                            Text("当前", style = MaterialTheme.typography.labelSmall, color = AppColors.Brand)
+                        }
+                    }
+                }
+                if (hint != null) {
+                    Text(
+                        hint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AppColors.TextTertiary
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 点开弹窗的条目行：左边标题、右边当前值，整行可点 */
+@Composable
+private fun ValueRow(title: String, value: String, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(AppColors.SurfaceHi, Radius.Sm)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.TextPrimary,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.Brand
+        )
+    }
+}
+
+/** 当前值 + 一个直接生效的操作按钮（清空缓存这类，不弹确认） */
+@Composable
+private fun ActionRow(
+    label: String,
+    value: String,
+    hint: String,
+    actionLabel: String,
+    onClick: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(AppColors.SurfaceHi, Radius.Sm)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "$label：$value",
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.TextPrimary,
+                modifier = Modifier.weight(1f)
+            )
+            Button(
+                onClick = onClick,
+                shape = Radius.Sm,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AppColors.Brand,
+                    contentColor = Color.White
+                )
+            ) { Text(actionLabel, style = MaterialTheme.typography.labelMedium) }
+        }
+        Text(
+            hint,
+            style = MaterialTheme.typography.labelSmall,
+            color = AppColors.TextTertiary
+        )
     }
 }
 

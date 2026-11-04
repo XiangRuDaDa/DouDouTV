@@ -9,6 +9,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -18,9 +19,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,18 +51,22 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tabbit.myvidhub.core.AppCache
 import com.tabbit.myvidhub.core.Prefs
+import com.tabbit.myvidhub.core.VideoCache
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.scrape.ScrapeEngine
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.components.TmdbDisclaimer
-import com.tabbit.myvidhub.ui.components.ThemeSwatch
 import com.tabbit.myvidhub.ui.settings.APP_VERSION_LABEL
+import com.tabbit.myvidhub.ui.settings.SettingChoice
 import com.tabbit.myvidhub.ui.settings.forceTvMode
+import com.tabbit.myvidhub.ui.settings.label
 import com.tabbit.myvidhub.ui.settings.setForceTvMode
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.Lift
@@ -76,10 +84,11 @@ import kotlinx.coroutines.withContext
 /**
  * 电视端设置页 —— 手机端 SettingsScreen 的十英尺版本。
  *
- * 分组和内容与手机端一一对应（状态 / 界面 / 刮削 / 数据来源 / 图片缓存 / 关于），
+ * 分组和内容与手机端一一对应（状态 / 界面 / 刮削 / 数据来源 / 缓存 / 关于），
  * 但控件全部换掉：手机端的 Switch、AssistChip、AlertDialog 是靠手指点的，
  * 隔着三米用遥控器操作，可聚焦区域至少要 40dp 高、焦点态必须有白边，
- * 所以这里统一用「整行可聚焦 + 右侧回显当前值」的十英尺设置列表。
+ * 所以这里统一用「整行可聚焦 + 右侧回显当前值」的十英尺设置列表，
+ * 档位选项和手机端一样收进弹窗（[TvChoiceDialog]）。
  *
  * 纵向走位交给默认几何搜索：这一页是一条单列的可聚焦序列，
  * 上下移动属于同一功能区（规范 R1 禁的是跨功能区依赖几何搜索）；
@@ -110,6 +119,16 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     var cacheCount by remember { mutableStateOf(vm.scrapeCacheSize()) }
     var clearing by remember { mutableStateOf(false) }
     var imageCache by remember { mutableStateOf(0L) }
+    // 视频缓存的档位与占用：同上，写 Prefs 不会触发重组，选中态得自己留一份
+    var videoTier by remember { mutableStateOf(Prefs.videoCacheTier) }
+    var videoCache by remember { mutableStateOf(0L) }
+
+    // 档位收进弹窗：记住开的是哪一组，以及是哪一行叫出来的（关掉后焦点要还给那一行）
+    var choice by remember { mutableStateOf<Pair<SettingChoice, FocusRequester>?>(null) }
+    val layoutFocus = remember { FocusRequester() }
+    val posterFocus = remember { FocusRequester() }
+    val themeFocus = remember { FocusRequester() }
+    val tierFocus = remember { FocusRequester() }
 
     val scrollState = rememberScrollState()
     val entryFocus = remember { FocusRequester() }
@@ -123,6 +142,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     // 读体积是磁盘遍历（缓存里可能几万个条目），放 IO 线程，不在主线程上按文件数卡帧。
     LaunchedEffect(resumeTick) {
         imageCache = withContext(Dispatchers.IO) { AppCache.sizeBytes(ctx) }
+        videoCache = withContext(Dispatchers.IO) { VideoCache.usedBytes() }
         cacheCount = vm.scrapeCacheSize()
     }
 
@@ -172,48 +192,27 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                         accent = forceTv
                     )
 
-                    TvSettingRow(title = "TV 布局风格", hint = "退出本页即生效，两套布局的页面都在，只换进哪一套") {
-                        Prefs.TvLayout.values().forEach { s ->
-                            Spacer(Modifier.width(10.dp))
-                            TvFilterChip(
-                                text = when (s) {
-                                    Prefs.TvLayout.CLASSIC -> "经典"
-                                    Prefs.TvLayout.NETFLIX -> "Netflix 风格"
-                                },
-                                selected = s == tvLayout,
-                                onClick = { Prefs.tvLayout = s; tvLayout = s }
-                            )
-                        }
-                    }
-
-                    TvSettingRow(title = "缩略图大小", hint = null) {
-                        Prefs.PosterSize.values().forEach { s ->
-                            Spacer(Modifier.width(10.dp))
-                            TvFilterChip(
-                                text = when (s) {
-                                    Prefs.PosterSize.SMALL -> "小"
-                                    Prefs.PosterSize.MEDIUM -> "中"
-                                    Prefs.PosterSize.LARGE -> "大"
-                                },
-                                selected = s == posterSize,
-                                onClick = { Prefs.posterSize = s; posterSize = s }
-                            )
-                        }
-                    }
-
-                    TvSettingRow(title = "主题色", hint = null) {
-                        ThemePalettes.forEach { palette ->
-                            ThemeSwatch(
-                                palette = palette,
-                                selected = palette.id == AppPalette.current.id,
-                                onClick = { AppPalette.select(palette.id) }
-                            )
-                        }
-                    }
-                    Text(
-                        "主题色只换强调色与背景氛围，文字层级和中性底色保持不变。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TvText.Meta
+                    // 档位收进弹窗：这一页只留「当前值」，OK 键才展开对应的那一组
+                    TvSettingRow(
+                        title = "TV 布局风格",
+                        hint = null,
+                        focusRequester = layoutFocus,
+                        value = tvLayout.label(),
+                        onClick = { choice = SettingChoice.TvLayout to layoutFocus }
+                    )
+                    TvSettingRow(
+                        title = "缩略图大小",
+                        hint = null,
+                        focusRequester = posterFocus,
+                        value = posterSize.label(),
+                        onClick = { choice = SettingChoice.PosterSize to posterFocus }
+                    )
+                    TvSettingRow(
+                        title = "主题色",
+                        hint = null,
+                        focusRequester = themeFocus,
+                        value = AppPalette.current.label,
+                        onClick = { choice = SettingChoice.Theme to themeFocus }
                     )
                 }
 
@@ -286,11 +285,31 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                     }
                 }
 
-                TvSettingsGroup("图片缓存") {
+                TvSettingsGroup("缓存") {
+                    TvSettingRow(
+                        title = "视频缓存容量上限",
+                        hint = null,
+                        focusRequester = tierFocus,
+                        value = videoTier.label,
+                        onClick = { choice = SettingChoice.VideoTier to tierFocus }
+                    )
                     TvSettingAction(
-                        title = "当前占用：${PlayerFactory.formatBytes(imageCache)}",
-                        hint = "封面与海报的本地缓存，清除后浏览时重新下载；不影响观看进度、网盘登录状态和爬虫库",
-                        actionLabel = "清除缓存",
+                        title = "视频缓存占用：${PlayerFactory.formatBytes(videoCache)}",
+                        hint = "看过的内容在本机留一份：往回拖进度、重看同一集不再重复下载；看完的自动删",
+                        actionLabel = "清空",
+                        onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    VideoCache.clearAll()
+                                    videoCache = VideoCache.usedBytes()
+                                }
+                            }
+                        }
+                    )
+                    TvSettingAction(
+                        title = "图片缓存占用：${PlayerFactory.formatBytes(imageCache)}",
+                        hint = "封面与海报的本地副本，清除后浏览时重新下载",
+                        actionLabel = "清除",
                         onClick = {
                             // 清缓存与读体积都是磁盘操作，都不该压在按钮点击里跑主线程
                             scope.launch {
@@ -323,6 +342,193 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                     color = TvText.Muted
                 )
             }
+        }
+
+        // ---------- 档位弹窗：一次只开一个 ----------
+        val opened = choice
+        if (opened != null) {
+            val (which, trigger) = opened
+            val dismiss: () -> Unit = {
+                choice = null
+                // 弹窗是独立窗口，关掉后这一页的焦点是空的；还给叫出它的那一行，
+                // 用户接着按方向键就在原位，不用从头找焦点
+                scope.launch {
+                    withFrameNanos { }
+                    runCatching { trigger.requestFocus() }
+                }
+            }
+            when (which) {
+                SettingChoice.TvLayout -> TvChoiceDialog(
+                    title = "TV 布局风格",
+                    options = Prefs.TvLayout.values().toList(),
+                    label = { it.label() },
+                    selected = tvLayout,
+                    dot = null,
+                    hint = "退出本页即生效，两套布局的页面都在，只换进哪一套。",
+                    onPick = { Prefs.tvLayout = it; tvLayout = it },
+                    onDismiss = dismiss
+                )
+
+                SettingChoice.PosterSize -> TvChoiceDialog(
+                    title = "缩略图大小",
+                    options = Prefs.PosterSize.values().toList(),
+                    label = { it.label() },
+                    selected = posterSize,
+                    dot = null,
+                    hint = null,
+                    onPick = { Prefs.posterSize = it; posterSize = it },
+                    onDismiss = dismiss
+                )
+
+                SettingChoice.Theme -> TvChoiceDialog(
+                    title = "主题色",
+                    options = ThemePalettes,
+                    label = { it.label },
+                    selected = AppPalette.current,
+                    dot = { it.brand },
+                    hint = "只换强调色与背景氛围，文字层级和中性底色保持不变。",
+                    onPick = { AppPalette.select(it.id) },
+                    onDismiss = dismiss
+                )
+
+                SettingChoice.VideoTier -> TvChoiceDialog(
+                    title = "视频缓存容量上限",
+                    options = Prefs.VideoCacheTier.values().toList(),
+                    label = { it.label },
+                    selected = videoTier,
+                    dot = null,
+                    hint = "只给看过的网盘内容留一份，看完的自动删，超出上限先清最久没看的。",
+                    onPick = { t ->
+                        val previous = Prefs.videoCacheTier
+                        if (previous != t) {
+                            Prefs.videoCacheTier = t
+                            videoTier = t
+                            // 降档（含关闭）要清空目录，占用数字跟着重读；都在 IO 线程做
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    VideoCache.applyTier(t.maxBytes, previous.maxBytes)
+                                    videoCache = VideoCache.usedBytes()
+                                }
+                            }
+                        }
+                    },
+                    onDismiss = dismiss
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 电视端的档位弹窗：一屏列完所有档位，OK 键选中即生效。
+ *
+ * 与首页来源/线路选择器同一形态（Compose Dialog + tvMoveFocus 抢焦，规范 R1/R5）：
+ * 独立窗口天然把焦点关在弹窗里，不会逃逸到下面的设置行，Back 也由窗口自己处理。
+ * 默认焦点落在当前档位，不是列表第一格。
+ */
+@Composable
+private fun <T> TvChoiceDialog(
+    title: String,
+    options: List<T>,
+    label: (T) -> String,
+    selected: T,
+    dot: ((T) -> Color)?,
+    hint: String?,
+    onPick: (T) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val firstFocus = remember { FocusRequester() }
+    val focusIndex = options.indexOfFirst { it == selected }.coerceAtLeast(0)
+    LaunchedEffect(Unit) {
+        // 等一帧：Dialog 内容要先组合完成，requester 才挂得上
+        withFrameNanos { }
+        tvMoveFocus(firstFocus)
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        BoxWithConstraints(
+            Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            val dialogWidth = (maxWidth * 0.4f).coerceIn(420.dp, 760.dp)
+            Column(
+                Modifier
+                    .width(dialogWidth)
+                    .clip(Radius.Lg)
+                    .background(AppColors.SurfaceHi)
+                    .padding(26.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(title, style = MaterialTheme.typography.titleLarge, color = TvText.Title)
+                options.forEachIndexed { index, option ->
+                    TvChoiceOption(
+                        text = label(option),
+                        selected = option == selected,
+                        dot = dot?.invoke(option),
+                        modifier = if (index == focusIndex) Modifier.focusRequester(firstFocus) else Modifier,
+                        onClick = { onPick(option) }
+                    )
+                }
+                if (hint != null) {
+                    Text(hint, style = MaterialTheme.typography.labelMedium, color = TvText.Meta)
+                }
+            }
+        }
+    }
+}
+
+/** 弹窗里的档位行：整行可聚焦，焦点态白边 + 轻微放大，选中档位在右侧打点 */
+@Composable
+private fun TvChoiceOption(
+    text: String,
+    selected: Boolean,
+    dot: Color?,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale by animateFloatAsState(if (focused) 1.015f else 1f, tween(Motion.FAST), label = "tv_choice_option")
+    Row(
+        Modifier
+            .zIndex(if (focused) 1f else 0f)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .then(modifier)
+            .fillMaxWidth()
+            .clip(Radius.Md)
+            .background(if (focused) Color.White else if (selected) AppColors.Brand.copy(alpha = 0.28f) else AppColors.Bg.copy(alpha = 0.5f))
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (dot != null) {
+            Box(
+                Modifier
+                    .size(22.dp)
+                    .background(dot, CircleShape)
+            )
+            Spacer(Modifier.width(12.dp))
+        }
+        Text(
+            text,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+            color = when {
+                focused -> Color.Black
+                selected -> TvText.Title
+                else -> TvText.Body
+            },
+            fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Normal
+        )
+        if (selected) {
+            Text(
+                if (focused) "确定" else "当前",
+                style = MaterialTheme.typography.labelLarge,
+                color = if (focused) Color.Black else AppColors.Brand
+            )
         }
     }
 }

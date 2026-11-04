@@ -54,6 +54,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Alignment
@@ -90,6 +91,7 @@ import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
+import com.tabbit.myvidhub.ui.FocusPulse
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.ReturnSpot
 import com.tabbit.myvidhub.ui.StandTarget
@@ -108,6 +110,7 @@ import com.tabbit.myvidhub.ui.theme.themeSeamFade
 import com.tabbit.myvidhub.ui.theme.TvText
 import com.tabbit.myvidhub.ui.theme.Radius
 import com.tabbit.myvidhub.ui.theme.Motion
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -222,7 +225,8 @@ fun TvHomeScreen(
     // 订阅落在计算块里，滚动时顶栏子树只在真正跨过首屏那一次才重组，不会像直接读连续量那样把整页拖进滚动。
     val topBarVisible = remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
 
-    // Ken Burns 只在列表静止时跑：滚动帧本身就吃紧，再叠一层全屏缩放重绘必然掉帧。
+    // Ken Burns 只在「没人动」的时候跑：滚动帧本身就吃紧，再叠一层全屏缩放重绘必然掉帧。
+    // 这里只覆盖列表滚动；焦点换卡那一段（列表并不滚动）由 [FocusPulse] 在 TvHero 内部补上。
     // isScrollInProgress 只在滚动开始/结束各变一次，读到它的只有 hero item 这一块。
     val heroZoomPaused by remember { derivedStateOf { listState.isScrollInProgress } }
 
@@ -293,6 +297,9 @@ fun TvHomeScreen(
         }
     }
 
+    /** [goTopBar] 那趟交棒的协程：补跳还挂着就来新按键时要靠它作废旧的 */
+    var pendingTopBarHandover by remember { mutableStateOf<Job?>(null) }
+
     /**
      * Hero（含空态 CTA）按 ↑ 交棒给顶栏。
      *
@@ -303,7 +310,10 @@ fun TvHomeScreen(
      */
     val goTopBar: () -> Unit = goTopBar@{
         revealTopBar()
-        scope.launch {
+        // 上一趟交棒的「180ms 补跳」还挂着就来了新按键：旧的必须先作废，
+        // 否则补跳会叠在新按键上，焦点跳两格或回弹，快速连按 ↑ 时读作「卡断掉帧」。
+        pendingTopBarHandover?.cancel()
+        pendingTopBarHandover = scope.launch {
             withFrameNanos { }
             if (tvMoveFocus(sourcePillFocus, syncButtonFocus)) return@launch
             delay(180)
@@ -738,7 +748,7 @@ internal fun TvHero(
     heroIndex: Int,
     heroTotal: Int,
     progress: State<Float>,
-    /** 列表正在滚动：暂停 Ken Burns，别让全屏缩放和滚动抢同一帧的绘制时间 */
+    /** 列表正在滚动：暂停 Ken Burns，别让全屏缩放和滚动抢同一帧的绘制时间。焦点换卡那一段由 [FocusPulse] 补上 */
     paused: Boolean,
     playFocusRequester: FocusRequester,
     onPlay: () -> Unit,
@@ -767,15 +777,24 @@ internal fun TvHero(
     }
 
     // Ken Burns：只用 Animatable 而不用 rememberInfiniteTransition ——
-    // 后者没法暂停。列表一滚动就停，滚动时不再每帧缩放整屏大图；
-    // 缩放值只在 graphicsLayer 的 lambda 里读取，走 draw 阶段，Composable 不重组。
+    // 后者没法暂停。缩放值只在 graphicsLayer 的 lambda 里读取，走 draw 阶段，Composable 不重组。
+    //
+    // 「让路」有两个触发：列表滚动、焦点上下左右换卡。后者并不会滚动列表，
+    // 但卡片放大动画正和这层全屏缩放抢同一帧 —— 弱盒子上「一按方向键就掉帧」的元凶就是它。
+    // 两个信号合成一个布尔喂给 snapshotFlow：暂停只取消动画协程，不惊动 hero 的重组；
+    // 冻住时 zoom 停在当前值，安定后从那儿接着走（和原来的 LaunchedEffect(paused) 语义一致）。
     val zoom = remember { Animatable(1.02f) }
     LaunchedEffect(paused) {
-        if (paused) return@LaunchedEffect
-        val legMs = (HERO_DWELL_SECONDS * 2600).toInt()
-        while (true) {
-            zoom.animateTo(1.075f, tween(legMs, easing = LinearEasing))
-            zoom.animateTo(1.02f, tween(legMs, easing = LinearEasing))
+        var leg: Job? = null
+        snapshotFlow { paused || FocusPulse.movingState.value }.collect { busy ->
+            leg?.cancel()
+            leg = if (busy) null else launch {
+                val legMs = (HERO_DWELL_SECONDS * 2600).toInt()
+                while (true) {
+                    zoom.animateTo(1.075f, tween(legMs, easing = LinearEasing))
+                    zoom.animateTo(1.02f, tween(legMs, easing = LinearEasing))
+                }
+            }
         }
     }
 

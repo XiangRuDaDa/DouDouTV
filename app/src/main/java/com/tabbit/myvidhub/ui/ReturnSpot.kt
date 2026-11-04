@@ -1,9 +1,13 @@
 package com.tabbit.myvidhub.ui
 
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
@@ -70,6 +74,36 @@ class StandTarget {
     var requester: FocusRequester? = null
 }
 
+/**
+ * 焦点活动脉冲：卡片焦点态一翻就打点（见 [cardStand] 的 onFocusChanged）。
+ *
+ * 为什么需要它：移动焦点时列表并不在滚动，只看 [LazyListState.isScrollInProgress] 的「让路」
+ * 判断整个失效 —— hero 的 Ken Burns 全屏缩放正好和卡片放大动画撞在同一帧，
+ * 表现就是「按方向键就掉帧」。
+ *
+ * [movingState] 在每次打点后保持 [QUIET_MS] 毫秒（覆盖卡片 120ms 的放大动画加余量），
+ * 连续按方向键会不断续期。写状态用主线程 Handler 定时复位，不需要协程作用域，
+ * 也就不会把复位绑死在某个正在组合的元件上。
+ */
+object FocusPulse {
+    private const val QUIET_MS = 260L
+
+    private val moving = mutableStateOf(false)
+
+    /** 还有人在动（焦点刚换过卡） */
+    val movingState: State<Boolean> get() = moving
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val settle = Runnable { moving.value = false }
+
+    /** 卡片焦点态翻转时调用 */
+    fun flip() {
+        moving.value = true
+        mainHandler.removeCallbacks(settle)
+        mainHandler.postDelayed(settle, QUIET_MS)
+    }
+}
+
 /** 列表（纵向/横向都用它）：按记录里的位置起滚，之后的滚动实时记回去。 */
 @Composable
 fun ReturnSpot.listState(key: String): LazyListState {
@@ -123,6 +157,8 @@ fun ReturnSpot.cardStand(
         .focusRequester(requester)
         .onFocusChanged {
             if (it.hasFocus) {
+                // 焦点一落卡就打点，让 hero 的全屏 Ken Burns 让路（见 [FocusPulse]）
+                FocusPulse.flip()
                 saveStand(pageKey, ReturnSpot.cardSpot(rowKey, mediaId))
                 target.requester = requester
             }

@@ -8,10 +8,15 @@ import java.io.File
  * 应用里真正会落盘、也真正能被清掉的那部分缓存。
  *
  * 这文件取代了原来挂在 [com.tabbit.myvidhub.player.PlayerFactory] 上的「播放缓存」口径：
- * 播放器已永久禁用 CacheDataSource（OkHttp 的 Range 拦截与 SimpleCache 的片段记账不兼容，
- * 见 PlayerFactory 里的注释），SimpleCache 因此从未被创建，`media_cache` 目录也从未被写过，
- * 设置页那行「当前占用」一直是 0 KB。磁盘实测下来唯一稳定长大的部分是 Coil 的封面磁盘缓存
- * （手机上 image_cache 260MB / 整个 cacheDir 286MB），所以面板改按这个口径统计。
+ * 当年播放器禁用了 CacheDataSource（OkHttp 的 Range 拦截与 SimpleCache 的片段记账不兼容），
+ * SimpleCache 从未被创建，`media_cache` 目录也从未被写过，设置页那行「当前占用」一直是 0 KB。
+ * 磁盘实测下来唯一稳定长大的部分是 Coil 的封面磁盘缓存（手机上 image_cache 260MB /
+ * 整个 cacheDir 286MB），所以面板改按这个口径统计。
+ *
+ * 现在网盘直链那一份视频缓存另有心跳，见 [VideoCache]（`files/video-cache`，带 SQLite 索引，
+ * 容量档与清空都在设置页的「视频缓存」卡片上），不并入这里：两者的清除路径不能共用 ——
+ * 视频缓存必须整体 release 再删目录，图片缓存必须走 Coil 自己的 clear。
+ * 这里继续只清 `media_cache`：那是老版本 SimpleCache 的目录名，存量机器上可能还有残留字节。
  *
  * **不参与清除**的部分，删了是坏功能而不是省空间：
  * - `cacheDir/spiders`、`cacheDir/spider_opt`、`cacheDir/danMugo_*.so`：TVBox 壳和解出的 so，

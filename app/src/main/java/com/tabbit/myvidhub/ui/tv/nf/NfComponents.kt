@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.tabbit.myvidhub.core.Prefs
@@ -130,6 +131,9 @@ fun Modifier.nfFocusRoute(
 ): Modifier {
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
+    // 上一趟交棒的「180ms 补跳」还挂着就来了新按键：旧的必须先作废。
+    // 否则补跳会叠在新按键上，焦点跳两格或回弹，快速连按时读作「卡断掉帧」。
+    val pendingHandover = remember { mutableStateOf<Job?>(null) }
     return onPreviewKeyEvent { e ->
         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
         val isUp = e.key.nativeKeyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
@@ -137,16 +141,17 @@ fun Modifier.nfFocusRoute(
         if (!isUp && !isDown) return@onPreviewKeyEvent false
         val requested = if (isUp) up else down
         val direction = if (isUp) FocusDirection.Up else FocusDirection.Down
+        pendingHandover.value?.cancel()
         if (requested === FocusRequester.Cancel) return@onPreviewKeyEvent true // 这一向到头，别让焦点飞出屏
         if (requested == null) {
             // 这一向不设显式落点：等一帧自己调默认几何搜索，别把键原样交回去
-            scope.launch {
+            pendingHandover.value = scope.launch {
                 withFrameNanos { }
                 runCatching { focusManager.moveFocus(direction) }
             }
             return@onPreviewKeyEvent true
         }
-        scope.launch { nfHandover(requested, focusManager, direction) }
+        pendingHandover.value = scope.launch { nfHandover(requested, focusManager, direction) }
         true
     }
 }
@@ -466,31 +471,56 @@ fun NfPosterCard(
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .then(if (fillCell) Modifier.aspectRatio(2f / 3f) else Modifier.height(width * 1.5f))
-                .background(AppColors.SurfaceHi)
-        ) {
-            PosterArt(model = item.posterUrl.ifBlank { item.backdropUrl }, contentDescription = item.title) {
-                PosterFallback(
-                    title = item.title,
-                    subtitle = item.year.takeIf { it > 0 }?.toString().orEmpty(),
-                    titleFontSize = MaterialTheme.typography.titleMedium.fontSize,
-                    subtitleFontSize = MaterialTheme.typography.bodySmall.fontSize
-                )
-            }
-        }
-        Text(
-            item.title,
-            color = TvText.Section,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+        // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组卡片外壳
+        // （zIndex / 描边 / 抬起都跟着变），参数没变时内容体整块被跳过，图片和文字不跟着重排。
+        NfPosterBody(
+            model = item.posterUrl.ifBlank { item.backdropUrl },
+            title = item.title,
+            subtitle = item.year.takeIf { it > 0 }?.toString().orEmpty(),
+            fillCell = fillCell,
+            width = width
         )
     }
+}
+
+/**
+ * [NfPosterCard] 的内容体：图 + 标题。
+ *
+ * 参数刻意只有 [String] / [Boolean] / [Dp] 这类稳定原语，这样它是可跳过的 ——
+ * 焦点态翻转只重组外壳，这块原样复用。
+ */
+@Composable
+private fun NfPosterBody(
+    model: String,
+    title: String,
+    subtitle: String,
+    fillCell: Boolean,
+    width: Dp,
+) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .then(if (fillCell) Modifier.aspectRatio(2f / 3f) else Modifier.height(width * 1.5f))
+            .background(AppColors.SurfaceHi)
+    ) {
+        PosterArt(model = model, contentDescription = title) {
+            PosterFallback(
+                title = title,
+                subtitle = subtitle,
+                titleFontSize = MaterialTheme.typography.titleMedium.fontSize,
+                subtitleFontSize = MaterialTheme.typography.bodySmall.fontSize
+            )
+        }
+    }
+    Text(
+        title,
+        color = TvText.Section,
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+    )
 }
 
 /**

@@ -5,6 +5,7 @@ import android.util.Log
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.tabbit.myvidhub.core.Prefs
+import com.tabbit.myvidhub.core.VideoCache
 import com.tabbit.myvidhub.data.db.AppDatabase
 import com.tabbit.myvidhub.data.image.PicHeaderInterceptor
 import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
@@ -17,6 +18,8 @@ class MyVidHubApp : Application(), ImageLoaderFactory {
         super.onCreate()
         instance = this
         Prefs.init(this)
+        // 网盘直链的磁盘缓存只记一个 applicationContext，真正的 SimpleCache 到首次取数才建
+        VideoCache.init(this)
 
         // 记录未捕获异常：MIUI 有时会吞掉 crash 缓冲区日志，
         // 这里额外写一份到应用私有目录，方便排查"闪退但没有崩溃日志"的问题。

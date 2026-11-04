@@ -1,5 +1,6 @@
 package com.tabbit.myvidhub.player
 
+import androidx.media3.common.C
 import androidx.media3.common.FileTypes
 import androidx.media3.common.util.UnstableApi
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -34,8 +35,14 @@ internal class PlaybackNormalizer {
     /**
      * 某个 URL 的归一化结论。
      * [prefixBytes] = 0 表示文件头就是容器（正常文件，不需要平移）。
+     * [totalBytes] = 网盘文件总长，只有走过 [StreamSpaceProbe] 探测的直链才知道，未探到是 LENGTH_UNSET。
      */
-    data class Plan(val prefixBytes: Long, val container: Container, val evidence: String) {
+    data class Plan(
+        val prefixBytes: Long,
+        val container: Container,
+        val evidence: String,
+        val totalBytes: Long = C.LENGTH_UNSET.toLong()
+    ) {
         val shifted: Boolean get() = prefixBytes > 0
     }
 

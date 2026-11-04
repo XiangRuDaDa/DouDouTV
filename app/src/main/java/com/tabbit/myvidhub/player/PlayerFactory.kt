@@ -5,8 +5,11 @@ import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import com.tabbit.myvidhub.core.LogGate
+import com.tabbit.myvidhub.core.VideoCache
 import androidx.media3.common.C
 import androidx.media3.common.FileTypes
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -36,8 +39,11 @@ import okhttp3.Request
 import java.io.EOFException
 import java.io.IOException
 import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 播放器工厂 —— 手机端与电视端各自一套参数。
@@ -57,9 +63,11 @@ import java.util.concurrent.TimeUnit
  *      一次限速窗口实测能到 66 秒，存粮薄就必穿）；
  *   4. maxBufferMs 与 targetBufferBytes 同步放大，防止缓冲到顶后主动停止预读。
  *
- * 播放器不使用磁盘缓存：CacheDataSource 与 Range 拦截器不兼容（见下面的 createXXXPlayer），
- * 所以这里没有任何 SimpleCache 生命周期，设置页的缓存面板统计的是图片缓存，见
- * [com.tabbit.myvidhub.core.AppCache]。
+ * 磁盘缓存只对被 [com.tabbit.myvidhub.core.VideoCache.bind] 登记过的网盘直链生效
+ * （TVBox 网盘直链），判据见 [VideoCacheDataSource]；Emby 直链、HLS/DASH 分片、容量档关闭时
+ * 拿到的都是裸 OkHttpDataSource，取数路径与不缓存时逐字节一致。
+ * 缓存这一层的任何异常都只让缓存失效，不把正在播的一集拖下水。
+ * 设置页的「视频缓存」卡片读写这一层，图片缓存另见 [com.tabbit.myvidhub.core.AppCache]。
  * 失效状态码（404 / 403 / 412）在 HTTP 层的每个响应出口统一转成带中文提示的 IOException，
  * 让「分享链接过期 / Cookie 失效」显示成一句能读懂的话，而不是无限转圈。
  */
@@ -81,21 +89,6 @@ object PlayerFactory {
      */
     @Volatile
     var traceUrl: String = ""
-
-    /**
-     * 分块「开口耗时」取证：只对走换连接通道的网盘大文件打，超过 800ms 才记一行。
-     *
-     * 每个 32MB 块的边界 = 一次重连 + 一次首字节等待。这笔开销在「8.7 秒传完一块」的
-     * 传输节奏里到底占多少，直接决定该不该继续每块换连接、以及块要不要调大；
-     * 没这行日志就只能靠猜（网盘 4K 片「一会一加载」正在查的就是这个）。
-     */
-    private fun logChunkOpen(startAt: Long, request: Request, rotated: Boolean) {
-        if (!rotated || request.header("Range") == null) return
-        val cost = SystemClock.elapsedRealtime() - startAt
-        if (cost > 800) {
-            Log.w("PlayerHttp", "分块开口 ${cost}ms（重连+首字节） ${request.header("Range")}")
-        }
-    }
 
     /** 加载失败的重试次数（与之前 DefaultLoadErrorHandlingPolicy(8) 保持一致） */
     private const val MIN_LOAD_RETRY_COUNT = 8
@@ -155,6 +148,30 @@ object PlayerFactory {
                 request.newBuilder().header("Connection", "close").build()
             else request
 
+        // ===== 【临时取证】块时账：定位完随 PlayTrace 一起删 =====
+        // 「后半段一会一加载」只剩两种成因，靠猜分不开：
+        //   距上块（整块节奏）一路变大 → 限速是按直链/令牌累计的，每块换连接也治不了，
+        //                               只能把快的时候先囤下来（预读落盘）；
+        //   距上块基本稳定 → 是按连接累计限速，换连接已治好，卡是存粮被码率吃穿，
+        //                   该动的是缓冲门槛与分块大小；
+        //   开口 占掉距上块的大头 → Connection: close 的手续费太贵，该改成按需换连接。
+        // 32MB ÷ 距上块 就是实际下载速率，直接对「视频码率」那行的消费量。
+        // 只覆盖被切过通道的网盘大文件（45 分钟一集约 170 行），Emby 与 HLS 分片不打。
+        val lastChunkOpenAt = ConcurrentHashMap<String, Long>()
+        fun logChunk(startAt: Long, request: Request, response: okhttp3.Response, urlKey: String) {
+            val range = request.header("Range") ?: return
+            if (!rotateConnection.contains(urlKey)) return
+            val now = SystemClock.elapsedRealtime()
+            val previous = lastChunkOpenAt.put(urlKey, now)
+            val gap = if (previous == null) -1L else now - previous
+            Log.w(
+                "PlayerHttp",
+                "块账 $range 开口=${now - startAt}ms 距上块=${gap}ms " +
+                    "块=${(response.body?.contentLength() ?: -1L) / 1048576}MB 码=${response.code} " +
+                    "换连接=${request.header("Connection") != null} 协议=${response.protocol}"
+            )
+        }
+
         // ===== 失效状态码的统一出口 =====
         // Media3 对被拒的响应只给一个 ERROR_CODE_IO_BAD_HTTP_STATUS 错误码，用户看不懂；
         // 在 OkHttp 层换成带中文提示的 IOException，ExoPlayer 会把它放进 PlaybackException.message，
@@ -211,6 +228,14 @@ object PlayerFactory {
                 val original = chain.request()
                 val urlKey = original.url.toString()
 
+                // 走磁盘缓存的直链：Range 已经是 [StreamSpaceDataSource] 按流坐标算好的
+                // 网盘文件区间，这里再平移一次就自己给自己挖洞，所以只做两件事 ——
+                // 每块换新连接、失效状态码转中文。块时账由 StreamSpaceDataSource 自己打。
+                if (VideoCache.keyFor(urlKey) != null) {
+                    val cached = original.newBuilder().header("Connection", "close").build()
+                    return@Interceptor failOnDeadStatus(cached, chain.proceed(cached))
+                }
+
                 // 已知带伪装头：请求坐标整体右移前缀字节数
                 normalizer.planOf(urlKey)?.takeIf { it.shifted }?.let { plan ->
                     val shifted = freshConnectionPerChunk(
@@ -219,7 +244,7 @@ object PlayerFactory {
                     )
                     val openAt = SystemClock.elapsedRealtime()
                     val shiftedResponse = chain.proceed(shifted)
-                    logChunkOpen(openAt, shifted, rotateConnection.contains(urlKey))
+                    logChunk(openAt, shifted, shiftedResponse, urlKey)
                     return@Interceptor failOnDeadStatus(shifted, shiftedResponse)
                 }
 
@@ -238,7 +263,7 @@ object PlayerFactory {
                 }
                 val openAt = SystemClock.elapsedRealtime()
                 var response = chain.proceed(request)
-                logChunkOpen(openAt, request, rotateConnection.contains(urlKey))
+                logChunk(openAt, request, response, urlKey)
                 val code = response.code
                 val cl = response.body?.contentLength() ?: -1L
 
@@ -298,7 +323,10 @@ object PlayerFactory {
                                 "改走 Range 通道：${retry.header("Range")}，" +
                                 "分块换连接=$observedProtocol"
                         )
-                        return@Interceptor failOnDeadStatus(retry, chain.proceed(retry))
+                        val retryOpenAt = SystemClock.elapsedRealtime()
+                        val retryResponse = chain.proceed(retry)
+                        logChunk(retryOpenAt, retry, retryResponse, urlKey)
+                        return@Interceptor failOnDeadStatus(retry, retryResponse)
                     }
                 }
                 // ===== 404 / 403 / 412 出口 =====
@@ -314,12 +342,22 @@ object PlayerFactory {
             httpFactory.setDefaultRequestProperties(headers)
         }
 
-        // ===== 永远禁用 CacheDataSource =====
-        // 原因：OkHttp Interceptor 会拦截 ExoPlayer 的 Range 请求并改写（首次探测、固定块等），
-        // 这与 CacheDataSource 内部的缓存片段 bookkeeping 逻辑不兼容，
-        // 导致 open() 阶段直接抛 READ_POSITION_OUT_OF_RANGE。
-        // 此 bug 影响所有来源（Emby 本地直链、夸克/百度云盘 CDN），
-        // 因此直接使用裸 OkHttpDataSource，跳过 CacheDataSource。
+        // ===== 磁盘缓存 =====
+        // 伪装前缀的平移从拦截器上移到这里的数据源层（[StreamSpaceDataSource]），于是
+        // Media3 的区间记账和播放器的 seek 只剩「流坐标」一套坐标系 —— 以前两套坐标系叠在
+        // 一起必抛 READ_POSITION_OUT_OF_RANGE，那正是这个仓库禁用缓存的原因。
+        // 走不走缓存只看一条判据：这条 URL 有没有被登记过。Emby 直链、m3u8 分片、
+        // 容量档关闭时都查不到 key，这里给出的仍然是裸 OkHttpDataSource，取数路径一字节不变。
+        // 预读器只在播放器不缺数据时开工（busy 看 STATE_BUFFERING），详见 [VideoCacheFiller]。
+        val pipeline = CloudCachePipeline(client, headers, normalizer, httpFactory, chunkSize)
+        val buffering = AtomicBoolean(false)
+        val playingUrl = AtomicReference<String?>()
+        val filler = VideoCacheFiller(pipeline, chunkSize) { buffering.get() }
+        val dataSourceFactory = VideoCacheDataSource.Factory(pipeline, httpFactory) { url, streamPos ->
+            playingUrl.set(url)
+            filler.onPlayerMiss(url, streamPos)
+        }
+
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 // minBufferMs 是「常态下始终保持 ahead 这么多秒」的存粮，不是起播门槛（起播见下面两项）。
@@ -340,7 +378,7 @@ object PlayerFactory {
 
         val errorPolicy = ChunkEofRetryPolicy()
         val mediaSourceFactory =
-            DefaultMediaSourceFactory(httpFactory, ContainerExtractorsFactory(normalizer))
+            DefaultMediaSourceFactory(dataSourceFactory, ContainerExtractorsFactory(normalizer))
                 .setLoadErrorHandlingPolicy(errorPolicy)
 
         // 自定义 RenderersFactory：过滤掉 ImageRenderer。
@@ -358,7 +396,7 @@ object PlayerFactory {
             ).filter { it !is ImageRenderer }.toTypedArray()
         }
 
-        return ExoPlayer.Builder(context)
+        val player = ExoPlayer.Builder(context)
             .setRenderersFactory(renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
@@ -366,7 +404,45 @@ object PlayerFactory {
             .setSeekForwardIncrementMs(10_000)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
-            .also { attachDiagnostics(it) }
+
+        // 一个播放器实例一份预读会话；释放必须走 [release]，否则缓存引用计数减不下来，
+        // 设置页清空时只能退化成逐条删资源（SQLite 与目录都留着）。
+        // 计数只在真开了容量档时加：关档也计的话，设置页会误判「有播放器在用」而把新档位推后生效。
+        val useRef = VideoCache.enabled
+        if (useRef) VideoCache.beginUse()
+        player.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                val bufferingNow = state == Player.STATE_BUFFERING
+                buffering.set(bufferingNow)
+                // 只有真缺数据时才砍在飞的预读块；普通重开口（读 moov 等）不算
+                if (bufferingNow) filler.onPlayerBuffering()
+                if (state != Player.STATE_ENDED) return
+                // 看完自动失效，这是容量档敢开大的前提；中途退出保留，交给 LRU 兜。
+                // 停预读与删缓存的顺序由 onItemEnded 自己排，这里不能直接删。
+                playingUrl.get()?.let { filler.onItemEnded(it) }
+            }
+        })
+        attachDiagnostics(player)
+        sessions[player] = CacheSession(filler, useRef)
+        return player
+    }
+
+    /** 播放器 → 它的预读会话。用 WeakHashMap：万一哪个界面漏调 [release]，不至于一直拽住 */
+    private val sessions = Collections.synchronizedMap(WeakHashMap<ExoPlayer, CacheSession>())
+
+    private class CacheSession(val filler: VideoCacheFiller, val useRef: Boolean)
+
+    /**
+     * 释放播放器：先停预读线程、放掉缓存引用计数，再交给 ExoPlayer 自己收尾。
+     * Activity 请调这里，不要再直接 `player.release()`（那样预读线程还在跑，缓存引用也减不下来）。
+     * 传 null 什么都不做，与调用点原来的 `player?.release()` 语义一致。
+     */
+    fun release(player: ExoPlayer?) {
+        if (player == null) return
+        val session = sessions.remove(player)
+        session?.filler?.cancel()
+        if (session?.useRef == true) VideoCache.endUse()
+        player.release()
     }
 
     /**
@@ -379,7 +455,61 @@ object PlayerFactory {
      */
     @UnstableApi
     private fun attachDiagnostics(player: ExoPlayer) {
+        // 【临时取证】卡顿现场：谁进缓冲、卡了多久、当时手里还剩多少存粮
+        var lastState = Player.STATE_IDLE
+        var bufferingSince = 0L
+        var videoBitrateBps = 0L
         player.addAnalyticsListener(object : AnalyticsListener {
+
+            /**
+             * 「播半集开始一会一加载」要的正是这条线：每次卡住时的存粮与时长。
+             * 存粮还很足却还在转 → 数据到了解不开（解析/解码问题）；
+             * 存粮掉到 0 → 下载跟不上消费，拿块账的「32MB ÷ 距上块」跟下面这行的码率对。
+             */
+            override fun onPlaybackStateChanged(
+                eventTime: AnalyticsListener.EventTime,
+                state: Int
+            ) {
+                if (state == Player.STATE_BUFFERING && lastState == Player.STATE_READY) {
+                    bufferingSince = eventTime.realtimeMs
+                    Log.w(
+                        "PlayerDiag",
+                        "卡顿进缓冲 存粮=${eventTime.totalBufferedDurationMs}ms " +
+                            "pos=${eventTime.currentPlaybackPositionMs} " +
+                            "码率=${if (videoBitrateBps > 0) "${videoBitrateBps / 1000}kbps" else "未知"}"
+                    )
+                } else if (state == Player.STATE_READY && lastState == Player.STATE_BUFFERING) {
+                    val stuck =
+                        if (bufferingSince == 0L) -1L else eventTime.realtimeMs - bufferingSince
+                    Log.w(
+                        "PlayerDiag",
+                        "恢复播放 卡了=${stuck}ms 出缓冲存粮=${eventTime.totalBufferedDurationMs}ms"
+                    )
+                    bufferingSince = 0L
+                }
+                lastState = state
+            }
+
+            override fun onTracksChanged(
+                eventTime: AnalyticsListener.EventTime,
+                tracks: Tracks
+            ) {
+                videoBitrateBps = tracks.groups
+                    .firstOrNull { it.type == C.TRACK_TYPE_VIDEO && it.isSelected }
+                    ?.let { group ->
+                        (0 until group.length)
+                            .mapNotNull { runCatching { group.getTrackFormat(it).bitrate.toLong() }.getOrNull() }
+                            .filter { it > 0 }
+                            .maxOrNull() ?: 0L
+                    } ?: 0L
+                if (videoBitrateBps > 0) {
+                    Log.w(
+                        "PlayerDiag",
+                        "视频码率 ${videoBitrateBps / 1000}kbps ≈ 每秒吃 ${videoBitrateBps / 8 / 1024}KB"
+                    )
+                }
+            }
+
             override fun onLoadError(
                 eventTime: AnalyticsListener.EventTime,
                 loadEventInfo: LoadEventInfo,

@@ -483,7 +483,7 @@ class TvPlayerActivity : ComponentActivity() {
                 }
             }
             // 先释放旧 player（如果有）再创建新的 —— SimpleCache 单例只能有一个引用
-            player?.release()
+            PlayerFactory.release(player)
             baseHeaders = headers
             currentPlayHeaders = headers
             player = newTvPlayer(headers)
@@ -545,7 +545,7 @@ class TvPlayerActivity : ComponentActivity() {
             val mergedHeaders = baseHeaders + resolved.headers
             val needRebuild = mergedHeaders != currentPlayHeaders
             val p = if (needRebuild) {
-                player?.release()
+                PlayerFactory.release(player)
                 player = null
                 currentPlayHeaders = mergedHeaders
                 val np = newTvPlayer(mergedHeaders)
@@ -893,7 +893,7 @@ class TvPlayerActivity : ComponentActivity() {
         // 解析回来那一步还会摸到已释放的实例和已 detach 的 PlayerView
         workScope.cancel()
         saveProgress(force = true)
-        player?.release()
+        PlayerFactory.release(player)
         player = null
         super.onDestroy()
     }

@@ -22,6 +22,7 @@ object Prefs {
     private const val KEY_SOURCE_LAST_SYNC = "source_last_sync_"
     private const val KEY_SEARCH_HISTORY = "search_history_list"
     private const val KEY_PINYIN_VERSION = "pinyin_version"
+    private const val KEY_VIDEO_CACHE_TIER = "video_cache_tier"
     private const val KEY_THEME_ID = "theme_id"
 
     /** 缩略图尺寸三档 */
@@ -56,6 +57,32 @@ object Prefs {
 
     /** TV 端布局风格的两个取值；默认 NETFLIX，让新那套在真机上先被看到 */
     enum class TvLayout { CLASSIC, NETFLIX }
+
+    /**
+     * 网盘直链磁盘缓存的容量档。
+     *
+     * 默认关闭：这一档决定的是「往 filesDir 里写多少视频字节」，
+     * 打开后看电影会稳定占用几百 MB 存储，必须由用户自己选。
+     * 降档（含改成关闭）会清空整个缓存目录，见 [VideoCache.applyTier]。
+     */
+    var videoCacheTier: VideoCacheTier
+        get() {
+            val name = sp.getString(KEY_VIDEO_CACHE_TIER, VideoCacheTier.OFF.name)
+            return runCatching { VideoCacheTier.valueOf(name.orEmpty()) }.getOrDefault(VideoCacheTier.OFF)
+        }
+        set(value) {
+            sp.edit().putString(KEY_VIDEO_CACHE_TIER, value.name).apply()
+        }
+
+    /** 视频缓存容量档；maxBytes 是「整个目录」的上限，不是单集的上限 */
+    enum class VideoCacheTier(val label: String, val maxBytes: Long) {
+        OFF("关闭", 0L),
+        MB256("256 MB", 256L * 1024 * 1024),
+        MB512("512 MB", 512L * 1024 * 1024),
+        GB1("1 GB", 1024L * 1024 * 1024),
+        GB2("2 GB", 2048L * 1024 * 1024),
+        GB4("4 GB", 4096L * 1024 * 1024)
+    }
 
     private lateinit var sp: SharedPreferences
 

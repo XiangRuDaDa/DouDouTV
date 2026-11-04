@@ -129,6 +129,9 @@ class PhonePlayerActivity : ComponentActivity() {
     /** 装载转圈：平台 ProgressBar，与 PlayerView 缓冲时那个是同款控件 */
     private var loadingBar: View? = null
 
+    /** 解析期由点击强行叫出的控制条：首帧上屏后撤掉；用户自己开着的控制条不受影响 */
+    private var controllerShownWhileLoading = false
+
     /**
      * 装载代数。每开始一次装载加一，解析回来后只对号入座：
      * 连点两下「下一集」会有两个解析在飞，晚到的那个不加闸就会把前一集的地址
@@ -393,6 +396,11 @@ class PhonePlayerActivity : ComponentActivity() {
         playerView?.setShowBuffering(
             if (loading) PlayerView.SHOW_BUFFERING_NEVER else PlayerView.SHOW_BUFFERING_WHEN_PLAYING
         )
+        if (!loading && controllerShownWhileLoading) {
+            // 解析期叫出的控制条不带自动隐藏（那会儿播放器还没建起来），出画了就该收回去
+            controllerShownWhileLoading = false
+            playerView?.hideController()
+        }
     }
 
     /** 更新底部播放暂停按钮文字 */
@@ -430,7 +438,17 @@ class PhonePlayerActivity : ComponentActivity() {
         var lastTapMs = 0L
 
         view.setOnTouchListener { v, event ->
-            val p = player ?: return@setOnTouchListener false
+            val p = player
+            if (p == null) {
+                // 解析直链的这几秒里播放器还是 null，而 PlayerView 自己的单击分支带了
+                // player == null 判空，于是点屏幕完全没反应、只剩转圈。这里手动把控制条叫出来，
+                // 至少让用户看到进度条和时间（此时是 00:00，按钮点下去是 no-op，不会崩）。
+                if (event.actionMasked == MotionEvent.ACTION_UP) {
+                    playerView?.showController()
+                    controllerShownWhileLoading = true
+                }
+                return@setOnTouchListener false
+            }
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downX = event.x
@@ -573,7 +591,7 @@ class PhonePlayerActivity : ComponentActivity() {
             if (gen != playGeneration) return@launch
 
             // 必须先释放旧 player 再创建新的 —— SimpleCache 单例同一时刻只能被一个 player 引用
-            player?.release()
+            PlayerFactory.release(player)
             player = null
 
             // baseHeaders 是本次播放会话的固定头（如 Emby 鉴权），后续切集时复用
@@ -756,7 +774,7 @@ class PhonePlayerActivity : ComponentActivity() {
             val needRebuild = mergedHeaders != currentPlayHeaders
             val p = if (needRebuild) {
                 // 切换了播放源（Cookie 等 headers 变化），必须重建播放器
-                player?.release()
+                PlayerFactory.release(player)
                 player = null
                 currentPlayHeaders = mergedHeaders
                 val np = PlayerFactory.createPhonePlayer(this@PhonePlayerActivity, mergedHeaders)
@@ -1182,7 +1200,7 @@ class PhonePlayerActivity : ComponentActivity() {
     override fun onDestroy() {
         saveProgress(force = true)
         playerView?.player = null
-        player?.release()
+        PlayerFactory.release(player)
         player = null
         super.onDestroy()
     }

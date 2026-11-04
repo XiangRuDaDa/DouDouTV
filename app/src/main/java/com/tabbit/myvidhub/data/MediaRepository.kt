@@ -19,6 +19,7 @@ import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
 import com.tabbit.myvidhub.data.tmdb.TmdbCache
 import com.tabbit.myvidhub.data.tmdb.TmdbClient
 import com.tabbit.myvidhub.core.Prefs
+import com.tabbit.myvidhub.core.VideoCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
@@ -380,18 +381,25 @@ class MediaRepository(private val context: Context) {
     suspend fun resolveTvBoxPlayUrl(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl =
         withContext(Dispatchers.IO) {
             val key = "${episode.id}|${episode.uri}"
-            RESOLVED_URLS[key]?.takeIf {
+            val resolved = RESOLVED_URLS[key]?.takeIf {
                 System.currentTimeMillis() - it.at < RESOLVED_URL_TTL_MS
             }?.let {
                 Log.w("SpiderProxy", "直链命中预热缓存，跳过解析 mediaId=${episode.id}")
-                return@withContext it.value
+                it.value
+            } ?: run {
+                val fresh = resolveTvBoxPlayUrlUncached(episode)
+                if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) {
+                    RESOLVED_URLS.entries.removeAll { System.currentTimeMillis() - it.value.at >= RESOLVED_URL_TTL_MS }
+                    if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) RESOLVED_URLS.clear()
+                }
+                RESOLVED_URLS[key] = CachedPlayUrl(fresh, System.currentTimeMillis())
+                fresh
             }
-            val resolved = resolveTvBoxPlayUrlUncached(episode)
-            if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) {
-                RESOLVED_URLS.entries.removeAll { System.currentTimeMillis() - it.value.at >= RESOLVED_URL_TTL_MS }
-                if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) RESOLVED_URLS.clear()
+            // 磁盘缓存的 key 要跨会话稳定：签名直链每次解析都换 token，不能当 key。
+            // 用「来源 + 库里唯一的 remoteId」；m3u8 与非 TVBox 来源由 VideoCache.bind 自己挡掉。
+            if (episode.seriesKey.startsWith("tvbox:")) {
+                VideoCache.bind(resolved.url, "tvbox:${episode.sourceId}:${episode.remoteId}")
             }
-            RESOLVED_URLS[key] = CachedPlayUrl(resolved, System.currentTimeMillis())
             resolved
         }
 

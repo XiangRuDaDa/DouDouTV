@@ -453,53 +453,78 @@ fun TvPosterCard(
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(0.dp)
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .then(if (fillCell) Modifier.aspectRatio(2f / 3f) else Modifier.height(width * 1.5f))
-                .background(AppColors.SurfaceHi)
-        ) {
-            // 无海报（TVBox 的 vod_pic 常是空串）或图是 404 死链时，用按片名哈希的渐变封面顶上，
-            // 不再出现一整排空灰块。
-            PosterArt(
-                model = item.posterUrl.ifBlank { item.backdropUrl },
-                contentDescription = item.title
-            ) {
-                PosterFallback(
-                    title = item.title,
-                    subtitle = posterMetaLine(item),
-                    titleFontSize = MaterialTheme.typography.titleMedium.fontSize,
-                    subtitleFontSize = MaterialTheme.typography.bodySmall.fontSize
-                )
-            }
-            if (progress > 0f) {
-                Box(
-                    Modifier
-                        .align(Alignment.BottomStart)
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .background(Color.Black.copy(alpha = 0.55f))
-                ) {
-                    Box(
-                        Modifier
-                            .fillMaxWidth(progress)
-                            .height(4.dp)
-                            .background(AppColors.Brand)
-                    )
-                }
-            }
-        }
-        Text(
-            item.title,
-            // 卡片标题不靠粗体压海报，靠 88% 白 + Medium 保持和正文同族
-            color = TvText.Section,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp)
+        // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组卡片外壳
+        // （zIndex / 描边都跟着变），参数没变时内容体整块被跳过，图片和文字不跟着重排。
+        // 一屏几十张卡，焦点一动就是两张卡的重组，这块不切开就白吃一遍布局。
+        TvPosterBody(
+            model = item.posterUrl.ifBlank { item.backdropUrl },
+            title = item.title,
+            metaLine = posterMetaLine(item),
+            progress = progress,
+            fillCell = fillCell,
+            width = width
         )
     }
+}
+
+/**
+ * 海报卡内容体：图 + 观看进度线 + 标题。
+ *
+ * 参数刻意只有 [String] / [Float] / [Boolean] / [Dp] 这类稳定原语，这样它是可跳过的 ——
+ * 焦点态翻转只重组外壳，这块原样复用。
+ */
+@Composable
+private fun TvPosterBody(
+    model: String,
+    title: String,
+    metaLine: String,
+    progress: Float,
+    fillCell: Boolean,
+    width: Dp,
+) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .then(if (fillCell) Modifier.aspectRatio(2f / 3f) else Modifier.height(width * 1.5f))
+            .background(AppColors.SurfaceHi)
+    ) {
+        // 无海报（TVBox 的 vod_pic 常是空串）或图是 404 死链时，用按片名哈希的渐变封面顶上，
+        // 不再出现一整排空灰块。
+        PosterArt(model = model, contentDescription = title) {
+            PosterFallback(
+                title = title,
+                subtitle = metaLine,
+                titleFontSize = MaterialTheme.typography.titleMedium.fontSize,
+                subtitleFontSize = MaterialTheme.typography.bodySmall.fontSize
+            )
+        }
+        if (progress > 0f) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .background(Color.Black.copy(alpha = 0.55f))
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(progress)
+                        .height(4.dp)
+                        .background(AppColors.Brand)
+                )
+            }
+        }
+    }
+    Text(
+        title,
+        // 卡片标题不靠粗体压海报，靠 88% 白 + Medium 保持和正文同族
+        color = TvText.Section,
+        style = MaterialTheme.typography.bodyMedium,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(horizontal = 8.dp, vertical = 7.dp)
+    )
 }
 
 /**
