@@ -38,6 +38,7 @@ import com.tabbit.myvidhub.ui.cardStand
 import com.tabbit.myvidhub.ui.components.ShimmerCard
 import com.tabbit.myvidhub.ui.listState
 import com.tabbit.myvidhub.ui.tv.HERO_DWELL_SECONDS
+import com.tabbit.myvidhub.ui.tv.rememberHeroAmbient
 import com.tabbit.myvidhub.ui.tv.TvContinueActionDialog
 import com.tabbit.myvidhub.ui.tv.TvHero
 import com.tabbit.myvidhub.ui.tv.TvHeroEmpty
@@ -93,6 +94,8 @@ fun NfHomeScreen(
     var heroIndex by remember { NfHomeHeroIndex }
     val heroProgress = remember { mutableFloatStateOf(0f) }
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
+    // 底图下缘取样色：渐隐遮罩和下面的收色带共用一个值，见旧首页 TvHomeScreen 的同名变量
+    val heroAmbient = rememberHeroAmbient(hero?.let { it.backdropUrl.ifBlank { it.posterUrl } }.orEmpty())
 
     val listState = ReturnSpot.listState(NfHomeKey)
     val scope = rememberCoroutineScope()
@@ -242,7 +245,8 @@ fun NfHomeScreen(
                             onPlay = { onPlay(hero) },
                             onDetail = { onDetail(hero.id) },
                             onNavigateUp = goNavBar,
-                            onButtonFocus = forgetCardStand
+                            onButtonFocus = forgetCardStand,
+                            ambient = heroAmbient
                         )
                     } else {
                         TvHeroEmpty(
@@ -260,7 +264,7 @@ fun NfHomeScreen(
                 }
             }
             if (hero != null) {
-                item(key = "hero_seam") { TvHeroSeamFade() }
+                item(key = "hero_seam") { TvHeroSeamFade(heroAmbient) }
             }
 
             item(key = "continue_title") {

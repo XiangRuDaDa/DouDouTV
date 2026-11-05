@@ -185,6 +185,11 @@ fun TvHomeScreen(
      */
     val heroProgress = remember { mutableFloatStateOf(0f) }
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
+    /**
+     * 当前这张底图下缘的取样色。在首页算一次，同时喂给 [TvHero] 的渐隐和 [TvHeroSeamFade]：
+     * 两条带子必须共用同一个色、同一路混色，各自取样的话换页中途接缝两侧会错开，线又露出来了。
+     */
+    val heroAmbient = rememberHeroAmbient(hero?.let { it.backdropUrl.ifBlank { it.posterUrl } }.orEmpty())
 
     val listState = ReturnSpot.listState(TvHomeKey)
     val scope = rememberCoroutineScope()
@@ -365,7 +370,8 @@ fun TvHomeScreen(
                         onPlay = { onPlay(hero) },
                         onDetail = { onDetail(hero.id) },
                         onNavigateUp = goTopBar,
-                        onButtonFocus = forgetCardStand
+                        onButtonFocus = forgetCardStand,
+                        ambient = heroAmbient
                     )
                 } else {
                     TvHeroEmpty(
@@ -385,7 +391,7 @@ fun TvHomeScreen(
             if (hero != null) {
                 // 收色带：接缝正好落在 Hero 底边上时，无论把渐隐终点配成什么色都会露出一条线，
                 // 所以把接缝挪进这条渐变里 —— 顶边与 Hero 底边同色（看不出发界），底边完全透明（露出页面背景）
-                item(key = "hero_seam") { TvHeroSeamFade() }
+                item(key = "hero_seam") { TvHeroSeamFade(heroAmbient) }
             }
 
             // ---------- 我的收藏 ----------
@@ -709,12 +715,47 @@ internal const val HERO_DWELL_SECONDS = 9f
  * Hero 与页面背景之间的收色带：把两者共用的那条接缝挪进渐变中段。
  * 画法与手机端首页的轮播同款，见 [themeSeamFade]。
  *
- * 高度就是 Hero 与下面第一行之间的额外空白：这条带子本身是纯 Bg 淡出到透明，
- * 底下并没有内容，40dp 时它和标题行的上间距叠起来，把轮播和分类推得很开，收到 20dp。
+ * 高度就是 Hero 与下面第一行之间的额外空白：这条带子底下并没有内容，40dp 时它和标题行的
+ * 上间距叠起来，把轮播和分类推得很开，先收到 20dp、这一版再收到 10dp。
+ *
+ * 顶边取的和 [TvHero] 渐隐终点同一个 [heroLandingColor]，所以发界仍然隐形，但带过去的是
+ * 这张底图自己的色相，不再是纯 Bg —— 「海报下缘一条死黑」就是这块在起的作用。
+ *
+ * 淡出走的距离比布局占的距离长：10dp 内从实色降到 0，观感就是「颜色戛然而止」，
+ * 所以 drawBehind 画到带子外头去（[SEAM_FADE_DEPTH]），标题和海报是后画的、盖在它上面，
+ * 颜色于是从折痕一路化到「继续观看」那一排背后，而不是在折痕下面 10dp 处断掉。
+ * 带子本身仍只占 10dp：多要空白等于把这一版刚收掉的间隔又还回去。
+ *
+ * 没有复用 [themeSeamFade]：那条带子的 Brush 在组合期算好，而换页时着陆色要跟着底图一起
+ * 淡 600ms，必须逐帧重画。走 drawBehind 只重画这一条带子，不重组整屏。
+ * 收尾用实色减 alpha 而不是 Color.Transparent：后者会把 RGB 一起拖向纯黑，淡出末尾反而压出暗边。
  */
 @Composable
-internal fun TvHeroSeamFade(modifier: Modifier = Modifier) {
-    Box(modifier.themeSeamFade(20.dp))
+internal fun TvHeroSeamFade(ambient: Color, modifier: Modifier = Modifier) {
+    val blended = rememberAmbientBlend(ambient)
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(10.dp)
+            .drawBehind {
+                val seam = heroLandingColor(blended())
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        colorStops = arrayOf(
+                            0f to seam,
+                            0.10f to seam.copy(alpha = 0.80f),
+                            0.28f to seam.copy(alpha = 0.52f),
+                            0.50f to seam.copy(alpha = 0.28f),
+                            0.72f to seam.copy(alpha = 0.10f),
+                            1f to seam.copy(alpha = 0f)
+                        ),
+                        startY = 0f,
+                        endY = size.height + SEAM_FADE_DEPTH.toPx()
+                    ),
+                    size = Size(size.width, size.height + SEAM_FADE_DEPTH.toPx())
+                )
+            }
+    )
 }
 
 /**
@@ -760,7 +801,13 @@ internal fun TvHero(
     /** ↑ 交棒给顶栏来源按钮；两颗按钮都要，之前只有播放键接了 ↑，详情键按上没反应 */
     onNavigateUp: () -> Unit,
     /** 两颗按钮任一颗拿到焦点：首页已经不站在卡片上了 */
-    onButtonFocus: () -> Unit
+    onButtonFocus: () -> Unit,
+    /**
+     * 这张底图下缘一条带的取样色，见 [rememberHeroAmbient]。
+     * 由调用方算一次，和下面那条 [TvHeroSeamFade] 传同一个值 —— 两处必须同色同相位，
+     * 各自独立取样的话换页那一瞬接缝会错开，就又看得见一条线。
+     */
+    ambient: Color
 ) {
     val imageUrl = item.backdropUrl.ifBlank { item.posterUrl }
 
@@ -849,28 +896,36 @@ internal fun TvHero(
                 1f to Color.Transparent
             )
         }
-        val bottomVignette = remember {
-            // 暗化的起点从 0.28 后移到 0.45：原来画面刚过中线就开始压黑，整块下半截糊成一片，
-            // 看着不像渐隐而像被截断。中段（0.45~0.82）只铺到四成透明度，画面还认得出；
-            // 左半边另有 horizVignette 的 0.88 黑压着，两片叠加后标题/按钮的对比度不受影响。
-            // 0.96 起收到不透明纯色，底边留出一条横贯整宽的纯色着陆带 ——
-            // 下面的收色带要跟它接，接的必须是一条确定的色，不能是还在渐变的段。
-            // 收色仍然是纯 Bg：与下方背景的衔接交给 TvHeroSeamFade，不在这里配品牌色 ——
-            // 页面背景横着是不均匀的（左浓右淡），配出来的色只在那一个点准，这就是上一版还留条黑线的原因。
-            Brush.verticalGradient(
-                0.45f to Color.Transparent,
-                0.66f to AppColors.Bg.copy(alpha = 0.14f),
-                0.82f to AppColors.Bg.copy(alpha = 0.42f),
-                0.92f to AppColors.Bg.copy(alpha = 0.80f),
-                0.96f to AppColors.Bg,
-                1f to AppColors.Bg
-            )
-        }
+        // 纵向渐隐的终点色跟着底图走，所以不能像横向那样在组合期把 Brush 算死：
+        // 换页时底图淡入 600ms，着陆色要同一路混过去，否则那条带子会在中途硬跳一次色。
+        // 暗化的起点从 0.28 后移到 0.45：原来画面刚过中线就开始压黑，整块下半截糊成一片，
+        // 看着不像渐隐而像被截断。中段（0.45~0.82）只铺到四成透明度，画面还认得出；
+        // 左半边另有 horizVignette 的 0.88 黑压着，两片叠加后标题/按钮的对比度不受影响。
+        // 底边最后 3% 必须走满不透明：这里差一点都藏不住。上一版把底边留在 0.92，
+        // 让底图自己的下边缘透出 8%（红绸那种亮部就是十几二十个单位的台阶），
+        // 横贯整宽的一条亮线，肉眼读出来就是「海报下方那条边」——过渡做得再长也白搭。
+        // 纯色平板本身不是问题，问题以前是它下面只接了 10dp 的淡出；现在接的是 [SEAM_FADE_DEPTH]。
+        // 这条带原来是纯 Bg（画面无论什么色调都沉进黑里），现在换成 [heroLandingColor]：
+        // 色相来自底图下缘、亮度只比页面底色高一档，TvHeroSeamFade 顶边取同一个值来接，接缝照样隐形。
+        // 取不到色（黑白灰底图或加载失败）时它退回纯 Bg，画出来和改造前一模一样。
+        val blended = rememberAmbientBlend(ambient)
         Box(Modifier.fillMaxSize().background(horizVignette))
         Box(
             Modifier
                 .fillMaxSize()
-                .background(bottomVignette)
+                .drawBehind {
+                    val landing = heroLandingColor(blended())
+                    drawRect(
+                        Brush.verticalGradient(
+                            0.45f to Color.Transparent,
+                            0.66f to landing.copy(alpha = 0.14f),
+                            0.82f to landing.copy(alpha = 0.42f),
+                            0.92f to landing.copy(alpha = 0.82f),
+                            0.97f to landing.copy(alpha = 0.98f),
+                            1f to landing
+                        )
+                    )
+                }
         )
 
         // 左对齐内容块：logo/标题 + 元信息 + 操作按钮
