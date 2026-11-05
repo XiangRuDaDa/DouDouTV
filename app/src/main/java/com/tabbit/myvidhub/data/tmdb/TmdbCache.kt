@@ -7,15 +7,19 @@ import kotlinx.coroutines.sync.withLock
 /**
  * TMDB 刮削结果的内存缓存，用来避免「反复打开同一部片就反复请求」。
  *
+ * 位置：MediaRepository 先查 scraped_meta 表（跨重启持久），没命中才走到这里，所以本进程内
+ * 表命中的片子根本不会经过这个缓存。它现在真正兜住的是两件事：负缓存，和并发去重。
+ *
  * 三层防护，对应三种不同的浪费场景：
  *
  * 1. **正缓存（TTL 7 天）**
  *    同一部片刮过就记住，7 天内再进来直接命中，不发任何网络请求。
- *    元数据变动很慢，7 天足够新鲜；想强制刷新在设置页点「清空刮削缓存」即可。
+ *    结果正常落表时这一层只是省掉一次数据库查询；写表失败时它是唯一的兜底。
  *
  * 2. **负缓存（TTL 1 天）**
  *    搜索没搜到（TMDB 里没有这部片 / 片名太怪）也要记住。
- *    否则这类「永远刮不到」的片子，每次打开都白跑一趟，是最费流量和配额的情况。
+ *    表里刻意不落「刮不到」—— 那种空记录会把以后补录数据的路堵死，
+ *    所以这类片子每次冷启动仍会重试一次，靠这里挡掉同一次运行内的重复请求。
  *    负缓存 TTL 更短，给以后补录数据留出机会。
  *
  * 3. **并发去重（in-flight 合并）**
@@ -56,11 +60,27 @@ object TmdbCache {
 
     /**
      * 生成缓存键。
-     * 标题做归一化（去空格、转小写），避免「飞行家 」「飞行家」被当成两条；
-     * 带上年份和类型，因为同名电影和剧集是两条不同数据。
+     * 传进来的 title 已经是 `ScrapeTitle` 洗过的检索名，所以「嫁金钗（臻彩）」和「嫁金钗 4K」
+     * 会算成同一条 —— 换条线路重进不必再刮一遍。
+     * 再做一层归一化：全角转半角、全角空格折成普通空格、连续空白压成一个、转小写，
+     * 避免「飞行家 」和「飞行家」、同名但括号写法不同被当成两条。
+     * 年份和类型仍然参与：同名电影与剧集、同名老片与新片是两条不同数据。
      */
     fun keyOf(title: String, year: Int, kind: String): String =
-        "${title.trim().lowercase()}|$year|$kind"
+        "${normalize(title)}|$year|$kind"
+
+    /** 不带年份的那半截键：刮削表用它做「同名不同年」的回落查询 */
+    fun titleKeyOf(title: String, kind: String): String = "${normalize(title)}|$kind"
+
+    private fun normalize(title: String): String =
+        title.map {
+            // 全角标点和字母数字（U+FF01–U+FF5E）折到半角；汉字不受影响
+            if (it.code in 0xFF01..0xFF5E) (it.code - 0xFEE0).toChar() else it
+        }.joinToString("")
+            .replace('　', ' ')
+            .lowercase()
+            .replace(Regex("""\s+"""), " ")
+            .trim()
 
     /** 读缓存（不加锁，靠 entries 自身的 synchronized 保证安全） */
     private fun readEntry(key: String): Entry? {
@@ -148,7 +168,4 @@ object TmdbCache {
     fun clear() {
         synchronized(entries) { entries.clear() }
     }
-
-    /** 当前缓存条目数，设置页展示用 */
-    fun size(): Int = synchronized(entries) { entries.size }
 }

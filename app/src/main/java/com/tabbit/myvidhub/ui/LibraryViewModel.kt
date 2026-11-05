@@ -814,8 +814,8 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     /** 清空刮削缓存，返回被清掉的缓存条目数 */
     suspend fun clearScrapeCache(): Int = repo.clearScrapeCache()
 
-    /** 当前刮削缓存条目数 */
-    fun scrapeCacheSize(): Int = repo.scrapeCacheSize()
+    /** 当前刮削缓存条目数（数 scraped_meta 表，跨重启也还在的那些） */
+    suspend fun scrapeCacheSize(): Int = repo.scrapeCacheSize()
 
     // ---------- 扫描 ----------
 

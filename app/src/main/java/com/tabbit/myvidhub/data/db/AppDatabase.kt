@@ -11,8 +11,8 @@ import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.SourceEntity
 
 @Database(
-    entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class],
-    version = 11,
+    entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class, ScrapedMetaEntity::class],
+    version = 12,
     // schema 落档到 app/schemas/：以后加索引之类的改动能用 Room 的自动迁移，
     // 也能拿历史 JSON 对比出漏写的迁移
     exportSchema = true
@@ -23,6 +23,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun sourceDao(): SourceDao
     abstract fun mediaDao(): MediaDao
     abstract fun hotTitleDao(): HotTitleDao
+    abstract fun scrapedMetaDao(): ScrapedMetaDao
 
     companion object {
         /**
@@ -113,6 +114,43 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v11 → v12：新增 scraped_meta（刮削结果表，按清洗后的片名归并）。
+         *
+         * 顺手把 media.scrapedAt 归零一次：那张标记的语义是「这一行已经刮过、7 天内别再联网」，
+         * 而新表是空的 —— 不清的话，老条目会被这道拦截挡在新机制外面，
+         * 既进不了表、也补不齐演职员，等于升级了个寂寞。
+         * 归零只是重新联网一次，不删任何已经写进 media 的海报/简介。
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `scraped_meta` (" +
+                        "`scrapeKey` TEXT NOT NULL, " +
+                        "`titleKey` TEXT NOT NULL, " +
+                        "`queryTitle` TEXT NOT NULL, " +
+                        "`kind` TEXT NOT NULL, " +
+                        "`year` INTEGER NOT NULL, " +
+                        "`overview` TEXT NOT NULL, " +
+                        "`genres` TEXT NOT NULL, " +
+                        "`rating` REAL NOT NULL, " +
+                        "`posterUrl` TEXT NOT NULL, " +
+                        "`backdropUrl` TEXT NOT NULL, " +
+                        "`logoUrl` TEXT NOT NULL, " +
+                        "`tagline` TEXT NOT NULL, " +
+                        "`directorsJson` TEXT NOT NULL, " +
+                        "`castJson` TEXT NOT NULL, " +
+                        "`scrapedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`scrapeKey`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_scraped_meta_titleKey` " +
+                        "ON `scraped_meta` (`titleKey`)"
+                )
+                db.execSQL("UPDATE media SET scrapedAt = 0 WHERE scrapedAt > 0")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -122,7 +160,8 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                     .addMigrations(
                         MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                        MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11
+                        MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
+                        MIGRATION_11_12
                     )
                     // 这里刻意不调 fallbackToDestructiveMigration()：
                     // 它会在「漏写某段迁移」时静默整库重建，观看进度和收藏全丢且没有任何迹象，

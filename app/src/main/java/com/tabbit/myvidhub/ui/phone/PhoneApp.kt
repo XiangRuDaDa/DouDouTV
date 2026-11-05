@@ -225,7 +225,6 @@ fun PhoneApp(vm: LibraryViewModel) {
                         vm = vm,
                         isTv = false,
                         state = searchState,
-                        onBack = goBack,
                         onOpenDetail = { id -> push(PhoneRoute.Detail(id)) }
                     )
 

@@ -116,7 +116,8 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     val activeEngine = remember(engineTick) { ScrapeStrategy.resolve() }
     LaunchedEffect(engineTick) { ScrapeStrategy.refresh() }
 
-    var cacheCount by remember { mutableStateOf(vm.scrapeCacheSize()) }
+    // 条数查的是 scraped_meta 表，不能在组合期同步读库；下面的 resumeTick effects 里填
+    var cacheCount by remember { mutableStateOf(0) }
     var clearing by remember { mutableStateOf(false) }
     var imageCache by remember { mutableStateOf(0L) }
     // 视频缓存的档位与占用：同上，写 Prefs 不会触发重组，选中态得自己留一份
@@ -264,7 +265,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
 
                         TvSettingAction(
                             title = "刮削缓存",
-                            hint = "已缓存 $cacheCount 条，同一影片 7 天内不重复请求",
+                            hint = "已记住 $cacheCount 部影片，同名同年不再联网重刮",
                             actionLabel = if (clearing) "清除中…" else "清除缓存",
                             onClick = {
                                 if (clearing) return@TvSettingAction

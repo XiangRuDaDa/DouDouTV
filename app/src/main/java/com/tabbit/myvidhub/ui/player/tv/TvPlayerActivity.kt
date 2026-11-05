@@ -69,13 +69,13 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.tabbit.myvidhub.data.MediaRepository
 import com.tabbit.myvidhub.data.format.FormatProbe
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
+import com.tabbit.myvidhub.player.DownloadMeter
 import com.tabbit.myvidhub.player.PlayerFactory
 import com.tabbit.myvidhub.ui.components.episodeLabel
 import com.tabbit.myvidhub.ui.components.usesSourceEpisodeName
@@ -143,6 +143,14 @@ class TvPlayerActivity : ComponentActivity() {
     // ---------- 供 Compose 读取的界面状态 ----------
     private var overlayVisible by mutableStateOf(true)
 
+    /**
+     * 进度层这一层是不是被返回键收掉的。
+     *
+     * 收掉之后本轮缓冲不再自动呼出（缓冲结束、或用户自己呼出时复位），否则返回键会一直
+     * 在收同一层：收掉 ≤500ms 后 ticker 又打开，而缓冲期 isPlaying=false，3 秒自动隐藏不生效。
+     */
+    private var overlayDismissedByBack = false
+
     /** 功能工具栏（一级按钮行）是否显示 —— 下键唤出，返回键收起 */
     private var toolbarOpen by mutableStateOf(false)
 
@@ -169,9 +177,10 @@ class TvPlayerActivity : ComponentActivity() {
     /**
      * 实测下载速率（字节/秒）；-1 = 还没攒满第一个 1 秒窗口。
      *
-     * 取「累计已收字节」的 1 秒差分，而不是直接把 DefaultBandwidthMeter 的估算值摆上去：
-     * 后者单个样本最长可跨 2 秒、还会跨请求平滑，屏幕上看着像数字半天不动。
-     * 累计值由 speedBytesTotal 提供，差分窗口固定 1 秒，所以这个数字一秒跳一次。
+     * 取「累计已收字节」的 1 秒差分，而不是直接把 Media3 的带宽估算值摆上去：
+     * 后者单个样本最长可跨 2 秒、还会跨请求平滑，屏幕上看着像数字半天不动；更麻烦的是我们这条
+     * 手工搭的数据源链压根没把 meter 挂成 TransferListener，那个回调一次也不会来，数字永远是 0。
+     * 累计值由 [DownloadMeter] 在 OkHttp 真正读字节时提供，差分窗口固定 1 秒，所以这个数字一秒跳一次。
      */
     private var downloadBps by mutableStateOf(-1L)
 
@@ -183,9 +192,6 @@ class TvPlayerActivity : ComponentActivity() {
      * 所以从进入播放器第一帧就自己画转圈，而不是等线路解析完、播放器进入 BUFFERING 才有反馈。
      */
     private var loading by mutableStateOf(true)
-
-    /** 经 TransferListener 累计的实收字节（每个带宽样本带自己那段窗口的字节数，逐条相加） */
-    private var speedBytesTotal = 0L
 
     /** 上一个网速窗口的起点（累计字节 + 时刻）；speedWindowAt=0 表示还没建立基线 */
     private var speedWindowBytes = 0L
@@ -234,18 +240,26 @@ class TvPlayerActivity : ComponentActivity() {
 
     private val progressTicker = object : Runnable {
         override fun run() {
-            // 装载期间（进播放器 / 切集）暂停 ticker：这时播放器还挂着上一集，
-            // 继续跑就会把上一集的进度、时长、缓冲提示写到新一集头上。
-            if (!loading) {
-                player?.let { p ->
+            player?.let { p ->
+                // 网速和缓冲提示不受 loading 影响：装载那一程（解析完 → 首帧）恰恰是最需要看到
+                // 「到底在下多少」的时候，把它一起挂进下面的门里等于加载全程只显示测速中。
+                sampleDownloadSpeed()
+                bufferHint = buildBufferHint(p)
+                // 装载期间（进播放器 / 切集）暂停下面的写入：这时播放器还挂着上一集，
+                // 继续跑就会把上一集的进度、时长写到新一集头上。
+                if (!loading) {
                     positionMs = p.currentPosition.coerceAtLeast(0L)
                     durationMs = p.duration.takeIf { it > 0L } ?: 0L
                     isPlaying = p.isPlaying
-                    sampleDownloadSpeed()
-                    bufferHint = buildBufferHint(p)
-                    // 缓冲时把进度层叫回来：不然后台在缓冲、屏幕上什么都看不到。
-                    // 工具栏开着时不抢它的位子。
-                    if (bufferHint != null && !toolbarOpen) overlayVisible = true
+                    // 缓冲时把进度层叫回来：不然后台在缓冲、屏幕上什么都看不到。工具栏开着时不抢它的位子。
+                    // 但用户用返回键收掉过一次，本轮缓冲就不再叫（见 overlayDismissedByBack）——
+                    // 收掉之后 ≤500ms 又自动打开、而缓冲期 isPlaying=false 那条 3 秒自动隐藏又不成立，
+                    // 返回键就永远在收同一层，表现是「要连按两下才退出播放」。
+                    if (bufferHint == null) {
+                        overlayDismissedByBack = false
+                    } else if (!overlayDismissedByBack && !toolbarOpen) {
+                        overlayVisible = true
+                    }
                     if (p.isPlaying) {
                         saveProgress(force = false)
                         prefetchNextEpisode()
@@ -282,10 +296,13 @@ class TvPlayerActivity : ComponentActivity() {
      *
      * 挂在 500ms 的进度 ticker 上而不是单开一个定时器：ticker 已经在跑，多一个定时器
      * 就多一条要跟着播放器生命周期收的路。窗口长度按实际经过时间折算，不受 ticker 抖动影响。
+     *
+     * [DownloadMeter] 是进程级单调累计的，这里只取差分；基线在第一次采样时落，所以新播放器
+     * 不会把进播放器之前预读留下的字节一次性算成网速。
      */
     private fun sampleDownloadSpeed() {
         val now = SystemClock.elapsedRealtime()
-        val total = speedBytesTotal
+        val total = DownloadMeter.totalBytes
         if (speedWindowAt == 0L) {
             speedWindowAt = now
             speedWindowBytes = total
@@ -299,32 +316,16 @@ class TvPlayerActivity : ComponentActivity() {
     }
 
     /**
-     * 创建电视端播放器，并接上网速采样。
+     * 创建电视端播放器，同时把网速窗口清空。
      *
-     * 两处创建点（首次进入 / 换云盘源重建）都要走这里，否则换源后旧的累计值会和新播放器的
-     * 字节数混在一起，第一秒跳出一个离谱数字。
-     *
-     * 字节来源是 DefaultBandwidthMeter 的 onBandwidthEstimate：它每个样本带自己那段窗口的
-     * totalBytesLoaded，逐条累加就是「播放器实际收到的网络字节」。这个回调由播放器内部 handler
-     * 触发，而 speedBytesTotal 只在主线程（进度 ticker）读，所以回主线程再累。
+     * 两处创建点（首次进入 / 换云盘源重建）都要走这里：[DownloadMeter] 是进程级累计的，
+     * 不重建基线的话第一秒会把上一段没读完的字节一起算进来，跳出一个离谱数字。
      */
     private fun newTvPlayer(headers: Map<String, String>): ExoPlayer =
         PlayerFactory.createTvPlayer(this, headers).also { p ->
             downloadBps = -1L
-            speedBytesTotal = 0L
             speedWindowAt = 0L
             speedWindowBytes = 0L
-            p.addAnalyticsListener(object : AnalyticsListener {
-                override fun onBandwidthEstimate(
-                    eventTime: AnalyticsListener.EventTime,
-                    totalLoadTimeMs: Int,
-                    totalBytesLoaded: Long,
-                    bitrateEstimate: Long
-                ) {
-                    if (totalBytesLoaded <= 0L) return
-                    runOnUiThread { speedBytesTotal += totalBytesLoaded }
-                }
-            })
             // 播放期读真实轨道（分辨率/HDR/杜比视界/音轨），回写到剧集壳。
             // 详情页那条文件名推测值可能不准，以这里读到的码流信息为准。
             p.addListener(object : Player.Listener {
@@ -849,6 +850,7 @@ class TvPlayerActivity : ComponentActivity() {
                 if (overlayVisible) {
                     // 时间轴还挂着：先把它收掉，别把用户退出播放
                     overlayVisible = false
+                    overlayDismissedByBack = true
                     tick++
                     true
                 } else {

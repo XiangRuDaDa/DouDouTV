@@ -74,7 +74,6 @@ fun TmdbCreditLine(modifier: Modifier = Modifier) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        TmdbLogoBadge(compact = true)
         Text(
             text = "数据来源：TMDB",
             style = MaterialTheme.typography.labelSmall,

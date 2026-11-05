@@ -37,6 +37,10 @@ android {
 
     buildTypes {
         release {
+            // 复用 debug 那颗 keystore：正式签名和 debug 签名不一致会导致覆盖安装直接失败，
+            // 只能卸载重装，媒体库、观看进度、收藏全丢。
+            // 对外发布要换正式 keystore 时注意：换完就断升级链，老包必须卸干净。
+            signingConfig = signingConfigs.getByName("debugSigning")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

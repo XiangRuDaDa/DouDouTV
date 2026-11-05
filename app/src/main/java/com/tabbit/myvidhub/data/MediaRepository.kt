@@ -6,6 +6,7 @@ import android.util.Log
 import com.tabbit.myvidhub.MyVidHubApp
 import com.tabbit.myvidhub.data.db.AppDatabase
 import com.tabbit.myvidhub.data.db.HotTitleEntity
+import com.tabbit.myvidhub.data.db.ScrapedMetaEntity
 import com.tabbit.myvidhub.data.db.toPinyinInitials
 import com.tabbit.myvidhub.data.douban.DoubanClient
 import com.tabbit.myvidhub.data.emby.EmbyClient
@@ -14,8 +15,11 @@ import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
 import com.tabbit.myvidhub.data.model.SourceEntity
 import com.tabbit.myvidhub.data.model.SourceKind
+import com.tabbit.myvidhub.data.scrape.ScrapeEngine
+import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient
 import com.tabbit.myvidhub.data.tvbox.TvBoxClient.TvBoxSite
+import com.tabbit.myvidhub.data.tmdb.ScrapeTitle
 import com.tabbit.myvidhub.data.tmdb.TmdbCache
 import com.tabbit.myvidhub.data.tmdb.TmdbClient
 import com.tabbit.myvidhub.core.Prefs
@@ -47,6 +51,7 @@ class MediaRepository(private val context: Context) {
     private val sourceDao = db.sourceDao()
     private val mediaDao = db.mediaDao()
     private val hotDao = db.hotTitleDao()
+    private val metaDao = db.scrapedMetaDao()
 
     fun observeSources(): Flow<List<SourceEntity>> = sourceDao.observeAll()
     fun observeLibrary(): Flow<List<MediaEntity>> = mediaDao.observeLibrary()
@@ -604,20 +609,19 @@ class MediaRepository(private val context: Context) {
         }
 
     /**
-     * TMDB 刮削：按标题+年份搜索并拉取海报/背景图/Logo/评分/简介/演职员。
-     * 作为 Emby 刮削的补充，TVBox 源没有元数据时尤其有用。
-     * 未配置 TMDB API Key 时返回 null。
-     */
-    /**
-     * TMDB 刮削（带防频繁请求保护）。
+     * 取一部片的刮削结果（带防频繁请求保护）。
      *
-     * 三层拦截，越靠前越省钱：
-     * 1. 内存缓存命中 → 直接返回（7 天内不重复请求；刮不到的也缓存 1 天）
-     * 2. 同 key 并发请求去重 → 复用第一次的结果
-     * 3. 都未命中才真正发网络请求，成功后顺手回填数据库
+     * 拦截顺序，越靠前越省钱：
+     * 1. scraped_meta 表命中 → 直接返回。这一步**不看「联网刮削」开关**：
+     *    读自己盘上的数据不花钱，关掉开关只想停掉联网，不该把已经刮到的东西也藏起来。
+     * 2. 开关 + 凭据都通过，才往下走：内存缓存命中 → 省掉一次数据库查询
+     * 3. 同 key 并发请求去重 → 复用第一次的结果
+     * 4. 都未命中才真正发网络请求，成功后落表
      *
-     * [mediaId] 传入时，刮到的元数据会写回 media 表并标记 scrapedAt，
-     * 这样即使 App 重启、内存缓存丢了，库里也还有数据可用。
+     * [mediaId] 传入时，还会把海报/背景图/Logo/评分/简介回填到 media 行并标记 scrapedAt。
+     * 注意那次回填是「只补空」的（保护 Emby 自己库里的数据），所以源站已经给了豆瓣海报时
+     * TMDB 的海报进不了 media 行 —— 展示层要拿这份刮削结果，靠的是上面第 1 层的表，
+     * 而不是 media 行里那几个字段。
      */
     suspend fun tmdbScrape(
         title: String,
@@ -625,16 +629,64 @@ class MediaRepository(private val context: Context) {
         kind: String,
         mediaId: Long = 0L
     ): TmdbClient.ScrapeResult? = withContext(Dispatchers.IO) {
-        val apiKey = Prefs.tmdbApiKey
-        val token = Prefs.tmdbReadToken
-        if (apiKey.isBlank() && token.isBlank()) return@withContext null
+        // 清洗放在这里，而不是 TmdbClient 里面：缓存键、表键和检索词必须用同一个串，
+        // 否则「（臻彩）」和「[4K]」两种后缀会算成两条，换条线路重进就白刮一次。
+        // 库里的 title、详情页展示、FormatProbe 读的文件名都不动，只有发 TMDB 的这个词被洗过。
+        val query = ScrapeTitle.forSearch(title)
+        val exactKey = TmdbCache.keyOf(query, year, kind)
+        val titleKey = TmdbCache.titleKeyOf(query, kind)
 
-        val cacheKey = TmdbCache.keyOf(title, year, kind)
-        val result = runCatching {
-            TmdbCache.getOrFetch(cacheKey) {
-                TmdbClient(apiKey, token).scrape(title, year, kind)
+        // 第一步永远先查表。命中就不联网，也让「跨重启、跨来源、跨线路」三部同名片子只刮一次，
+        // 顺带让演职员、标语这些 media 行装不下的字段有了落点。
+        val stored = runCatching { metaDao.byKey(exactKey) ?: metaDao.byTitleKey(titleKey) }.getOrNull()
+        val result = stored?.toScrapeResult() ?: run {
+            // 表里没有才轮到开关和凭据。用 resolve() 现算而不是读 ScrapeStrategy.engine 那份快照：
+            // 用户在设置页刚填完密钥、没重启退回来也该立刻能刮。
+            if (ScrapeStrategy.resolve() != ScrapeEngine.TMDB) return@withContext null
+            runCatching {
+                TmdbCache.getOrFetch(exactKey) {
+                    TmdbClient(Prefs.tmdbApiKey, Prefs.tmdbReadToken).scrape(query, year, kind)
+                }
+            }.getOrNull() ?: return@withContext null
+        }
+
+        // 取证：每次调用打一行，回答三个「到底停在哪」——
+        // 键算成什么了（表没命中时先看这里，多半是清洗后的片名或 kind 不一样）、
+        // 数据是表里拿的还是刚联网刮的、刮到的这份到底有没有海报
+        Log.i(
+            "ScrapeDiag",
+            "刮削 \"$title\" → \"$query\" year=$year kind=$kind " +
+                "来源=${if (stored != null) "表" else "联网"} " +
+                "海报=${if (result.posterUrl.isBlank()) "空" else "有"} " +
+                "简介=${if (result.overview.isBlank()) "空" else "有"} " +
+                "主演=${result.actors.size}"
+        )
+
+        // 网络刮回来的这份写进表；表里本来就有就不再重复落盘。
+        // 刮不到（result 来自负缓存或空结果）时不占表位，下次仍然有机会重刮。
+        if (stored == null) {
+            runCatching {
+                metaDao.upsert(
+                    ScrapedMetaEntity(
+                        scrapeKey = exactKey,
+                        titleKey = titleKey,
+                        queryTitle = query,
+                        kind = kind,
+                        year = year,
+                        overview = result.overview,
+                        genres = result.genres,
+                        rating = result.rating,
+                        posterUrl = result.posterUrl,
+                        backdropUrl = result.backdropUrl,
+                        logoUrl = result.logoUrl,
+                        tagline = result.tagline,
+                        directorsJson = ScrapedMetaEntity.encodePeople(result.directors),
+                        castJson = ScrapedMetaEntity.encodePeople(result.actors),
+                        scrapedAt = System.currentTimeMillis()
+                    )
+                )
             }
-        }.getOrNull() ?: return@withContext null
+        }
 
         // 回填数据库：只在有 mediaId 时才写，避免列表预刮时乱写
         if (mediaId > 0L) {
@@ -654,14 +706,25 @@ class MediaRepository(private val context: Context) {
         result
     }
 
-    /** 清空 TMDB 内存缓存 + 数据库刮削标记（设置页入口） */
+    /**
+     * 清空刮削数据（设置页入口）：内存缓存、`scraped_meta` 表、media 行的 scrapedAt 标记一起抹掉，
+     * 让下一次进详情页重新联网。三者必须一起清，只清内存的话表还在，
+     * 按钮点了等于没点。
+     */
     suspend fun clearScrapeCache(): Int = withContext(Dispatchers.IO) {
         TmdbCache.clear()
+        metaDao.clear()
         mediaDao.clearAllScrapeMarks()
     }
 
-    /** 当前缓存条目数 */
-    fun scrapeCacheSize(): Int = TmdbCache.size()
+    /**
+     * 本机记住的影片数。
+     * 数的是 scraped_meta 而不是内存缓存：重启后内存清空但表还在，
+     * 这些片子照样不会重新请求，设置页要报的是这个口径。
+     */
+    suspend fun scrapeCacheSize(): Int = withContext(Dispatchers.IO) {
+        runCatching { metaDao.count() }.getOrDefault(0)
+    }
 
     /** 类型标签：拆分聚合后按出现次数排序 */
     suspend fun genreTags(limit: Int = 16): List<String> =

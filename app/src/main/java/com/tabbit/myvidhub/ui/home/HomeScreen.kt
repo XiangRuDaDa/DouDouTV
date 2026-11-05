@@ -67,6 +67,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -1182,11 +1184,12 @@ fun SearchScreen(
     vm: LibraryViewModel,
     isTv: Boolean,
     state: SearchUiState,
-    onBack: () -> Unit,
     onOpenDetail: (Long) -> Unit
 ) {
     var history by remember { mutableStateOf<List<String>>(Prefs.getSearchHistory()) }
     val inputFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     // 结果区的位置记录：状态在导航层，从详情返回时这一页重建，位置靠这里找回
     val resultsListState = ReturnSpot.listState("phone_search/results")
 
@@ -1244,35 +1247,39 @@ fun SearchScreen(
         state.searching = false
     }
 
-    // 进页自动聚焦输入框
-    LaunchedEffect(Unit) { runCatching { inputFocus.requestFocus() } }
+    // 进页自动聚焦输入框 —— 但只在「还没搜过」的时候聚焦。
+    // 从详情页返回时这一页会整个重建（搜索状态挂在导航层，所以结果还在），
+    // 无脑 requestFocus 就等于每退一次详情都把输入法弹回来盖住列表。
+    LaunchedEffect(Unit) {
+        if (state.query.isBlank() && state.submittedKeyword.isBlank()) {
+            runCatching { inputFocus.requestFocus() }
+        }
+    }
 
     val hSpacing = if (isTv) 14.dp else 9.dp
 
-    /** 提交搜索：存历史 + 触发搜索 */
+    /** 提交搜索：存历史 + 触发搜索，同时把焦点从输入框交出去 */
     fun submitSearch() {
         val kw = state.query.trim()
         if (kw.isEmpty()) return
         Prefs.addSearchHistory(kw)
         history = Prefs.getSearchHistory()
         state.submittedKeyword = kw
+        // 结果要占满整屏：输入框继续持有焦点，键盘就一直在列表上面；
+        // 焦点不放开，从详情返回时重建的那一下还会把键盘再弹出来。
+        keyboardController?.hide()
+        focusManager.clearFocus()
     }
 
     Column(Modifier.fillMaxSize()) {
-        // 搜索框 + 返回
+        // 搜索框：不再放返回箭头 —— 系统返回键/侧滑本来就能退出，底栏三个 Tab 也一直在，
+        // 这一格留着只会把输入框挤窄，还和「输入框要占满」的直觉打架
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 6.dp, end = 16.dp, top = 12.dp, bottom = 6.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "返回",
-                    tint = AppColors.TextSecondary
-                )
-            }
             OutlinedTextField(
                 value = state.query,
                 onValueChange = {

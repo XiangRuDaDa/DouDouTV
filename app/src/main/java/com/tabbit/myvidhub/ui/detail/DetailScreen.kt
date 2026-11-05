@@ -74,8 +74,6 @@ import coil.compose.AsyncImage
 import com.tabbit.myvidhub.R
 import com.tabbit.myvidhub.MainActivity
 import com.tabbit.myvidhub.core.Prefs
-import com.tabbit.myvidhub.data.scrape.ScrapeEngine
-import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.data.emby.EmbyClient
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.data.model.MediaKind
@@ -213,25 +211,13 @@ fun DetailScreen(
                 scraped = vm.embyDetailOf(m.sourceId, m.remoteId)
             }
 
-            // 刮削分流：凭据非空才发起 TMDB 请求。
-            // 在 LaunchedEffect 里重新判定一次（而不是读 ViewModel 的初始化快照），
-            // 这样用户在设置页刚填完密钥、不重启退回来也能立刻用上 TMDB。
-            // 凭据为空时 engine == LEGACY，完全沿用原有方案
-            // （Emby 自带元数据 / TVBox 返回字段），不发任何外部请求。
-            if (ScrapeStrategy.refresh() == ScrapeEngine.TMDB) {
-                // 跨重启的第一道拦截：库里已有近期刮削结果且关键字段齐全，就不再联网。
-                // 内存缓存重启会丢，但 scrapedAt 是持久化的，
-                // 能省掉「每次冷启动都把整个库重新刮一遍」这种最贵的浪费。
-                val fresh = m.scrapedAt > 0L &&
-                    System.currentTimeMillis() - m.scrapedAt < SCRAPE_FRESH_MS
-                val localReady = m.posterUrl.isNotBlank() || m.logoUrl.isNotBlank()
-                if (!(fresh && localReady)) {
-                    // mediaId 传下去：命中网络结果后会回填数据库并打上 scrapedAt
-                    runCatching {
-                        vm.tmdbScrape(m.title, m.year, m.kind, id)
-                    }.getOrNull()?.let { tmdb = it }
-                }
-            }
+            // 刮削结果一律问仓储层：它先读 scraped_meta 表，表里没有才轮到「联网刮削」开关
+            // 和凭据决定要不要发请求。这里不能再自己拦一道开关 —— 拦了就把已经刮到、
+            // 躺在表里的数据一起藏了，关着开关进详情页会退回源站那张豆瓣图。
+            // mediaId 传下去：拿到结果后回填 media 行并打上 scrapedAt
+            tmdb = runCatching {
+                vm.tmdbScrape(m.title, m.year, m.kind, id)
+            }.getOrNull()
 
             if (m.kind == MediaKind.SERIES) {
                 var eps = vm.episodesOf(m.seriesKey)
@@ -284,9 +270,11 @@ fun DetailScreen(
     // 取色：用 Coil ImageLoader 直接解码海报 bitmap（比 AsyncImage.onSuccess 里取 drawable 更可靠）。
     // 任何环节失败都回退到「标题哈希色」，保证页面背景永远有色、不会是纯黑。
     val context = LocalContext.current
-    LaunchedEffect(media?.posterUrl, media?.backdropUrl) {
+    LaunchedEffect(media?.posterUrl, media?.backdropUrl, tmdb?.posterUrl, tmdb?.backdropUrl) {
         val m = media ?: return@LaunchedEffect
-        val url = m.posterUrl.ifBlank { m.backdropUrl }
+        // 取色要跟页面上真正显示的那张图一致，否则刮来的 TMDB 海报配的还是豆瓣图的色调
+        val scrapedArt = tmdb?.posterUrl.orEmpty().ifBlank { tmdb?.backdropUrl.orEmpty() }
+        val url = scrapedArt.ifBlank { m.posterUrl.ifBlank { m.backdropUrl } }
         if (url.isBlank()) {
             dominantColor = fallbackColorFromTitle(m.title)
             return@LaunchedEffect
@@ -398,9 +386,12 @@ fun DetailScreen(
             }
         } else {
             val item = media!!
-            // 合并 Emby / TMDB 刮削结果：优先用条目本身字段，空了再用 TMDB 补齐
-            val effectiveLogo = item.logoUrl.ifBlank { tmdb?.logoUrl.orEmpty() }
-            val effectivePoster = item.posterUrl.ifBlank { tmdb?.posterUrl.orEmpty() }
+            // 合并 Emby / TMDB 刮削结果。
+            // 图（海报/背景/Logo）：一律刮来的优先，源站那张常常是豆瓣缩略图；
+            // 文本（简介/评分）：仍然条目优先，源站给的简介跟这条播放数据是配套的。
+            val effectiveLogo = tmdb?.logoUrl.orEmpty().ifBlank { item.logoUrl }
+            val effectivePoster = tmdb?.posterUrl.orEmpty().ifBlank { item.posterUrl }
+            val effectiveBackdrop = tmdb?.backdropUrl.orEmpty().ifBlank { item.backdropUrl }
             val effectiveOverview = item.overview.ifBlank { tmdb?.overview.orEmpty() }
             val effectiveRating = if (item.rating > 0) item.rating else tmdb?.rating ?: 0.0
 
@@ -418,9 +409,7 @@ fun DetailScreen(
                             .fillMaxWidth()
                             .height(headerH)
                     ) {
-                        val art = effectivePoster.ifBlank {
-                            item.backdropUrl.ifBlank { tmdb?.backdropUrl.orEmpty() }
-                        }
+                        val art = effectivePoster.ifBlank { effectiveBackdrop }
                         if (art.isNotBlank()) {
                             AsyncImage(
                                 model = art,
@@ -838,9 +827,6 @@ fun DetailScreen(
 }
 
 /** 决定「播放」按钮跳哪一集：优先未看完的，其次第一集 */
-/** 刮削结果的新鲜期：7 天内不回源重刮（与内存缓存 TTL 一致） */
-private const val SCRAPE_FRESH_MS = 7L * 24 * 60 * 60 * 1000
-
 private fun playTarget(item: MediaEntity, episodes: List<MediaEntity>): MediaEntity? =
     if (item.kind == MediaKind.SERIES) {
         episodes.firstOrNull { it.positionMs > 0 } ?: episodes.firstOrNull()

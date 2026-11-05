@@ -36,6 +36,10 @@ import okhttp3.ConnectionPool
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody
+import okio.BufferedSource
+import okio.buffer
+import okio.source
 import java.io.EOFException
 import java.io.IOException
 import java.util.Collections
@@ -334,6 +338,34 @@ object PlayerFactory {
                 failOnDeadStatus(request, response)
 
                 response
+            })
+            // ===== 下载字节计数 =====
+            // 后加的拦截器离网络更近，所以前面那条 Range 改写无论走哪个出口（透传 / 换连接 /
+            // 整文件 200 改道重试），拿到的响应都出自这里。包装在取响应时就套上，计数发生在
+            // 真正读的那一刻 —— 谁读、读几次，记的都是从网卡进来的字节，没被读走的响应体一个字节也不进账。
+            // 磁盘缓存命中根本不经过 OkHttp，天然不计；预读器和播放器自取共用这一个 client，
+            // 两边都算 —— 那也是真下载。详见 [DownloadMeter]。
+            .addInterceptor(Interceptor { chain ->
+                val response = chain.proceed(chain.request())
+                val body = response.body ?: return@Interceptor response
+                val counted = object : java.io.FilterInputStream(body.byteStream()) {
+                    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                        val n = super.read(buffer, offset, length)
+                        if (n > 0) DownloadMeter.add(n.toLong())
+                        return n
+                    }
+                }
+                response.newBuilder()
+                    .body(
+                        object : ResponseBody() {
+                            private val countedSource = counted.source().buffer()
+                            override fun contentType() = body.contentType()
+                            override fun contentLength() = body.contentLength()
+                            override fun source(): BufferedSource = countedSource
+                            override fun close() = countedSource.close()
+                        }
+                    )
+                    .build()
             })
             .build()
 

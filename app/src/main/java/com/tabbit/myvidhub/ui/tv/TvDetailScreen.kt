@@ -90,8 +90,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.zIndex
 import com.tabbit.myvidhub.core.Prefs
-import com.tabbit.myvidhub.data.scrape.ScrapeEngine
-import com.tabbit.myvidhub.data.scrape.ScrapeStrategy
 import com.tabbit.myvidhub.ui.StandTarget
 import com.tabbit.myvidhub.ui.components.episodeLabel
 import com.tabbit.myvidhub.ui.components.matchEpisodeInSource
@@ -330,19 +328,13 @@ fun TvDetailScreen(
                 }
             }
 
-            // TMDB 刮削：与手机端同一套判定（凭据存在 + 未被近期刮过）
-            if (ScrapeStrategy.refresh() == ScrapeEngine.TMDB) {
-                val fresh = latest.scrapedAt > 0L &&
-                    System.currentTimeMillis() - latest.scrapedAt < TV_SCRAPE_FRESH_MS
-                val localReady = latest.posterUrl.isNotBlank() || latest.logoUrl.isNotBlank()
-                if (!(fresh && localReady)) {
-                    tmdb = runCatching {
-                        vm.tmdbScrape(latest.title, latest.year, latest.kind, id)
-                    }.getOrNull()
-                    // 刮削会把海报/Logo 回填进库，取回最新的再渲染
-                    vm.mediaOf(id)?.let { media = it }
-                }
-            }
+            // 刮削结果一律问仓储层：它先读 scraped_meta 表，表里没有才轮到「联网刮削」开关
+            // 和凭据决定要不要发请求。这里再拦一道开关，会把已经刮到、躺在表里的数据一起藏掉。
+            tmdb = runCatching {
+                vm.tmdbScrape(latest.title, latest.year, latest.kind, id)
+            }.getOrNull()
+            // 刮削会把海报/Logo 回填进库，取回最新的再渲染
+            vm.mediaOf(id)?.let { media = it }
         }
         } catch (e: Throwable) {
             e.printStackTrace()
@@ -353,14 +345,12 @@ fun TvDetailScreen(
 
     // 取色：与手机端一致，用 Coil ImageLoader 直接解码 bitmap，失败回退标题哈希色
     val tvContext = LocalContext.current
-    // 依赖里带上 tmdb?.posterUrl：刮削完成后海报换了，主色要跟着重算
-    LaunchedEffect(media?.posterUrl, media?.backdropUrl, tmdb?.posterUrl) {
+    // 依赖里带上 tmdb 的两个图：刮削完成后海报换了，主色要跟着重算
+    LaunchedEffect(media?.posterUrl, media?.backdropUrl, tmdb?.posterUrl, tmdb?.backdropUrl) {
         val m = media ?: return@LaunchedEffect
-        val url = tmdb?.posterUrl.orEmpty().ifBlank {
-            m.posterUrl.ifBlank { m.backdropUrl }
-        }.ifBlank {
-            m.backdropUrl
-        }
+        // 取色要跟页面上真正显示的那张图一致，不能停留在源站那张豆瓣图上
+        val scrapedArt = tmdb?.posterUrl.orEmpty().ifBlank { tmdb?.backdropUrl.orEmpty() }
+        val url = scrapedArt.ifBlank { m.posterUrl.ifBlank { m.backdropUrl } }
         if (url.isBlank()) {
             dominant = fallbackColorFromTitle(m.title)
             return@LaunchedEffect
@@ -502,10 +492,12 @@ fun TvDetailScreen(
         )
     }
 
+    // 图一律「刮来的优先」，与手机端同一口径：源站那张常常是豆瓣缩略图，
+    // Emby 公共片库的图也一样糙；刮不到时（字段为空）自然回落到条目自己的图。
     val backdrop = tmdb?.backdropUrl.orEmpty().ifBlank {
         item?.let { it.backdropUrl.ifBlank { it.posterUrl } }.orEmpty()
     }
-    val logo = item?.logoUrl.orEmpty().ifBlank { tmdb?.logoUrl.orEmpty() }
+    val logo = tmdb?.logoUrl.orEmpty().ifBlank { item?.logoUrl.orEmpty() }
 
     Box(
         Modifier
@@ -1244,9 +1236,6 @@ private const val TV_DESC_COLLAPSE_CHARS = 200
 /** 分集网格列数：分集名是源给的原名（如 "[5.4GB]E01.mkv【…】"），
  *  10 列时一格不到 90dp，名字全被省略号吃掉；4 列后单格够宽，集名能看清。 */
 private const val TV_GRID_COLS = 4
-
-/** 本地刮削结果的新鲜期：一周内不重复请求 TMDB */
-private const val TV_SCRAPE_FRESH_MS = 7L * 24 * 60 * 60 * 1000
 
 /**
  * TV 端分集卡片。

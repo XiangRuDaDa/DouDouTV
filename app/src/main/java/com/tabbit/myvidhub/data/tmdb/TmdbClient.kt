@@ -72,7 +72,8 @@ class TmdbClient(
 
     /**
      * 刮削单个条目。
-     * @param title 原始标题
+     * @param title 检索用片名（已由 [com.tabbit.myvidhub.data.MediaRepository.tmdbScrape] 过 [ScrapeTitle]，
+     *              画质/集数这类运营后缀已经去掉；这里不再洗第二次）
      * @param year  年份，0 表示未知
      * @param kind  MediaKind.MOVIE / SERIES
      */

@@ -262,8 +262,10 @@ fun SettingsScreen(vm: LibraryViewModel) {
                         )
 
                         // ---- 缓存大小 + 清除 ----
-                        var cacheCount by remember { mutableStateOf(vm.scrapeCacheSize()) }
+                        // 条数来自 scraped_meta 表，要查库，不能在组合期同步读；进这一段时异步填一次
+                        var cacheCount by remember { mutableStateOf(0) }
                         var clearing by remember { mutableStateOf(false) }
+                        LaunchedEffect(Unit) { cacheCount = vm.scrapeCacheSize() }
 
                         Row(
                             Modifier.fillMaxWidth(),
@@ -276,7 +278,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
                                     color = AppColors.TextPrimary
                                 )
                                 Text(
-                                    "已缓存 $cacheCount 条，同一影片 7 天内不重复请求。",
+                                    "已记住 $cacheCount 部影片，同名同年不再联网重刮。",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = AppColors.TextTertiary
                                 )
