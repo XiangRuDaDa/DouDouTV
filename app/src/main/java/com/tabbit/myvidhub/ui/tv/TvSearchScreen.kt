@@ -244,6 +244,17 @@ fun TvSearchScreen(
                 primary = true,
                 onClick = { state.submit() }
             )
+            Spacer(Modifier.width(12.dp))
+            // 清空：词、联想、结果和各进行中标记一次全清，回到「还没输入」的初始态。
+            // 清完把焦点交回输入框 —— 接着打下一个词不用再按一次 ↑。
+            TvPillButton(
+                text = "清空",
+                primary = false,
+                onClick = {
+                    state.clear()
+                    tvMoveFocus(fieldFocus)
+                }
+            )
         }
 
         when {
@@ -255,7 +266,7 @@ fun TvSearchScreen(
                     modifier = Modifier.padding(start = TvPagePadding, bottom = 8.dp)
                 )
                 LazyColumn(
-                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
@@ -290,7 +301,7 @@ fun TvSearchScreen(
                 LazyVerticalGrid(
                     state = resultsGridState,
                     columns = GridCells.Fixed(tvGridColumns()),
-                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 32.dp),
+                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 24.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                     modifier = Modifier.fillMaxSize()

@@ -59,6 +59,7 @@ import com.tabbit.myvidhub.ui.tv.TvPagePadding
 import com.tabbit.myvidhub.ui.tv.TvSearchUiState
 import com.tabbit.myvidhub.ui.tv.tvClaimFocusOnEnter
 import com.tabbit.myvidhub.ui.tv.tvGridColumns
+import com.tabbit.myvidhub.ui.tv.tvMoveFocus
 import com.tabbit.myvidhub.ui.tv.tvResumeTick
 import com.tabbit.myvidhub.ui.theme.AppColors
 import com.tabbit.myvidhub.ui.theme.Edge
@@ -160,7 +161,14 @@ fun NfSearchScreen(
     val resumeTick = tvResumeTick()
     tvClaimFocusOnEnter(
         tick = listOf(resumeTick, showSuggestions, state.results.size),
-        anchorsProvider = { listOfNotNull(stand.requester, belowField, fieldFocus) }
+        // 输入 / 联想阶段这一串锚点只留输入框自己：打第一个字之后联想列表冒出来，
+        // tick 跟着变，抢焦会把焦点从正在打字的输入框拽到联想首行 —— 用户还没动手，光标就跑了。
+        // 焦点往下走只有两条正当路径：用户自己按 ↓（nfFocusRoute 显式交点），或提交搜索出结果。
+        // 提交之后（submittedKeyword 非空）恢复原来的抢焦：还站在离开时那张卡，没有记录才落首卡。
+        anchorsProvider = {
+            if (state.submittedKeyword.isEmpty()) listOf(fieldFocus)
+            else listOfNotNull(stand.requester, belowField, fieldFocus)
+        }
     )
 
     NfScaffold(
@@ -203,6 +211,16 @@ fun NfSearchScreen(
                 )
                 Spacer(Modifier.width(16.dp))
                 NfActionButton(text = "搜索", onClick = { state.submit() })
+                Spacer(Modifier.width(12.dp))
+                // 清空：词、联想、结果和各进行中标记一次全清，回到「还没输入」的初始态。
+                // 清完把焦点交回输入框 —— 接着打下一个词不用再按一次 ↑。
+                NfActionButton(
+                    text = "清空",
+                    onClick = {
+                        state.clear()
+                        tvMoveFocus(fieldFocus)
+                    }
+                )
             }
 
             Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -217,7 +235,7 @@ fun NfSearchScreen(
                             )
                             LazyColumn(
                                 contentPadding = PaddingValues(
-                                    start = TvPagePadding, end = TvPagePadding, bottom = 32.dp
+                                    start = TvPagePadding, end = TvPagePadding, bottom = 24.dp
                                 ),
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                                 modifier = Modifier.fillMaxSize()
@@ -436,7 +454,7 @@ private fun NfSearchGrid(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfRowVerticalPadding, bottom = 32.dp
+            top = NfRowVerticalPadding, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)
@@ -446,7 +464,7 @@ private fun NfSearchGrid(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .padding(top = if (sourceName == firstGroup) 4.dp else 26.dp, bottom = 12.dp),
+                        .padding(top = if (sourceName == firstGroup) 4.dp else 16.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(

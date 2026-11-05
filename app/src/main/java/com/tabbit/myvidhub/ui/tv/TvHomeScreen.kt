@@ -349,7 +349,7 @@ fun TvHomeScreen(
             modifier = Modifier.fillMaxSize(),
             // 不再给顶栏预留 64dp：Hero 从屏幕最顶端开始铺满，
             // 顶栏透明地悬浮在画面上，不会出现「顶栏单独占一行、海报被挤下去」的黑条。
-            contentPadding = PaddingValues(bottom = 32.dp)
+            contentPadding = PaddingValues(bottom = 24.dp)
         ) {
             // ---------- 主视觉（置顶，TvTopBar 悬浮其上） ----------
             // 轮播区常驻：即使没有内容也保留这一屏高度，避免首页在「加载中 / 空库」之间跳版。
@@ -722,14 +722,18 @@ internal fun TvHeroSeamFade(modifier: Modifier = Modifier) {
  *
  * Netflix 的 billboard 约占视口高的 55~60%，但那家的标题排在画面**下方**；
  * 这里标题、元信息、按钮全压在画面里（logo 就占 110dp），所以要留出内容高度。
- * 电视的 dp 视口往往只有 540dp 高（1080p 按 2x density 折算），纯按比例算出来只有
- * 310dp 左右，底部内容块会被压缩 —— 播放按钮会瘦成一条横线。
- * 因此按比例取，同时夹在 430~620dp 之间：小屏不至于挤内容，大屏也不会顶掉整个首屏。
+ * 底部那一块固定高约 250dp（logo 110 + 间距 + 元信息 + 按钮 + 30 底边距），
+ * 下限因此不能低于 360dp，再小就成了「按钮贴着画面顶」。
+ *
+ * 比例 0.72→0.62、下限 430→360：电视的 dp 视口往往只有 540dp 高（1080p 按 2x density
+ * 折算），旧的夹值在那块屏上是 430dp = 79.6% 屏高，减去 20dp 收色带只剩 90dp ——
+ * 折痕下方连一张 120dp 的「继续观看」卡都露不全，首页读起来像「只有海报没有内容」。
+ * 现在 540 屏上是 360dp（66.7%），折痕下有 160dp；720dp 的高密度屏按比例走 446dp。
  */
 @Composable
 internal fun tvHeroHeight(): Dp {
     val screenH = LocalConfiguration.current.screenHeightDp.dp
-    return (screenH * 0.72f).coerceIn(430.dp, 620.dp)
+    return (screenH * 0.62f).coerceIn(360.dp, 620.dp)
 }
 
 /** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下。
@@ -1019,7 +1023,7 @@ internal fun TvHeroEmpty(
 
     /**
      * 空态必须自带可聚焦入口（规范 R6）。
-     * 这块 Hero 高 430~620dp、整屏的八成，原来里面一个字都点不动：
+     * 这块 Hero 高 360~620dp、整屏的六到七成，原来里面一个字都点不动：
      * 顶栏按 ↓ 时焦点在视口内找不到任何落点，就卡在工具栏上出不去。
      * 按钮行的位置与有内容时一致（左下、bottom 44dp），顶栏的 ↓ 正好落在这第一颗上。
      */

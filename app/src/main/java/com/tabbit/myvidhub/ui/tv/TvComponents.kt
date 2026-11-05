@@ -549,9 +549,11 @@ fun TvSectionTitle(
     // 默认走页面左轴；详情页等信息列更宽的区域由调用方覆写。
     // 上下留白从 22/10 收到 13/6：首页一屏最多叠 7 个分类行，原来单行的间距合计 52dp，
     // 七行就是半屏多的纯空白，标题和它下面那排海报被推得像是两个分区。
+    // 再收一档 13/6 → 10/4：排与排之间的纯空白仍是横向 gap 的两倍量级，
+    // 而十英尺口径（Android TV 官方栅格）里纵向和横向是同量级的，纵向才是「页面松散」的主因。
     // 行内左右仍保持页面左轴不动，只收纵向。
     contentPadding: PaddingValues = PaddingValues(
-        start = TvPagePadding, end = TvPagePadding, top = 13.dp, bottom = 6.dp
+        start = TvPagePadding, end = TvPagePadding, top = 10.dp, bottom = 4.dp
     ),
     trailing: (@Composable () -> Unit)? = null
 ) {

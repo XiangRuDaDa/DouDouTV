@@ -168,7 +168,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                 Modifier
                     .fillMaxWidth()
                     .widthIn(max = 1080.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp)
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 TvSettingsGroup("状态") {
                     TvStatRow("来源数量", "${sources.size}")

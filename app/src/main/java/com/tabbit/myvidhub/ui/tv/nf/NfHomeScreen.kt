@@ -130,7 +130,7 @@ fun NfHomeScreen(
     val continueAnchor = if (continueItems.isNotEmpty()) continueFirstFocus else continueEmptyFocus
 
     // 顶栏按滚动距离连续淡出，淡到位才摘出组合。
-    // 不能只看 firstVisibleItemIndex > 0：电视 dp 视口约 540、轮播按 72% 有 430 高，
+    // 不能只看 firstVisibleItemIndex > 0：电视 dp 视口约 540、轮播按 62% 有 360 高，
     // 往下滚一整段仍停在首屏那一格，index 永远是 0 —— 读起来就是「顶栏甩不掉地常驻」。
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
@@ -180,7 +180,8 @@ fun NfHomeScreen(
     }
 
     /**
-     * Hero 按 ↓：轮播 430dp 高，「继续观看」整行压在视口外，默认几何搜索找不到没进视口的卡片。
+     * Hero 按 ↓：轮播 360dp 高，折痕下只够露「继续观看」的标题和卡片上半（整行约 212dp），
+     * 默认几何搜索找不到没完整进视口的卡片。
      * 所以先直接落焦点（拿到焦点本身会触发 bringIntoView，能把这一行带进视野），
      * 落不上再把列表滚到「继续观看」标题行、等一帧补抢。
      */
@@ -222,7 +223,7 @@ fun NfHomeScreen(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 32.dp)
+            contentPadding = PaddingValues(bottom = 24.dp)
         ) {
             item(key = "hero") {
                 Box(

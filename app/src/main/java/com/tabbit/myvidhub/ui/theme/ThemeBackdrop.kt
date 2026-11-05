@@ -27,7 +27,7 @@ import androidx.compose.foundation.layout.height
  * 光晕全部贴左轴布置也和 TV 端的左对齐栅格一致，中心区始终留给内容。
  *
  * 光晕必须落在「真的看得见」的那几条带子上，这是这版重排的全部原因：
- *   · TV 首页的 Hero 占满 0.72 屏高（见 tvHeroHeight），且自带一条淡到不透明
+ *   · TV 首页的 Hero 占 0.62 屏高（540dp 视口上 360dp，见 tvHeroHeight），且自带一条淡到不透明
  *     AppColors.Bg 的底部渐隐，所以顶部光晕在首页是被整块盖住的 —— 真机上
  *     表现为「换了主题色背景毫无变化」。左上那团留给标题裸露的页面
  *     （来源 / 设置 / 分类），左下和右下两团负责首页折痕以下那条可视带。
@@ -64,7 +64,8 @@ fun Modifier.themeBackdrop(): Modifier {
                     radius = maxOf(width, height) * 0.75f
                 ),
                 // 左下光晕：TV 首页 Hero 折痕以下那条唯一可视的带子，手机上也压住左轴。
-                // 圆心放在 0.9h 而不是贴在屏幕角上 —— 首页那条约 0.28h 高的带子里，
+                // 圆心放在 0.9h 而不是贴在屏幕角上 —— 首页那条约 0.38h 高的带子里
+                // （540dp 视口被 Hero 下限托成约 0.33h），
                 // 贴角等于最亮的一圈压在最后一行海报背后，观感上仍然是「没有换主题」。
                 Brush.radialGradient(
                     colorStops = arrayOf(

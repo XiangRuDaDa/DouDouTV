@@ -224,7 +224,7 @@ private fun NfFavoriteGrid(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfRowVerticalPadding, bottom = 32.dp
+            top = NfRowVerticalPadding, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)
@@ -273,7 +273,7 @@ private fun NfGroupHead(group: NfFavoriteGroup, isFirstGroup: Boolean) {
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(top = if (isFirstGroup) 4.dp else 26.dp, bottom = 12.dp)
+            .padding(top = if (isFirstGroup) 4.dp else 16.dp, bottom = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(

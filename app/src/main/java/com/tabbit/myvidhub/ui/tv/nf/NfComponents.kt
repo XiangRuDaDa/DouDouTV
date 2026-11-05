@@ -403,7 +403,11 @@ fun NfNavBar(
     }
 }
 
-/** 分区标题（Netflix 的 row header）：左轴固定，右侧可挂计数或操作 */
+/**
+ * 分区标题（Netflix 的 row header）：左轴固定，右侧可挂计数或操作。
+ * 上下留白 20/10 → 12/6：这一条带加上行间距原先合计 44dp，是横向 gap 的近三倍，
+ * 十英尺口径下纵向应该和横向同量级，所以收的是这条带而不是卡片。
+ */
 @Composable
 fun NfRowTitle(
     text: String,
@@ -413,7 +417,7 @@ fun NfRowTitle(
     Row(
         modifier
             .fillMaxWidth()
-            .padding(start = TvPagePadding, end = TvPagePadding, top = 20.dp, bottom = 10.dp),
+            .padding(start = TvPagePadding, end = TvPagePadding, top = 12.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -771,7 +775,7 @@ fun NfPosterGrid(
         modifier = modifier.fillMaxWidth(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfRowVerticalPadding, bottom = 32.dp
+            top = NfRowVerticalPadding, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)
