@@ -1,0 +1,185 @@
+package com.chen.doudoutv.ui.components
+
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.chen.doudoutv.data.model.MediaEntity
+import com.chen.doudoutv.data.model.MediaKind
+import com.chen.doudoutv.ui.theme.AppColors
+import com.chen.doudoutv.ui.theme.Edge
+import com.chen.doudoutv.ui.theme.Lift
+import com.chen.doudoutv.ui.theme.Radius
+
+// 卡片用到的形状与渐变都是常量：提到组合外，滚动时每张卡不必每次新建对象
+private val PosterShape = Radius.Md
+private val TinyShape = Radius.Pill
+private val PosterBottomScrim = Brush.verticalGradient(
+    0f to Color.Transparent,
+    0.45f to Color.Black.copy(alpha = 0.55f),
+    1f to Color.Black.copy(alpha = 0.92f)
+)
+
+/**
+ * 海报卡（海报墙形态）。
+ *
+ * 四个细节决定"像不像"：
+ * 1) 2:3 竖版比例，圆角走 [Radius.Md] 档
+ * 2) 静止态勾一道 1dp [Edge.Hairline] 亮边 —— 近黑底上投影读不出来，
+ *    卡片和背景的分离只能靠描边和填充明度差，不挂投影也就不多一层 graphicsLayer
+ * 3) 聚焦时轻微放大（1.09x）+ 品牌色描边 + 抬起投影 —— TV 遥控器可用性核心
+ * 4) 底部渐变叠层压住标题，不单独占一块，保持海报主体完整
+ */
+@Composable
+fun PosterCard(
+    item: MediaEntity,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    showProgress: Boolean = true
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+
+    // TV 遥控器聚焦：带过冲的弹性放大，弹一下让用户明确"选中了"
+    // 缩放读在 graphicsLayer 的绘制块里（与 TV 端口径一致）：
+    // Modifier.scale(scale) 是在组合期读值，动画每一帧都要重组合整张卡
+    val scale by animateFloatAsState(
+        targetValue = if (focused) 1.09f else 1f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = 420f
+        ),
+        label = "poster_scale"
+    )
+
+    Box(
+        modifier = modifier
+            .aspectRatio(2f / 3f)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            // 投影只挂在焦点卡上：一屏七十张卡各挂一层就是七十多个图层，弱盒子吃不消
+            .then(if (focused) Modifier.shadow(Lift.Focus, PosterShape) else Modifier)
+            .clip(PosterShape)
+            .background(if (focused) AppColors.SurfaceRaise else AppColors.Surface)
+            .then(
+                if (focused) Modifier.border(2.5.dp, AppColors.Brand, PosterShape)
+                else Modifier.border(1.dp, Edge.Hairline, PosterShape)
+            )
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            )
+            .focusable()
+    ) {
+        // 无图、或者图是 404 死链时露出按片名哈希的兜底封面，不再是一块空灰矩形。
+        // 这张卡底部渐变上已经有片名了，所以占位只排首字水印，避免同屏两处重复。
+        PosterArt(model = item.posterUrl, contentDescription = item.title) {
+            PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(PosterBottomScrim)
+                .padding(horizontal = 8.dp, vertical = 7.dp)
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (showProgress && item.positionMs > 0 && item.durationMs > 0) {
+                    ProgressLine(item.positionMs.toFloat() / item.durationMs.toFloat())
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProgressLine(fraction: Float) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(TinyShape)
+            .background(Color.White.copy(alpha = 0.28f))
+            .padding(top = 2.5.dp)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                .background(AppColors.Brand)
+        )
+    }
+}
+
+/** 剧集显示源给的分集名；Emby 这类没有源名的显示 "S02E05"，电影显示年份 */
+fun MediaEntity.subtitle(): String = when {
+    kind == MediaKind.EPISODE && usesSourceEpisodeName -> title
+    kind == MediaKind.EPISODE && episode > 0 -> "S%02dE%02d".format(season, episode)
+    year > 0 -> year.toString()
+    else -> ""
+}
+
+@Composable
+fun SectionTitle(
+    text: String,
+    modifier: Modifier = Modifier,
+    trailing: @Composable (() -> Unit)? = null
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier
+                .size(width = 3.dp, height = 16.dp)
+                .clip(TinyShape)
+                .background(AppColors.Brand)
+        )
+        Text(
+            text = text,
+            style = MaterialTheme.typography.titleLarge,
+            color = AppColors.TextPrimary,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp)
+        )
+        trailing?.invoke()
+    }
+}

@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 底色用深色，避免 Compose 首帧白屏闪烁 -->
-    <style name="Theme.MyVidHub" parent="android:Theme.Material.NoActionBar">
+    <style name="Theme.DouDouTv" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/app_bg</item>
         <item name="android:statusBarColor">@color/app_bg</item>
         <item name="android:navigationBarColor">@color/app_bg</item>
     </style>
 
-    <style name="Theme.MyVidHub.Fullscreen" parent="Theme.MyVidHub">
+    <style name="Theme.DouDouTv.Fullscreen" parent="Theme.DouDouTv">
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowContentOverlay">@null</item>
     </style>

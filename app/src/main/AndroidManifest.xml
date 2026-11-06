@@ -22,7 +22,7 @@
     <!-- Android TV 主界面卡片要的是 16:9 横幅（xhdpi 320x180）：
          直接复用正方形 launcher 图标会被横向拉伸，并且按小图放大而发糊。 -->
     <application
-        android:name=".MyVidHubApp"
+        android:name=".DouDouTvApp"
         android:allowBackup="true"
         android:banner="@mipmap/tv_banner"
         android:icon="@mipmap/ic_launcher"
@@ -31,7 +31,7 @@
         android:largeHeap="true"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@style/Theme.MyVidHub">
+        android:theme="@style/Theme.DouDouTv">
 
         <activity
             android:name=".MainActivity"
@@ -39,7 +39,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="fullSensor"
-            android:theme="@style/Theme.MyVidHub">
+            android:theme="@style/Theme.DouDouTv">
 
             <!-- 手机 / 平板入口 -->
             <intent-filter>
@@ -60,7 +60,7 @@
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
             android:exported="false"
             android:screenOrientation="fullSensor"
-            android:theme="@style/Theme.MyVidHub.Fullscreen" />
+            android:theme="@style/Theme.DouDouTv.Fullscreen" />
 
         <!-- 电视端播放器（遥控器交互、固定全屏、无比例切换） -->
         <activity
@@ -68,7 +68,7 @@
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode"
             android:exported="false"
             android:screenOrientation="landscape"
-            android:theme="@style/Theme.MyVidHub.Fullscreen" />
+            android:theme="@style/Theme.DouDouTv.Fullscreen" />
 
     </application>
 

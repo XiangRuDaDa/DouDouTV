@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  VidHub 风格播放器控制条（VidHub-like player controller）。
+  播放器控制条（对齐主流流媒体客户端的控制条形态）。
 
   该布局由 PlayerView 通过 app:controller_layout_id 挂载，是**播放器本体**的一部分：
   它随 PlayerView 的自动显隐、遥控器焦点、seek bar 拖动一起工作，不再浮在播放器之上。

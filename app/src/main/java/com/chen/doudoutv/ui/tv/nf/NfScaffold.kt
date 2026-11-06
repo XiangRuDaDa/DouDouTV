@@ -1,0 +1,294 @@
+package com.chen.doudoutv.ui.tv.nf
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusEvent
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.chen.doudoutv.data.model.SourceKind
+import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.theme.AppColors
+import com.chen.doudoutv.ui.theme.Radius
+import com.chen.doudoutv.ui.theme.TvText
+import com.chen.doudoutv.ui.theme.themeBackdrop
+
+/** 顶栏收色带的高度：导航条本身透明，文字要有一层由页面底色淡出的衬底才读得清 */
+private val NfNavScrimHeight = 116.dp
+
+/**
+ * 一套页面的公共外壳状态：导航条上的焦点锚点 + 抽屉开关。
+ *
+ * 抽屉开关放在这里而不是 NfScaffold 内部，是因为页面内容也要用它：
+ * TVBox 没选线路时，分类页空态要能直接打开抽屉，而不是让用户先退回导航条。
+ */
+class NfChromeState {
+    /** 作用域胶囊（来源 › 线路） */
+    val scopeFocus = FocusRequester()
+
+    private val firstTabFocus = FocusRequester()
+    private val browseTabFocus = FocusRequester()
+    private val mineTabFocus = FocusRequester()
+    private val searchTabFocus = FocusRequester()
+
+    /**
+     * 本页在导航条上的那颗 tab —— 内容层按 ↑ 的回交对象。
+     * 每页只多这一层，到顶不再往上逃逸（规范 A 层级表）。
+     */
+    fun tabOf(tab: NfTab): FocusRequester = when (tab) {
+        NfTab.Home -> firstTabFocus
+        NfTab.Browse -> browseTabFocus
+        NfTab.Mine -> mineTabFocus
+        NfTab.Search -> searchTabFocus
+    }
+
+    var openScopeDrawer by mutableStateOf(false)
+
+    /**
+     * 焦点此刻是不是落在导航条（含其子节点）上。
+     * 首页「滚过轮播就撤顶栏」，但顶栏被撤时若焦点正在它上面会直接把焦点弄丢，
+     * 所以顶栏可见条件是「没滚过轮播 或 焦点就在顶栏上」。
+     */
+    var navFocused by mutableStateOf(false)
+}
+
+@Composable
+fun rememberNfChrome(): NfChromeState = remember { NfChromeState() }
+
+/**
+ * Netflix 基准那一套 TV 界面的公共外壳：主题背景 + 导航条 + 作用域抽屉。
+ *
+ * 顶栏可见性沿用经典版口径：透明悬浮不占内容高度、随滚动连续淡出（[navAlpha]，
+ * 在 draw phase 算，不进重组）、淡到位就从组合里摘掉（[navVisible]）—— 1.6.8 的焦点
+ * 搜索不看透明度，留着一个看不见的顶栏等于留着一排会被方向键选中的按钮。
+ */
+@Composable
+fun NfScaffold(
+    vm: LibraryViewModel,
+    current: NfTab,
+    chrome: NfChromeState,
+    /**
+     * 导航条按 ↓ 的落点。四页都给显式落点：这台设备上默认几何搜索向下会静默失败
+     * （经典版同样复现），落点必须逐条交棒（规范 R1）。
+     */
+    belowFocusRequester: FocusRequester? = null,
+    /** 顶栏（含其后面的收色带）是否出现在组合里 */
+    navVisible: Boolean = true,
+    /**
+     * 导航条走「流内」而不是悬浮：作为内容的上一层排在顶上。
+     * 悬浮导航条 ⇄ Lazy 内容区这条跨焦点子树的显式抢焦不可靠（requestFocus 不抛异常、
+     * 焦点却不动），流内装配让导航条与内容同在一棵 Column 里；这三页顶栏本来也常驻，视觉不变。
+     */
+    navInFlow: Boolean = false,
+    /**
+     * 顶栏不透明度，按滚动距离连续淡出。必须在 draw phase 读滚动状态：
+     * 在组合里读连续量会让每次滚动把整页拖进重组。
+     */
+    navAlpha: (() -> Float)? = null,
+    /** 焦点落到顶栏时的视觉补偿：把内容滚回顶部，避免高亮落在看不见的按钮上 */
+    onNavFocus: (() -> Unit)? = null,
+    onTab: (NfTab) -> Unit,
+    onSettings: () -> Unit,
+    onManageSources: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    // 顶栏被移出组合时它不再会上报「焦点离开」，这条记录得自己清 ——
+    // 留着为 true 顶栏就再也收不起来了
+    LaunchedEffect(navVisible) {
+        if (!navVisible) chrome.navFocused = false
+    }
+    val sources by vm.enabledSources.collectAsStateWithLifecycle()
+    val selectedSource = sources.firstOrNull { it.id == vm.homeSourceId } ?: sources.firstOrNull()
+    val namedSites = selectedSource?.id?.let { vm.homeSitesBySource[it] }.orEmpty()
+        .filter { it.key.isNotBlank() }
+    // 线路名只在 TVBox 来源下出现：Emby 没有线路概念，homeSiteKey 对它无意义
+    val siteName = if (selectedSource?.kind == SourceKind.TVBOX) {
+        namedSites.firstOrNull { it.key == vm.homeSiteKey }
+            ?.name?.substringBeforeLast("（")?.trim()?.takeIf { it.isNotBlank() }
+    } else null
+
+    // 冷启动时没人选过来源，线路列表一直是空的 —— 主动为当前生效来源拉一次（内部有缓存）
+    LaunchedEffect(selectedSource?.id) {
+        selectedSource?.id?.let { vm.ensureHomeSites(it) }
+    }
+
+    // 导航条在两种装配方式下共用同一份构造：悬浮（首页）与流内（分类/我的/搜索）
+    val navBar: @Composable (Modifier) -> Unit = { barModifier ->
+        NfNavBar(
+            current = current,
+            sourceName = selectedSource?.name?.takeIf { it.isNotBlank() } ?: "未选择来源",
+            siteName = siteName,
+            scanning = vm.scanning,
+            onTab = onTab,
+            onRefresh = { vm.refreshHome() },
+            onScope = { chrome.openScopeDrawer = true },
+            onSettings = onSettings,
+            belowFocusRequester = belowFocusRequester,
+            tabFocus = chrome::tabOf,
+            scopeFocus = chrome.scopeFocus,
+            modifier = barModifier.onFocusEvent {
+                chrome.navFocused = it.hasFocus
+                // 焦点来到顶栏 = 用户按了 ↑，此刻顶栏多半已经淡掉一半：
+                // 先把内容滚回顶部再谈可见性，否则就是「选中框在空气上」
+                if (it.hasFocus) onNavFocus?.invoke()
+            }
+        )
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .themeBackdrop()
+    ) {
+        if (navInFlow) {
+            Column(Modifier.fillMaxSize()) {
+                // 流内装配时导航条下面必须留一条缝：它自己只有 top padding，
+                // 紧贴着排就会和第一行内容（搜索页的输入框）糊成一块
+                navBar(Modifier.padding(bottom = 12.dp))
+                Box(Modifier.fillMaxWidth().weight(1f)) { content() }
+            }
+        } else {
+            content()
+
+            if (navVisible) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .then(
+                            if (navAlpha != null) Modifier.graphicsLayer { this.alpha = navAlpha() }
+                            else Modifier
+                        )
+                ) {
+                    Box(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .height(NfNavScrimHeight)
+                            .background(
+                                Brush.verticalGradient(
+                                    0f to AppColors.Bg.copy(alpha = 0.78f),
+                                    0.52f to AppColors.Bg.copy(alpha = 0.30f),
+                                    1f to Color.Transparent
+                                )
+                            )
+                    )
+                    navBar(Modifier.align(Alignment.TopCenter))
+                }
+            }
+        }
+
+        if (chrome.openScopeDrawer) {
+            NfScopeDrawer(
+                sources = sources,
+                selectedSourceId = vm.effectiveHomeSourceId(),
+                selectedSiteKey = vm.homeSiteKey,
+                sitesOf = { id -> vm.homeSitesBySource[id].orEmpty() },
+                loadingSites = vm.homeSitesLoading,
+                onEnsureSites = { vm.ensureHomeSites(it) },
+                onPickSource = { vm.selectHomeSource(it) },
+                onPickSite = { key, site -> vm.selectHomeSite(key, site) },
+                onManage = {
+                    chrome.openScopeDrawer = false
+                    onManageSources()
+                },
+                onDismiss = { chrome.openScopeDrawer = false }
+            )
+        }
+    }
+}
+
+/** 页面内的空态：一句话 + 一句更弱的补充说明，可选一颗操作按钮 */
+@Composable
+fun NfInlineEmpty(
+    text: String,
+    hint: String? = null,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+    focusRequester: FocusRequester? = null
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 40.dp, vertical = 40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text,
+            color = TvText.Section,
+            style = MaterialTheme.typography.headlineSmall
+        )
+        if (!hint.isNullOrBlank()) {
+            Text(
+                hint,
+                color = TvText.Meta,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+        if (actionLabel != null && onAction != null) {
+            NfActionButton(
+                text = actionLabel,
+                onClick = onAction,
+                modifier = Modifier.padding(top = 20.dp).then(
+                    if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
+                )
+            )
+        }
+    }
+}
+
+/** 页面里的一颗普通操作（空态重试、切换来源确认等），沿用导航条按钮的层级语言 */
+@Composable
+fun NfActionButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    Box(
+        modifier
+            .clip(Radius.Pill)
+            .background(if (focused) Color.White else AppColors.Brand.copy(alpha = 0.24f))
+            .then(
+                if (focused) Modifier.border(2.dp, Color.White, Radius.Pill)
+                else Modifier.border(1.dp, AppColors.Brand, Radius.Pill)
+            )
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
+            .padding(horizontal = 26.dp, vertical = 12.dp)
+    ) {
+        Text(
+            text,
+            color = if (focused) Color.Black else TvText.Title,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1
+        )
+    }
+}

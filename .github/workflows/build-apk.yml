@@ -3,6 +3,8 @@ name: Build APK
 on:
   push:
     branches: [ main, master, dev ]
+    # 正式发版：git tag -a v1.0.0 && git push origin v1.0.0 → 出不可覆盖的正式包
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 permissions:
@@ -66,9 +68,14 @@ jobs:
       - name: Prepare raw APK
         run: |
           set -e
-          VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed 's/.*versionName *= *"\(.*\)".*/\1/')
-          APK_NAME="${APP_NAME}-v${VERSION}-${GITHUB_REF_NAME}.apk"
           mkdir -p dist
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # 正式发版：tag 名本身就带 v + 版本号，不再叠加 versionName，免得文件名出现两个版本
+            APK_NAME="${APP_NAME}-${GITHUB_REF_NAME}.apk"
+          else
+            VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed 's/.*versionName *= *"\(.*\)".*/\1/')
+            APK_NAME="${APP_NAME}-v${VERSION}-${GITHUB_REF_NAME}.apk"
+          fi
           cp app/build/outputs/apk/debug/app-debug.apk "dist/${APK_NAME}"
           ls -lh "dist/${APK_NAME}"
           echo "APK_NAME=${APK_NAME}" >> "$GITHUB_ENV"
@@ -79,16 +86,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          TAG="${GITHUB_REF_NAME}-latest"
-          PRERELEASE=""
-          if [ "${GITHUB_REF_NAME}" != "main" ] && [ "${GITHUB_REF_NAME}" != "master" ]; then
-            PRERELEASE="--prerelease"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            # 正式包：挂在发版 tag 上，同名 tag 已有 Release 就直接失败，不覆盖 —— 别人手上的链接必须一直指向同一个包
+            gh release create "$GITHUB_REF_NAME" "dist/${APK_NAME}" \
+              --target "$GITHUB_SHA" \
+              --title "${APP_NAME} ${GITHUB_REF_NAME}" \
+              --notes-file CHANGELOG.md
+            LINK_TAG="$GITHUB_REF_NAME"
+          else
+            # 分支包：滚动覆盖 <分支>-latest，只用来随时拿最新可装的包
+            TAG="${GITHUB_REF_NAME}-latest"
+            PRERELEASE=""
+            if [ "${GITHUB_REF_NAME}" != "main" ] && [ "${GITHUB_REF_NAME}" != "master" ]; then
+              PRERELEASE="--prerelease"
+            fi
+            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$TAG" "dist/${APK_NAME}" \
+              --target "$GITHUB_SHA" \
+              --title "${APP_NAME} ${GITHUB_REF_NAME} 最新构建" \
+              --notes "自动构建：${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}，点击下方 ${APK_NAME} 直接下载安装，无需解压。" \
+              $PRERELEASE
+            LINK_TAG="$TAG"
           fi
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" "dist/${APK_NAME}" \
-            --target "$GITHUB_SHA" \
-            --title "${APP_NAME} ${GITHUB_REF_NAME} 最新构建" \
-            --notes "自动构建：${GITHUB_REF_NAME} @ ${GITHUB_SHA:0:7}，点击下方 ${APK_NAME} 直接下载安装，无需解压。" \
-            $PRERELEASE
           echo "### 直接下载 APK（无压缩、无 zip）" >> "$GITHUB_STEP_SUMMARY"
-          echo "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${APK_NAME}" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/download/${LINK_TAG}/${APK_NAME}" >> "$GITHUB_STEP_SUMMARY"

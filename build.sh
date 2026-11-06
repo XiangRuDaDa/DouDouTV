@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MyVidHub 一键构建可安装 APK
+# DouDouTv 一键构建可安装 APK
 # 用法：bash build.sh
 # 依赖：JDK 17 或 21、Android SDK（compileSdk 34）、Gradle 8.7
 

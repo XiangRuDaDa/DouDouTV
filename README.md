@@ -1,9 +1,12 @@
-# DouDouTV —— 安卓手机 + TV 双端视频播放器 v2.3
+# DouDouTV —— 安卓手机 + TV 双端视频播放器 v1.0.0
 
 自研的安卓个人影音客户端，**只对接两类来源：Emby 与 TVBox**。
-界面与交互形态参照 VidHub、Netflix 的成熟做法（沉浸式大图首页、海报墙、聚焦色背景、十英尺遥控器 UI）。
+界面与交互形态参照 Netflix 等主流流媒体客户端的成熟做法（沉浸式大图首页、海报墙、聚焦色背景、十英尺遥控器 UI）。
 代码为本项目原创实现，不含任何对第三方商业应用的逆向或反编译产物；TVBox 侧仅参考公开协议与
-开源项目（CatVod / TVBox 配置规范、FongMi/TV）的行为约定，未复制其源码，详见「十、参考项目与许可」。
+开源项目（CatVod / TVBox 配置规范、FongMi/TV）的行为约定，未复制其源码，详见「九、参考项目与许可」。
+
+包名、应用名与对外标识统一为 `com.chen.doudoutv` / `DouDouTV`，Emby 认证头里上报的 `Client` 也是 `DouDouTV`
+—— 不伪装成别的客户端。
 
 ---
 
@@ -11,357 +14,101 @@
 
 | 模块 | 实现 |
 |---|---|
-| 来源类型 | **Emby**（服务器+账号）、**TVBox**（配置 JSON + spider 爬虫） |
+| 来源类型 | **Emby**（服务器 + 账号）、**TVBox**（配置 JSON + spider 爬虫） |
 | 播放内核 | Media3 / ExoPlayer 1.4.1，支持 MKV、HEVC、AV1、HLS、DASH |
 | Emby 鉴权 | `Users/AuthenticateByName` 换 AccessToken，落库复用，无需反复登录 |
-| Emby 影库 | `Users/{id}/Items` 拉电影+剧集，`Shows/{id}/Episodes` 拉分集 |
+| Emby 影库 | `Users/{id}/Items` 拉电影 + 剧集，`Shows/{id}/Episodes` 按需拉分集 |
 | Emby 播放 | `Videos/{id}/stream?static=true` 原码流直传，局域网不转码 |
 | TVBox 站点 | 读取配置里的 `type=3` spider 站点，DexClassLoader 加载 spider 包后反射调用 |
+| TVBox 加密壳 | `csp_XxxGuard` 这类壳由 [SpiderLoader](app/src/main/java/com/chen/doudoutv/data/tvbox/SpiderLoader.kt) 加载，并起一个本机代理 `127.0.0.1:9978` 供壳的 native 初始化回调（[LocalProxyServer](app/src/main/java/com/chen/doudoutv/data/tvbox/LocalProxyServer.kt)） |
 | TVBox 解析 | spider 标准方法：`homeContent` / `categoryContent` / `searchContent` / `detailContent` / `playerContent` |
+| TVBox 多线路 | 详情页把全部播放源（云盘 / 线路）铺成 chips，选中哪条就只播那条，切线路自动把选中项滚进可见区域 |
+| 元数据刮削 | 可选 TMDB（默认关，需自填 apiKey / read token）；豆瓣热门榜用于搜索联想；刮削结果独立表 `scraped_meta` 复用 |
+| 画质徽章 | 源侧文本先显示，播放期用真实轨道信息校正（分辨率 / HDR / Codec）；分集名一律沿用播放源原名，不自编 `SxxExx` |
 | 手机首页 | Hero 大图轮播 → 继续观看横滑 → 收藏 → 电影 → 剧集 → 动漫 |
-| 电视首页 | 满屏横版主视觉（9s 轮换）+ 横向海报行 + 顶部横排入口 |
-| 详情页背景 | **封面聚焦色填充**，头图向下长距离溶解为整页底色，无硬边接缝 |
-| 详情页布局 | 手机上下堆叠 / 电视左海报右文案两栏（各自独立实现） |
-| 断点续播 | Room 记录进度，首页「继续观看」按最近播放排序 |
-| 自动连播 | 单集播完自动接 `seriesKey` 内下一集 |
-| 播放缓存 | **1GB LRU 磁盘缓存**（v2.1 由 512MB 提升） |
-| 双端架构 | **四套独立实现**：`ui/phone` `ui/tv` `player/phone` `player/tv`，不再用 `isTv` 在同屏分叉 |
+| TV 首页 | **两套布局可切**：经典版（满屏横版 hero + 横向海报行 + 顶部横排入口）/ Netflix 版（整屏轮播 + 一行继续观看，分类挪到「分类」页，常驻导航条） |
+| 详情页背景 | 封面聚焦色填充，头图向下长距离溶解为整页底色，无硬边接缝 |
+| 断点续播 | Room 记录进度，首页「继续观看」按最近播放排序；返回时恢复离开前的滚动位置与焦点落点（[ReturnSpot](app/src/main/java/com/chen/doudoutv/ui/ReturnSpot.kt)） |
+| 自动连播 | 单集播完自动接 `seriesKey` 内下一集，片尾预热下一集 |
+| 播放缓存 | 磁盘缓存六档（关闭 / 256M / 512M / 1G / 2G / 4G），LRU；能安全按字节切片的内容才登记，HLS 分片与 Emby 直链按登记制放行 |
+| 可观测 | 全局下载字节计数（只算真正从网卡读进的字节，缓存命中不计，[DownloadMeter](app/src/main/java/com/chen/doudoutv/player/DownloadMeter.kt)）；解析出的直链在日志里脱敏（[LogGate](app/src/main/java/com/chen/doudoutv/core/LogGate.kt)） |
+| 外观 | 主题色板七档（默认「石墨蓝」），缩略图尺寸三档，排版口径双端统一 |
+| 搜索 | 本地库标题模糊 + 拼音首字母前缀联想，并发远程搜索各站点、边出边显示；搜索历史最多 10 条，三端共用一份 |
+| 双端架构 | 手机 / 电视两条完整实现线，播放器也各一个 Activity，不用 `isTv` 在同屏分叉 |
 
 ---
 
-## 二、v2.1 更新要点
+## 二、TV 端布局与设置档位
 
-### 1. 视频加载与起播优化
+TV 端有**两套并存的界面实现**，设置页只切一个枚举值，两边代码都不动：
 
-`player/PlayerFactory.kt` 重写，针对「转圈久、播两秒又卡」的常见症状逐项调整：
-
-| 参数 | v2.0 | v2.1 | 作用 |
-|---|---|---|---|
-| 起播所需缓冲 | 2.0s | **1.0s** | 首帧提前，肉眼可感的提升 |
-| 缓冲池上限 | 默认值（很小） | **手机 64MB / 电视 96MB** | 高清流不再频繁回收缓冲 |
-| 最小缓冲 | 40s / 150s | 手机 20s/120s，电视 30s/180s | 拖动进度后不至于立刻断流 |
-| 回退缓冲 | 无 | **30s** | 回拖不重新走网络 |
-| 错误重试 | 3 次 | **6 次** | 弱网、跨境链路自愈概率更高 |
-| 跨协议重定向 | 关闭 | **开启** | 应对 http→https 跳转 |
-| 超时 | 默认 | 手机 8s/12s，电视 12s/18s | 挂起连接早失败早重连 |
-| 磁盘缓存 | 512MB | **1GB** | 回看同一片段不重复下载 |
-
-另开启 `setPrioritizeTimeOverSizeThresholds(true)`，宁可多占内存也不因到顶而停止预读；
-缓存块损坏时以 `FLAG_IGNORE_CACHE_ON_ERROR` 立即回源，不让坏块拖死整次播放。
-
-### 2. 手机端与电视端代码彻底分离
-
-不再是一个 `isTv: Boolean` 参数贯穿所有页面，而是两条完整的实现线：
-
-```
-ui/phone/PhoneApp.kt          ← 手机外壳：底部标签栏 + 左右推入转场
-ui/tv/TvApp.kt                ← 电视外壳：顶部横排入口 + 淡入淡出
-
-player/phone/PhonePlayerActivity.kt   ← 手机播放器：触摸手势、横竖屏自适应
-player/tv/TvPlayerActivity.kt         ← 电视播放器：遥控器专用、固定全屏
-
-ui/tv/TvHomeScreen.kt / TvSearchScreen.kt / TvGenreScreen.kt /
-      TvDetailScreen.kt / TvComponents.kt   ← 电视端五个页面，独立重写
-```
-
-`MainActivity` 精简至 **43 行**，只做一次环境判定后转交对应实现：
-
-```kotlin
-val isTv = remember { context.isTelevision() || context.forceTvMode() }
-if (isTv) TvApp(vm) else PhoneApp(vm)
-```
-
-好处是改手机端界面不会牵连电视端，反之亦然；两端的播放器参数、交互范式、焦点策略互不影响。
-判定仍保留「无触摸屏」兜底，兼容部分国产盒子 `uiMode` 上报不准的情况。
-
-### 3. 双端 UI 重做
-
-**电视端（十英尺界面）**
-
-- 首页：满屏横版主视觉，标题与按钮压在左下，底部渐隐接入页面底色
-- 海报卡：158dp 竖版，**聚焦放大 10% + 2.5dp 白边**（手机靠涟漪和阴影表达状态，三米外完全看不见，电视必须用放大和描边）
-- 有播放进度的条目底部带进度线，一眼看出「这片看了一半」
-- 搜索：650dp 大输入框默认聚焦，输入停顿 350ms 自动搜索，结果 6 列大卡网格
-- 分类：题材筛选是**单行可左右滚动**的横条（避免遥控器卡在换行处），滚到底自动加载下一页
-- 详情：左海报（220dp）+ 右文案两栏，按钮只有两三个大按钮横排
-
-**手机端**
-
-- 外壳改为底部标签栏（媒体库 / 来源 / 设置），进入详情用右侧小幅推入，返回反向退出
-- 详情页背景升级为聚焦色填充（详见下节）
-
-### 4. 详情页背景：封面聚焦色填充 + 渐变过渡
-
-1. 封面加载完成后用 `Palette` 提取聚焦色，优先取饱和度较高的色块；
-   灰度封面取不到色相时退回品牌色，保证页面总有色调。
-2. 聚焦色压成**两个端点**：顶部色相最浓（明度 0.34），底部同色相压暗（明度 0.14）。
-3. 两端色之间用插值生成整页竖向渐变，长列表滚到底也不会露出纯黑断层。
-4. 头图下方 45% 区间叠一层溶解蒙版（黑 0.34 → 透明 → 填充色 0.30 → 0.78 → 1.0），
-   让封面逐渐溶解成整页底色，两者之间没有硬边。
-5. 聚焦色按图片 URL 做 LRU 缓存（容量 64），首页、继续观看、详情页重复出现的封面不重复解码。
-
-### 5. 电视播放器遥控器交互
-
-| 按键 | 行为 |
-|---|---|
-| **OK / 确认** | 暂停或继续，并显示进度条 |
-| **下方向键** | 弹出功能面板：倍速（0.5x–2x）/ 字幕 / 音轨 / 选集，**3 秒无操作自动收起** |
-| **左 / 右** | 快退 / 快进 10 秒，顶部显示时间提示 |
-| **返回** | 面板打开时先关面板，再按退出播放 |
-
-- **默认全屏**，固定 16:9 适应，**不提供「适应 / 铺满 / 缩放」比例切换**
-- 面板一级是标签，二级是选项，选项间用遥控器左右移动，聚焦项高亮为白底黑字
-- 退出时进度保存改用独立协程作用域，避免 Activity 销毁导致最后一笔进度丢失
-
----
-
-## 三、v2.3 更新要点
-
-### 1. TV 端来源界面彻底重写
-
-旧版 `TvSourcesScreen` 存在三方面十英尺适配缺失：卡片无 TV 焦点反馈（无 scale + 白边）、用 AlertDialog 做表单弹窗（Leanback 焦点导航困难）、无 Emby/TVBox 分组且缺少删除二次确认。v2.3 完整重写为四个独立 Composable：
-
-**`TvSourcesScreen` 主页面**
-
-- `BoxWithConstraints` + `LazyVerticalGrid` 响应式网格：以 380dp 为基准算列数（720p→3 列 / 1080p→5 列 / 4K→10 列），卡片高度 `width × 0.76` 且 clamp 260–340dp
-- Emby / TVBox 分组标题 + 计数标签，与手机端 SourcesScreen 信息架构对齐
-- 顶部栏复用 `TvBackButton` / `TvPillButton(compact=true)`，同步状态用脉冲圆点
-
-**`TvSourceCard` 可聚焦卡片**
-
-- 完全对齐 `TvPosterCard` 焦点模式：`collectIsFocusedAsState` → `animateFloatAsState(1.05f)` → `graphicsLayer.scale` → `Modifier.border(2.dp, Color.White)` → `Modifier.focusable()`
-- 56dp 类型图标 + 12dp 彩色状态圆点（绿=在线 / 橙=Token 失效 / 灰=停用）+ 名称 + 徽章 + URL + 底部统计栏（条目数 / 登录状态 / 同步时间）
-- 操作按钮（同步 / 编辑 / 删除）默认 opacity 0，卡片获得焦点时才显示，避免常态信息过载
-- 禁用卡片整体 alpha 0.5 视觉降噪
-
-**`TvSourceFormPanel` 全屏面板表单**（不使用 AlertDialog）
-
-- `Box(fillMaxSize, Color.Black.copy(alpha=0.65f))` + `Surface(width=55%, height=88%)` 居中面板
-- 类型选择器：Emby 蓝色 / TVBox 黄色 大卡片（220×90），选中态品牌蓝描边 + 图标反白
-- `Modifier.height(64.dp)` OutlinedTextField，品牌蓝聚焦 + 3px 外发光
-- Emby 用户名 / 密码左右双列（各 `weight(1f)`），节省面板高度
-
-**`TvDeleteConfirmDialog` 危险操作防护**（旧版缺失）
-
-- 56dp 圆形 ⚠️ 警告图标 + 红色危险提示条，显示具体条目数（"284 部影片将被永久删除"）
-- `LaunchedEffect { cancelRequester.requestFocus() }` 默认焦点落到"取消"按钮，防止遥控器默认聚焦红色删除按钮导致误触
-- 红色 PillButton 变体，聚焦时白底红字 + `scale(1.06)`
-
-### 2. 手机端来源卡片布局修复
-
-第一行 `Row` 里 `Text(weight=1f, fill=false)` 和 `Spacer(weight=1f)` 两个带 weight 的子元素同时存在，"使用中"徽章的有无改变了 Switch 位置。
-
-修复：第一行拆成左右两个子 Row —— 左侧 `Row(weight=1f)` 撑满剩余空间（状态点 + 名称），右侧 Row 用自然宽度锚定最右（徽章 + Switch），Switch 位置不再随徽章有无漂移。
-
-### 3. 手机端来源表单优化
-
-- 新增 `MobileFormField` 统一组件：`height(56.dp)` OutlinedTextField + AppColors.Bg 容器底 + AppColors.Brand 聚焦边框 + 15sp 字号 + 10dp 圆角
-- Emby 用户名 / 密码左右双列布局，节省 AlertDialog 纵向空间
-- `trimmedName` / `trimmedLoc` 非空校验，空时按钮 disabled（`canSubmit`）
-- 类型 FilterChip 加宽文字（"Emby 媒体服务器" / "TVBox 接口"），AlertDialog 圆角提升至 18dp
-
----
-
-## 四、工程结构
-
-```
-MyVidHub/
-├── settings.gradle.kts / build.gradle.kts / gradle.properties
-├── gradle/wrapper/gradle-wrapper.properties
-├── README.md
-└── app/
-    ├── build.gradle.kts / proguard-rules.pro
-    └── src/main/
-        ├── AndroidManifest.xml
-        ├── res/
-        │   ├── values/{strings,colors,themes}.xml
-        │   └── drawable/{ic_app_icon,tv_banner}.xml
-        └── java/com/tabbit/myvidhub/
-            ├── MyVidHubApp.kt              # Application，持有 Room 单例
-            ├── MainActivity.kt             # 唯一入口：仅做 isTv 分发（43 行）
-            ├── core/Prefs.kt               # 应用级偏好
-            ├── data/
-            │   ├── MediaRepository.kt      # Emby/TVBox 入库、详情、进度
-            │   ├── db/
-            │   │   ├── AppDatabase.kt      # v2，破坏性迁移
-            │   │   ├── SourceDao.kt
-            │   │   ├── MediaDao.kt
-            │   │   └── Converters.kt
-            │   ├── model/Entities.kt       # SourceEntity / MediaEntity
-            │   ├── emby/EmbyClient.kt      # ★ Emby REST 客户端
-            │   └── tvbox/TvBoxClient.kt    # ★ TVBox 客户端（spider）
-            ├── player/PlayerFactory.kt     # 双端缓冲策略 + 1GB 缓存 + ExoPlayer 装配
-            └── ui/
-                ├── LibraryViewModel.kt
-                ├── theme/Theme.kt          # AppColors 深色影音配色 + isTelevision()
-                ├── components/             # 手机端共用组件
-                │   ├── PosterCard.kt       # 2:3 海报卡
-                │   ├── ContinueCard.kt     # 16:9 继续观看卡
-                │   └── HeroBanner.kt       # 首页大图轮播
-                ├── home/                   # 手机端页面
-                │   ├── HomeScreen.kt       # 首页（含 GenreScreen / SearchScreen）
-                │   └── ...
-                ├── detail/
-                │   ├── DetailScreen.kt     # 手机端详情页
-                │   └── DetailColors.kt     # 聚焦色提取/压暗/缓存（两端共用计算）
-                ├── sources/SourcesScreen.kt# 来源增删（仅 Emby / TVBox）
-                ├── settings/SettingsScreen.kt
-                ├── phone/
-                │   └── PhoneApp.kt         # ★ 手机端外壳
-                ├── tv/                     # ★ 电视端全部页面（独立实现）
-                │   ├── TvApp.kt            # 电视端外壳
-                │   ├── TvHomeScreen.kt     # 横版 hero + 横向海报行
-                │   ├── TvSearchScreen.kt   # 6 列网格搜索
-                │   ├── TvGenreScreen.kt    # 单行题材条 + 分页
-                │   ├── TvDetailScreen.kt   # 左海报右文案两栏
-                │   └── TvComponents.kt     # TvPillButton / TvPosterCard / TvFilterChip
-                └── player/
-                    ├── phone/PhonePlayerActivity.kt   # ★ 手机播放器
-                    └── tv/TvPlayerActivity.kt         # ★ 电视播放器
-```
-
----
-
-## 五、如何得到可安装的 APK
-
-> 本仓库已包含：完整源码、Gradle Wrapper（`gradlew`，无需预装 Gradle）、一键脚本 `build.sh`、
-> 云端构建配置 `.github/workflows/build-apk.yml`。三条路任选一条，产物都是
-> `app/build/outputs/apk/debug/app-debug.apk`。
-
-| 方式 | 适用场景 | 你需要准备 | 首次耗时 |
-|---|---|---|---|
-| **A. GitHub Actions 云端构建** | 不想在电脑上装任何 Android 环境 | 一个 GitHub 账号 | 约 6–10 分钟 |
-| **B. `./build.sh` 一键构建** | 已有 JDK 与 Android SDK | JDK 17、Android SDK 34 | 约 10 分钟（含下载依赖） |
-| **C. Android Studio** | 想改代码、看 Compose 预览、断点调试 | 安装 Android Studio | 约 5 分钟同步 |
-
-### 方式 A：GitHub Actions 云端构建（最省事，推荐给只想拿安装包的人）
-
-1. 在 GitHub 新建一个空仓库（Private 也可以，Actions 免费额度足够）
-2. 把 `MyVidHub` 目录内容推到该仓库的 `main` 分支：
-   ```bash
-   cd MyVidHub
-   git init && git add . && git commit -m "init"
-   git remote add origin https://github.com/<你的用户名>/<仓库名>.git
-   git push -u origin main
-   ```
-3. 推送后自动触发构建（`main`、`master`、`dev` 分支均已配置，也可在仓库 **Actions** 页点 `Build APK` → `Run workflow` 手动触发）
-4. 构建完成（绿色 ✓）后，在仓库 **Releases** 页下载 `DouDouTV-v2.3-<分支>.apk`
-5. 下载到的就是原始 APK 文件，无需解压 → 传到手机 / U 盘拷到电视盒子安装
-
-CI 固定使用 **JDK 17（temurin）**、Gradle 8.7、AGP 8.5.2，直接复用 ubuntu-latest 预装的 Android SDK，
-不额外安装 cmdline-tools；构建失败会自动重试一次，仍失败则报红，不会产出空包。
-
-### 方式 B：命令行一键构建
-
-前置条件（缺一不可）：
-
-- **JDK 17**（本工程 `jvmTarget = 17`，AGP 8.5.2 要求 JDK 17+）
-- **Android SDK**，含 `platforms/android-34` 与 `build-tools/34.0.0`
-- 网络能访问 `dl.google.com` 与 `repo.maven.apache.org`
-
-```bash
-cd MyVidHub
-bash build.sh          # Windows 用 Git Bash 或 WSL
-```
-
-脚本会依次校验 Java 版本、定位 SDK 并写 `local.properties`、缺失组件时自动调
-`sdkmanager` 安装、最后执行 `gradlew assembleDebug`，并打印 APK 路径与 `adb install` 命令。
-
-### 方式 C：Android Studio（推荐用于开发）
-1. Android Studio Hedgehog (2023.1.1) 或更新
-2. `File → Open` 选择 `MyVidHub` 目录
-3. 等待 Gradle 同步（首次下载依赖约 400–600MB）
-4. 连接设备/模拟器，点 ▶ 运行
-
-### IntelliJ IDEA（Ultimate 版）
-本工程是标准 Gradle + AGP 项目，IDEA 可以打开，但需要区分版本能力：
-
-**IntelliJ IDEA Ultimate**（含 Android 插件）
-1. `File → Open` 选择 `MyVidHub` 的 `build.gradle.kts`（或整个目录），选 **Open as Project**
-2. `Settings → Plugins → Marketplace` 搜 **Android**，安装并重启
-3. `Settings → Languages & Frameworks → Android SDK` 指定 SDK 路径（需 Platform 34）
-4. `Settings → Build Tools → Gradle → Gradle JVM` 设为 **JDK 17**
-5. 首次 Sync 会下载依赖；完成后可直接选设备 Run
-
-**IntelliJ IDEA Community**（无 Android 插件）
-- 可以正常打开、浏览与编辑代码（Kotlin / Compose 语法高亮、跳转、补全均可用）
-- 但没有 Android SDK 集成、没有 Run 配置、没有 Compose Preview、没有 Layout Inspector
-- 想构建 APK 只能用终端跑 `./gradlew assembleDebug`
-
-> 纯 Android 开发仍建议用 Android Studio：Compose Preview、Layout Inspector、APK Analyzer、
-> 设备镜像等工具链比 IDEA 领先数个版本。
-
-### 命令行
-```bash
-# 需要 JDK 17 + Android SDK Platform 34
-export ANDROID_HOME=$HOME/Android/Sdk          # macOS/Linux
-# Windows: set ANDROID_HOME=%LOCALAPPDATA%\Android\Sdk
-
-echo "sdk.dir=$ANDROID_HOME" > local.properties
-
-./gradlew assembleDebug                         # macOS/Linux
-gradlew.bat assembleDebug                       # Windows
-# → app/build/outputs/apk/debug/app-debug.apk
-```
-
-Wrapper 已随工程提供（`gradlew` / `gradlew.bat` / `gradle/wrapper/gradle-wrapper.jar`），
-无需预装 Gradle，首次运行会自动下载 Gradle 8.7。
-
-### 版本矩阵（改版本前请对照）
-
-| 组件 | 本工程版本 | 说明 |
+| 取值 | 实现位置 | 形态 |
 |---|---|---|
-| Gradle | **8.7** | AGP 8.5.2 要求 ≥ 8.7 |
-| Android Gradle Plugin | **8.5.2** | 需 JDK 17 |
-| Kotlin | **1.9.24** | 与 Compose Compiler 严格配对 |
-| Compose Compiler | **1.5.14** | 必须匹配 Kotlin 1.9.24 |
-| KSP | **1.9.24-1.0.20** | 版本号必须与 Kotlin 严格一致 |
-| JDK | **17** | AGP 8.5.2 最低要求 |
-| jvmTarget | **17** | 与 JDK 对齐 |
-| compileSdk / targetSdk | 34 | minSdk 21 |
-| Media3 | 1.4.1 | exoplayer / ui / hls / dash / datasource-okhttp / database |
-| Room | 2.6.1 | KSP 注解处理 |
-| Coil | 2.6.0 | 海报加载 |
-| Palette | 1.0.0 | 详情页聚焦色提取 |
+| `NETFLIX`（默认） | `ui/tv/nf/` | 常驻导航条（首页 / 分类 / 我的 / 搜索 + 设置入口），首页只留整屏轮播与继续观看 |
+| `CLASSIC` | `ui/tv/` | 顶部横排入口 + 首页把分类行全部铺开 |
 
-> ⚠️ Kotlin 与 Compose Compiler 是强绑定关系，单独升级其中一个必定编译失败。
-> KSP 版本号也必须和 Kotlin 主版本精确对齐（1.9.24-X.Y.Z 对应 Kotlin 1.9.24）。
-> 若要升到 Kotlin 2.x，需同时启用 `org.jetbrains.kotlin.plugin.compose` 插件并移除
-> `composeOptions { kotlinCompilerExtensionVersion }`。
+设置页（`TvSettingsScreen`，两套布局共用）能改的档位：
 
----
+| 档位 | 取值 | 说明 |
+|---|---|---|
+| 布局风格 | Netflix / 经典 | 只换页面实现，不动数据 |
+| 缩略图尺寸 | 小 92/132 · 中 118/162 · 大 144/192（dp，手机/TV） | 海报卡与网格列宽跟着走 |
+| 移动效果 | 放大（默认）/ 上抬 | **只作用于 Netflix 版海报卡**，经典版不读这一档 |
+| 视频缓存 | 关闭 / 256M / 512M / 1G / 2G / 4G | 整个缓存目录的上限，不是单集上限 |
+| 主题色 | 石墨蓝 / 青瓷 / 鸢尾 / 赤铜 / 胭脂 / 竹青 / 霜青 | 只换品牌色两位，中性色与默认色板一像素不变 |
+| TMDB 刮削 | 开关 + apiKey + read token | 默认关；关闭时不发任何外部请求，完全沿用来源自带元数据 |
 
-## 六、使用流程
+「移动效果」两档的像素账：行内纵向余量只有 `NfRowVerticalPadding = 14dp`，超出就会被 Lazy 容器裁掉一条边。
 
-### 1. 添加 Emby 来源
-- 来源页 → 「添加来源」→ 选 **Emby**
-- 服务器地址：`https://emby.yourdomain.com`（不带 `/web`）
-- 填用户名密码 → 点添加，程序会自动 `AuthenticateByName` 换 token
-- 若显示「未登录」，点该卡片右侧刷新按钮重新登录
-
-### 2. 添加 TVBox 来源
-- 选 **TVBox**，填 TVBox 配置 JSON 地址，需包含 `spider` 字段与 `type=3` 站点
-  例如形如 `https://example.com/tvbox.json`
-- 添加后同步即可拉到首页列表
-
-### 3. 同步与播放
-- 首页右上角同步全部来源
-- 点海报进详情页；剧集页可切季、选集
-- 详情页「继续播放」按钮会接着上次的进度
-
-### 4. 手机端操作
-- 底部标签栏切「媒体库 / 来源 / 设置」
-- 播放页：点击画面呼出控制层、双击左右快进快退、上下滑调亮度音量、支持比例切换
-
-### 5. TV 端操作
-- 若盒子未被识别为 TV：设置 → 打开「强制电视模式」
-- 首页遥控器上下换分区、左右换条目、OK 进入
-- 播放页：**OK 暂停 / 下键呼出功能面板 / 左右 ±10 秒 / 返回退出**
-- 播放页固定全屏，没有比例切换按钮
+- **放大**：只有图片这一层从中心涨 5%（`ArtZoom = 1.05`），上下各多占 6~7dp；片名在图外，一动不动。
+- **上抬**：整卡不放大，往上抬 12dp（14dp 余量内的极限）。
 
 ---
 
-## 七、几个设计取舍
+## 三、工程结构
+
+```
+myhub/
+├── settings.gradle.kts / build.gradle.kts / gradle.properties
+├── README.md / CHANGELOG.md
+├── gradle/wrapper/            # Gradle 8.7，无需预装 Gradle
+├── build.sh                   # 一键构建（校验 JDK / 定位 SDK / 补缺组件 / assembleDebug）
+├── .github/workflows/build-apk.yml
+└── app/
+    ├── build.gradle.kts / proguard-rules.pro / debug.keystore
+    ├── schemas/               # Room 导出的历史表结构（exportSchema = true）
+    └── src/
+        ├── main/
+        │   ├── AndroidManifest.xml        # 双入口：LAUNCHER + LEANBACK_LAUNCHER
+        │   ├── res/                       # values / drawable / layout / mipmap（含 tv_banner）
+        │   └── java/com/chen/doudoutv/
+        │       ├── DouDouApp.kt           # Application（类名 DouDouTvApp）：Coil、崩溃落盘、DB 单例
+        │       ├── MainActivity.kt        # 唯一入口：判定 isTv 后分发 PhoneApp / TvApp
+        │       ├── core/                  # Prefs / AppCache / VideoCache / LogGate
+        │       ├── data/
+        │       │   ├── MediaRepository.kt # Emby / TVBox 入库、详情、进度
+        │       │   ├── db/                # AppDatabase(v12) + Source/Media/HotTitle/ScrapedMeta DAO + Pinyin
+        │       │   ├── emby/EmbyClient.kt # ★ Emby REST 客户端
+        │       │   ├── tvbox/             # ★ TvBoxClient + SpiderLoader + LocalProxyServer + 结果解析
+        │       │   ├── tmdb/              # TmdbClient / TmdbCache / ScrapeTitle（检索词清洗）
+        │       │   └── scrape/ douban/ format/ image/ model/
+        │       ├── player/                # PlayerFactory / VideoCacheFiller / StreamSpaceDataSource /
+        │       │                          # PlaybackNormalizer（防和谐）/ DownloadMeter
+        │       └── ui/
+        │           ├── LibraryViewModel.kt / ReturnSpot.kt
+        │           ├── theme/             # Theme / ThemePalette / ThemeBackdrop / Material
+        │           ├── components/        # 海报卡、继续观看卡、Hero 轮播、骨架屏、格式徽章…
+        │           ├── home/ detail/ sources/ settings/   # 手机端页面
+        │           ├── phone/PhoneApp.kt  # ★ 手机端外壳（底部标签栏）
+        │           ├── tv/                # ★ 电视端经典版页面 + TvComponents + HeroAmbient + TvSourcesScreen
+        │           ├── tv/nf/             # ★ 电视端 Netflix 版：外壳 / 首页 / 分类 / 我的 / 搜索 / 作用域抽屉
+        │           └── player/phone/ player/tv/           # ★ 两个播放器 Activity
+        └── androidTest/java/com/chen/doudoutv/E2eTvBoxTest.kt   # 真机端到端走 TVBox 全流程
+```
+
+---
+
+## 四、关键设计取舍
 
 ### 1. TVBox 为什么分两次请求
 spider 的首页列表（`homeContent`）**不含播放地址**，只有 `detailContent` 才返回 `vod_play_url`。
@@ -372,53 +119,194 @@ spider 的首页列表（`homeContent`）**不含播放地址**，只有 `detail
 剧集壳条目的 `uri` 是空字符串。如果唯一索引建在 `uri` 上，第二个壳就会因重复而插入失败。
 改用 `remoteId`（`emby:来源id:itemId` / `tvbox:来源id:vodId:集数`）天然唯一且稳定。
 
-### 3. Emby 用 static=true
+### 3. Emby 为什么用 static=true
 `static=true` 表示不转码、直接原码流传输。局域网千兆下这是画质与延迟的最优解，
 代价是客户端必须能解码（Media3 对 HEVC/MKV 支持良好）。若遇到不支持的编码，
 把 `EmbyClient.playbackUrl` 的 `static` 改为 `false` 即可让服务器转码。
+本项目**不接 HLS 自动降档**：目标是要高码率原码，卡顿只做可见化（下载计量 + 缓冲状态）。
 
-### 4. 为什么坚持双端分开写
+### 4. 为什么双端、乃至 TV 两套布局都分开写
 最早的版本用 `isTv: Boolean` 参数在所有页面里分叉，代价是每个页面都背着一堆
 `if (isTv) ... else ...`，改手机端动到电视端的风险很高，而且两端的交互范式本来就不同：
-手机靠手势与涟漪，电视靠焦点移动与描边放大。拆成两条实现线后，各自可以独立演进。
+手机靠手势与水波涟漪，电视靠焦点移动与描边。TV 端后来新增 Netflix 版时同样不合并，
+而是在 `ui/tv/nf/` 另拉一套 —— 切换只改一个枚举值，任何一边都能独立回滚。
 
-### 5. 电视端为什么用「放大 + 白边」
+### 5. 电视端焦点怎么表达「当前选中」
 手机上的卡片状态靠水波纹和阴影表达，这两者在三米外完全不可见。
-电视只能用**尺寸变化**（放大 10%）加**高对比描边**（2.5dp 白边）来传达「当前选中」，
-同时行首尾留白 44dp，保证放大时不被屏幕边缘裁切。
+- 经典版：聚焦**放大 + 2.5dp 白边**，行首尾留白保证放大时不被屏幕边缘裁切。
+- Netflix 版：片名改到图外（图内不再叠字），焦点动效两档可切（见第二节）；
+  圆角与白环挂在图片层，缩放也只作用于图片层，文字层因此不参与重组。
 
-### 6. 手机端转场的方向感
-- 进详情 = 下钻 → 新页面从右侧小幅推入（`it/6`）并淡入
-- 回列表 = 上浮 → 详情向左退（`it/4`），列表从左侧轻滑回来
+### 6. 缓存与 seek 的坐标系必须只有一套
+伪装前缀的平移放在数据源层（`StreamSpaceDataSource`）而不是拦截器层，于是 Media3 的区间记账
+和播放器的 seek 只剩「流坐标」一套坐标系 —— 两套坐标系叠在一起必抛 `READ_POSITION_OUT_OF_RANGE`。
+走不走缓存只看一条判据：这条 URL 有没有被登记过；未登记的仍然是裸 `OkHttpDataSource`，取数路径一字节不变。
+
+### 7. 播放参数以当前代码为准
+`player/PlayerFactory.kt` 里现值：起播缓冲 2.0s、rebuffer 后 3.0s、常态 min 缓冲手机 50s / 电视 60s、
+target 240s / 300s、回退缓冲 60s、`setPrioritizeTimeOverSizeThresholds(true)`、
+缓冲池 target 字节 256MB / 384MB、磁盘缓存分块 32MiB。
+这些数值是按实测限速窗口调出来的（大分块完成间隔会 12.5s→21s→32s 一路劣化，最坏一次 66 秒几乎无字节），
+改之前先读代码里那段注释，别照文档回退。
+
+### 8. 手机端转场的方向感
+- 进详情 = 下钻 → 新页面从右侧小幅推入并淡入
+- 回列表 = 上浮 → 详情向左退，列表从左侧轻滑回来
 - 切底部标签 = 平级 → 只做交叉淡化，不引入方向，避免「左右乱跳」
 
----
+### 9. 主题色只走该走的地方
+色板只替换品牌色两位：按钮、聚焦描边、开关跟随；详情页背景继续走封面聚焦色，
+默认色板「石墨蓝」下的既有画面一像素都不变。
 
-## 八、已知限制
-
-1. **Emby 播放进度不回写服务器**：目前进度只存本地 Room，多端之间不同步
-2. **TVBox 只用第一条线路**：多线路数据已在 `loadTvBoxDetail` 返回，但 UI 尚未提供切换
-3. **远程搜索未接线**：`EmbyClient.search()` 与 `TvBoxClient.search()` 已实现，页面只查本地库
-4. **Emby 外挂字幕未使用**：`subtitleUrl` 字段已解析，播放页尚未加载
-5. **无自动化测试**：暂无 `src/test` 与 `src/androidTest`
-6. **数据库为破坏性迁移**：`fallbackToDestructiveMigration()`，升级版本会清空播放进度与收藏
-7. **README 与代码仍需人工同步**：文档更新滞后于代码是这类个人项目的常见问题
+### 10. 分集命名
+一律用播放源给的分集名（如 `[5.4GB]E01.mkv`），不自编 `SxxExx`；只有 Emby 这类没有源分集名的才编号兜底。
 
 ---
 
-## 九、可继续扩展
+## 五、如何得到可安装的 APK
 
-1. **Emby 播放进度回写**：加 `Sessions/Playing/Progress` 上报，实现多端同步
-2. **TVBox 多线路切换 UI**：给电视播放器面板加一个「线路」标签即可
-3. **远程搜索接入**：把已实现的 `search()` 接到搜索页，本地库无结果时回落远程
-4. **外挂字幕加载**：把 `subtitleUrl` 接进 Media3 的 `SubtitleConfiguration`
-5. **演员/相似推荐**：Emby `Items/{id}/Similar` 与 `People` 字段
-6. **海报墙性能**：条目过千时给 Room 加分页（Paging 3）
-7. **加密存储凭据**：把来源账号密码与 token 从明文改为 `EncryptedSharedPreferences`
+> 仓库已包含：完整源码、Gradle Wrapper（无需预装 Gradle）、一键脚本 `build.sh`、
+> 云端构建配置 `.github/workflows/build-apk.yml`。三条路任选一条，产物都是
+> `app/build/outputs/apk/debug/app-debug.apk`。
+
+| 方式 | 适用场景 | 你需要准备 | 首次耗时 |
+|---|---|---|---|
+| **A. GitHub Actions 云端构建** | 不想在电脑上装任何 Android 环境 | 一个 GitHub 账号 | 约 6–10 分钟 |
+| **B. `bash build.sh`** | 已有 JDK 与 Android SDK | JDK 17+、Android SDK 34 | 约 10 分钟（含下载依赖） |
+| **C. Android Studio** | 想改代码、看 Compose 预览、断点调试 | 安装 Android Studio | 约 5 分钟同步 |
+
+### 方式 A：GitHub Actions 云端构建
+
+1. 在 GitHub 新建仓库（Private 也可以，Actions 免费额度足够），把本目录内容推上去
+2. 推送到 `main` / `master` / `dev` 即触发构建；也可在 **Actions** 页点 `Build APK` → `Run workflow` 手动触发
+3. 构建完成后在 **Releases** 页下载 `DouDouTV-v<versionName>-<分支>.apk`
+   （分支包的 tag 固定 `<分支>-latest`，每次覆盖；非 `main`/`master` 分支标为 pre-release）
+4. 推送形如 `v1.0.0` 的 tag 会额外出一个**正式包** `DouDouTV-v1.0.0.apk`，挂在同名 tag 上，
+   Release 正文取自 `CHANGELOG.md`；同名 Release 已存在时 CI 直接失败，不覆盖（见「发版纪律」）
+5. 下载到的就是原始 APK，无需解压 → 传到手机 / U 盘拷到电视盒子安装
+
+CI 用 **JDK 17（temurin）** + 仓库自带 Wrapper（Gradle 8.7），直接复用 ubuntu-latest 预装的 Android SDK，
+不额外安装 cmdline-tools；构建任务为 `assembleDebug`，失败自动重试一次，仍失败则报红，不产出空包。
+分支包名里的版本号由 workflow 从 `app/build.gradle.kts` 的 `versionName` 现读，改版本号不用动 workflow。
+
+### 方式 B：命令行一键构建
+
+前置条件（缺一不可）：
+
+- **JDK 17 及以上**（`jvmTarget = 17`，AGP 8.5.2 要求 17+；本地用 jbr-21 同样可过）
+- **Android SDK**，含 `platforms/android-34` 与 `build-tools/34.0.0`
+- 网络能访问 `dl.google.com` 与 `repo.maven.apache.org`
+
+```bash
+bash build.sh          # Windows 用 Git Bash 或 WSL
+```
+
+脚本依次校验 Java 版本、定位 SDK 并写 `local.properties`、缺失组件时自动调 `sdkmanager` 安装、
+最后执行 `./gradlew assembleDebug`，并打印 APK 路径与 `adb install` 命令。
+
+### 方式 C：Android Studio / IDEA
+
+- Android Studio Hedgehog (2023.1.1) 或更新：`File → Open` 选本目录，等待同步（首次下载依赖约 400–600MB）
+- IntelliJ IDEA Ultimate：装 Android 插件，指定 SDK（Platform 34）与 Gradle JVM（17+）
+- IDEA Community：能读能改能补全，但没有 Android SDK 集成 / Run 配置 / Compose Preview，构建只能用终端
+
+> 纯 Android 开发仍建议用 Android Studio：Compose Preview、Layout Inspector、APK Analyzer、
+> 设备镜像等工具链比 IDEA 领先数个版本。
+
+### 手工命令行
+
+```bash
+export ANDROID_HOME=$HOME/Android/Sdk          # macOS/Linux
+# Windows: set ANDROID_HOME=%LOCALAPPDATA%\Android\Sdk
+echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+./gradlew assembleDebug        # Windows: gradlew.bat assembleDebug
+# → app/build/outputs/apk/debug/app-debug.apk
+```
+
+### 版本矩阵（改版本前请对照）
+
+| 组件 | 本工程版本 | 说明 |
+|---|---|---|
+| Gradle | **8.7**（wrapper） | AGP 8.5.2 要求 ≥ 8.7 |
+| Android Gradle Plugin | **8.5.2** | 需 JDK 17+ |
+| Kotlin | **1.9.24** | 与 Compose Compiler 严格配对 |
+| Compose Compiler | **1.5.14** | 必须匹配 Kotlin 1.9.24 |
+| KSP | **1.9.24-1.0.20** | 版本号必须与 Kotlin 严格一致 |
+| Compose BOM | **2024.06.00** | 对应 Compose UI 1.6.8 / material3 1.2.1 |
+| compileSdk / targetSdk | 34 | minSdk 21 |
+| Media3 | 1.4.1 | exoplayer / ui / hls / dash / datasource(-okhttp) / database |
+| Room | 2.6.1 | KSP 注解处理，`exportSchema = true` |
+| Coil / OkHttp / Palette | 2.6.0 / 4.12.0 / 1.0.0 | 海报 / 网络 / 聚焦色提取 |
+| jsoup / fastjson / Gson / jpinyin | 1.17.2 / 1.2.83 / 2.10.1 / 1.1.8 | spider 运行时与拼音首字母 |
+
+> ⚠️ Kotlin 与 Compose Compiler 是强绑定关系，单独升级其中一个必定编译失败；
+> KSP 版本号也必须和 Kotlin 主版本精确对齐（`1.9.24-X.Y.Z` 对应 Kotlin 1.9.24）。
+> 若要升到 Kotlin 2.x，需同时启用 `org.jetbrains.kotlin.plugin.compose` 插件并移除
+> `composeOptions { kotlinCompilerExtensionVersion }`。
+> 曾试过升级 Compose，新版要求 minSdk 23 且焦点行为变化，真机验证后**已回滚**，仍留在 UI 1.6.8。
+
+### 签名与升级安装
+
+`app/debug.keystore` 随仓库提交（`.gitignore` 里为它留了例外），debug 与 release 复用同一颗：
+换正式签名会导致覆盖安装直接失败、只能卸载重装，媒体库 / 进度 / 收藏全丢。
+对外发布若要换正式 keystore，请知悉换完就断升级链，老包必须卸干净。
+
+> 包名已改为 `com.chen.doudoutv`，这在系统眼里是一个**全新应用**：旧包名的数据不会带过来，
+> 新旧两包可以并存安装，卸不卸旧包由使用者自己决定。
+> 也正因为是新包，本包的 `versionCode` 从 1 起算不会撞到任何已装版本（旧包自己那套编号与它无关）。
 
 ---
 
-## 十、参考项目与许可
+## 六、使用流程
+
+### 1. 添加 Emby 来源
+来源页 → 「添加来源」→ 选 **Emby** → 服务器地址填 `https://emby.yourdomain.com`（不带 `/web`）→ 填用户名密码。
+程序会自动 `AuthenticateByName` 换 token；若显示「未登录」，点该卡片上的刷新按钮重新登录。
+
+### 2. 添加 TVBox 来源
+选 **TVBox**，填 TVBox 配置 JSON 地址（如 `https://example.com/tvbox.json`），需包含 `spider` 字段与 `type=3` 站点。
+添加后同步即可拉到首页列表；加密壳首次初始化约 20–30 秒，期间会显示「正在读取这条线路」。
+
+### 3. 同步与播放
+首页右上角同步全部来源 → 点海报进详情页 → 剧集可切季 / 选集 / 切线路 → 「继续播放」接着上次进度。
+
+### 4. 手机端操作
+底部标签栏切「媒体库 / 来源 / 设置」；播放页点击画面呼出控制条，双击左右快进快退，
+上下滑调亮度音量，支持画面比例切换。
+
+### 5. TV 端操作
+- 若盒子未被识别为 TV：手机端设置 → 打开「强制电视模式」
+- 首页遥控器上下换分区、左右换条目、OK 进入
+- 播放页：**OK 暂停 / 下键呼出功能面板（倍速 · 字幕 · 音轨 · 选集）/ 左右 ±10 秒 / 返回先收面板再退出**
+- 电视播放器固定全屏，没有比例切换按钮
+
+---
+
+## 七、已知限制
+
+1. **Emby 播放进度不回写服务器**：进度只存本地 Room，多端之间不同步
+2. **Emby 外挂字幕未接进播放器**：`EmbyClient.subtitleUrl()` 已能拼出地址，播放页尚未加载它
+3. **数据库迁移需手写**：`AppDatabase`（当前 v12）刻意不调 `fallbackToDestructiveMigration()`，
+   漏写 `Migration` 时升级会直接失败，而不是静默清库；历史表结构落在 `app/schemas/`
+4. **没有 JVM 单元测试**：`src/test` 不存在，只有 `androidTest` 下的 `E2eTvBoxTest`，必须连真机才能跑
+5. **spider 兼容面取决于配置本身**：加密壳、云盘线路、站点限速都由使用者提供的 spider 决定，本项目不内置任何片源
+6. **README 与代码仍需人工同步**：文档更新滞后于代码是这类个人项目的常见问题
+
+---
+
+## 八、可继续扩展
+
+1. **Emby 进度回写**：加 `Sessions/Playing/Progress` 上报，实现多端同步
+2. **外挂字幕加载**：把 `subtitleUrl` 接进 Media3 的 `SubtitleConfiguration`
+3. **演员 / 相似推荐**：Emby `Items/{id}/Similar` 与 `People` 字段
+4. **海报墙性能**：条目过千时给 Room 加分页（Paging 3）
+5. **凭据加密**：来源账号密码与 token 从明文改为 `EncryptedSharedPreferences`
+6. **自动迁移**：`app/schemas/` 已导出，加索引一类的小改动可以用 Room 自动迁移补
+
+---
+
+## 九、参考项目与许可
 
 ### 1. 协议与行为参考（只参考公开协议与行为，未复制源码）
 
@@ -426,7 +314,7 @@ spider 的首页列表（`homeContent`）**不含播放地址**，只有 `detail
 |---|---|
 | CatVod / TVBox 配置规范 | `type=3` spider 站点、配置级 `spider` 包、`flags`、`searchable` / `quickSearch`，以及 `homeContent` / `categoryContent` / `searchContent` / `detailContent` / `playerContent` 的方法语义与返回 JSON（`list` / `class` / `parse` / `jx` / `header`） |
 | [FongMi/TV](https://github.com/FongMi/TV)（GPL-3.0） | 仅参考其 TVBox 侧的行为约定：直链也先走 `playerContent`、配置 `flags` 作为 `vipFlags`、`parse=1` 视为需要网页解析、远程搜索按 `searchable` / `quickSearch` 过滤。**未复制其代码**，本项目与其不存在源码派生关系 |
-| VidHub / Netflix | 交互与视觉形态参考（沉浸式大图首页、海报墙、继续观看、聚焦色背景、十英尺遥控器 UI），不涉及实现代码 |
+| Netflix | 交互与视觉形态参考（沉浸式大图首页、海报墙、继续观看、聚焦色背景、十英尺遥控器 UI），不涉及实现代码 |
 
 ### 2. 开源依赖
 
@@ -439,3 +327,4 @@ spider 的首页列表（`homeContent`）**不含播放地址**，只有 `detail
 - 本项目代码可自由使用、修改、分发
 - spider 包由使用者自己的 TVBox 配置提供，本项目不内置任何片源
 - 请仅用于播放你拥有合法权利的内容；第三方接口的可用性与合法性由使用者自行判断
+- TMDB 刮削是**默认关闭**的可选功能，需使用者自备 API 凭据，并遵守 TMDB 的使用条款与署名要求

@@ -11,7 +11,7 @@ ksp {
 }
 
 android {
-    namespace = "com.tabbit.myvidhub"
+    namespace = "com.chen.doudoutv"
     compileSdk = 34
 
     // 固定 debug 签名：确保升级安装不丢数据
@@ -25,11 +25,11 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.tabbit.myvidhub"
+        applicationId = "com.chen.doudoutv"
         minSdk = 21
         targetSdk = 34
-        versionCode = 5
-        versionName = "2.3"
+        versionCode = 1
+        versionName = "1.0.0"
 
         vectorDrawables { useSupportLibrary = true }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
