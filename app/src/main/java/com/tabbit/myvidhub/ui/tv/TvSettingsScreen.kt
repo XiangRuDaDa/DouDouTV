@@ -109,6 +109,8 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     var posterSize by remember { mutableStateOf(Prefs.posterSize) }
     // 同上：布局风格也要留一份可重组的状态，否则选中态停在切换前那一格
     var tvLayout by remember { mutableStateOf(Prefs.tvLayout) }
+    // 焦点移动效果同理
+    var cardMotion by remember { mutableStateOf(Prefs.tvCardMotion) }
     var tmdbOn by remember { mutableStateOf(Prefs.tmdbEnabled) }
     var tmdbToken by remember { mutableStateOf(Prefs.tmdbReadToken) }
     var engineTick by remember { mutableStateOf(0) }
@@ -128,6 +130,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     var choice by remember { mutableStateOf<Pair<SettingChoice, FocusRequester>?>(null) }
     val layoutFocus = remember { FocusRequester() }
     val posterFocus = remember { FocusRequester() }
+    val motionFocus = remember { FocusRequester() }
     val themeFocus = remember { FocusRequester() }
     val tierFocus = remember { FocusRequester() }
 
@@ -207,6 +210,13 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                         focusRequester = posterFocus,
                         value = posterSize.label(),
                         onClick = { choice = SettingChoice.PosterSize to posterFocus }
+                    )
+                    TvSettingRow(
+                        title = "移动效果",
+                        hint = "焦点卡怎么动。只有 Netflix 风格布局读这一档，经典版不跟着变",
+                        focusRequester = motionFocus,
+                        value = cardMotion.label(),
+                        onClick = { choice = SettingChoice.CardMotion to motionFocus }
                     )
                     TvSettingRow(
                         title = "主题色",
@@ -378,6 +388,18 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                     dot = null,
                     hint = null,
                     onPick = { Prefs.posterSize = it; posterSize = it },
+                    onDismiss = dismiss
+                )
+
+                SettingChoice.CardMotion -> TvChoiceDialog(
+                    title = "移动效果",
+                    options = Prefs.CardMotion.values().toList(),
+                    label = { it.label() },
+                    selected = cardMotion,
+                    dot = null,
+                    hint = "只涨图：只有图片放大 5%，片名一动不动。上抬：整卡不放大，往上抬 12dp。" +
+                        "两档都留在行内 14dp 余量里，超出会被容器裁掉一条边。",
+                    onPick = { Prefs.tvCardMotion = it; cardMotion = it },
                     onDismiss = dismiss
                 )
 

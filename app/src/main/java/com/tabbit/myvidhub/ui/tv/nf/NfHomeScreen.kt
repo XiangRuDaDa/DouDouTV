@@ -43,6 +43,7 @@ import com.tabbit.myvidhub.ui.tv.TvContinueActionDialog
 import com.tabbit.myvidhub.ui.tv.TvHero
 import com.tabbit.myvidhub.ui.tv.TvHeroEmpty
 import com.tabbit.myvidhub.ui.tv.TvHeroSeamFade
+import com.tabbit.myvidhub.ui.tv.TvMediaTitle
 import com.tabbit.myvidhub.ui.tv.tvClaimFocusOnEnter
 import com.tabbit.myvidhub.ui.tv.tvMoveFocus
 import com.tabbit.myvidhub.ui.tv.tvResumeTick
@@ -246,7 +247,8 @@ fun NfHomeScreen(
                             onDetail = { onDetail(hero.id) },
                             onNavigateUp = goNavBar,
                             onButtonFocus = forgetCardStand,
-                            ambient = heroAmbient
+                            ambient = heroAmbient,
+                            titleContent = { current -> TvMediaTitle(current.title, current.logoUrl) }
                         )
                     } else {
                         TvHeroEmpty(

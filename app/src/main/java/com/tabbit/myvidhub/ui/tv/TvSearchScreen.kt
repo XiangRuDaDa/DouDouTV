@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.ReturnSpot
@@ -92,6 +93,13 @@ class TvSearchUiState {
     /** 热门榜缓存版本，刷新后自增以触发联想重查 */
     var hotEpoch by mutableStateOf(0)
 
+    /**
+     * 搜索历史的读取版本：真正提交一次搜索（或清空历史）后自增。
+     * 历史本身存在 [Prefs] 里，和手机端共用同一份记录，这里只负责让页面重读。
+     */
+    var historyEpoch by mutableStateOf(0)
+        private set
+
     fun clear() {
         keyword = ""
         suggestions = emptyList()
@@ -101,6 +109,12 @@ class TvSearchUiState {
         searched = false
         searchedKeyword = ""
         remoteSearching = false
+    }
+
+    /** 清空搜索历史，并让读它的页面重查一遍 */
+    fun clearHistory() {
+        Prefs.clearSearchHistory()
+        historyEpoch++
     }
 
     /**
@@ -113,6 +127,9 @@ class TvSearchUiState {
         if (title != null) keyword = title
         suggestions = emptyList()
         submittedKeyword = kw
+        // 落一份历史：TV 两个布局都从这一处出去，不会漏记也不会重记
+        Prefs.addSearchHistory(kw)
+        historyEpoch++
     }
 }
 
@@ -206,6 +223,10 @@ fun TvSearchScreen(
 
     val showSuggestions =
         state.submittedKeyword.isEmpty() && state.keyword.isNotBlank() && state.suggestions.isNotEmpty()
+    // 搜索历史：与手机端同一份 Prefs 记录，只在「没提交、也还没打字」的空态铺开
+    val history = remember(state.historyEpoch) { Prefs.getSearchHistory() }
+    val showHistory =
+        state.submittedKeyword.isEmpty() && state.keyword.isBlank() && history.isNotEmpty()
 
     Column(
         Modifier
@@ -222,7 +243,8 @@ fun TvSearchScreen(
             TvSearchField(
                 value = state.keyword,
                 focusRequester = fieldFocus,
-                suggestionsVisible = showSuggestions,
+                // 下方有可聚焦列表（联想或历史）时，输入框的 ↓ 才该交出去
+                listVisible = showSuggestions || showHistory,
                 modifier = Modifier.weight(1f),
                 onValueChange = {
                     state.keyword = it
@@ -347,7 +369,13 @@ fun TvSearchScreen(
             state.remoteSearching -> TvEmptyState("正在搜索各站点…", "本地库没有命中，正在向 TVBox 各站点查询")
 
             state.searched -> TvEmptyState("没有找到「${state.submittedKeyword}」", "换个关键词试试")
-            else -> TvEmptyState("搜索媒体库", "输入片名、演员或拼音首字母，选中联想或按「搜索」确认")
+            else -> if (showHistory) {
+                TvSearchHistory(
+                    history = history,
+                    onSelect = { state.submit(it) },
+                    onClear = { state.clearHistory() }
+                )
+            } else TvEmptyState("搜索媒体库", "输入片名、演员或拼音首字母，选中联想或按「搜索」确认")
         }
     }
 }
@@ -393,12 +421,46 @@ private fun TvSuggestionRow(
     }
 }
 
+/**
+ * 空态的「最近搜索」：与联想同款行，OK 直接拿这条词再搜一次，末行「清空历史」收尾。
+ * 行与行之间走系统自然搜索 —— 输入框的 ↓ 在列表可见时已把焦点交进来，不需要额外锚点。
+ */
+@Composable
+private fun TvSearchHistory(
+    history: List<String>,
+    onSelect: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = TvPagePadding, end = TvPagePadding, bottom = 24.dp)
+    ) {
+        Text(
+            "最近搜索 · 按 OK 直接搜",
+            color = TvText.Meta,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        history.take(8).forEach { kw ->
+            TvSuggestionRow(title = kw, onClick = { onSelect(kw) })
+            Spacer(Modifier.height(8.dp))
+        }
+        TvPillButton(
+            text = "清空历史",
+            primary = false,
+            size = TvButtonSize.Sm,
+            onClick = onClear
+        )
+    }
+}
+
 /** 电视端搜索输入框：获得焦点时显示品牌色描边，未聚焦时保持低调 */
 @Composable
 private fun TvSearchField(
     value: String,
     focusRequester: FocusRequester,
-    suggestionsVisible: Boolean,
+    listVisible: Boolean,
     modifier: Modifier = Modifier,
     onValueChange: (String) -> Unit,
     onSubmit: () -> Unit
@@ -418,9 +480,9 @@ private fun TvSearchField(
             .onFocusChanged { focused = it.isFocused }
             .focusRequester(focusRequester)
             .focusable()
-            // 输入框内部会把方向键当光标移动吃掉，这里截获「下」把焦点交给联想列表
+            // 输入框内部会把方向键当光标移动吃掉，这里截获「下」把焦点交给下方的联想 / 历史列表
             .onPreviewKeyEvent { event ->
-                if (suggestionsVisible && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                if (listVisible && event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                     focusManager.moveFocus(FocusDirection.Down)
                     true
                 } else {

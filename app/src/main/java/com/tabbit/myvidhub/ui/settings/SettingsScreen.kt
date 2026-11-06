@@ -73,7 +73,7 @@ fun Context.setForceTvMode(enabled: Boolean) {
 }
 
 /** 设置页上「点开才展开选项」的那几组，一次只开一个弹窗 */
-internal enum class SettingChoice { TvLayout, PosterSize, Theme, VideoTier }
+internal enum class SettingChoice { TvLayout, PosterSize, Theme, VideoTier, CardMotion }
 
 internal fun Prefs.PosterSize.label(): String = when (this) {
     Prefs.PosterSize.SMALL -> "小"
@@ -84,6 +84,12 @@ internal fun Prefs.PosterSize.label(): String = when (this) {
 internal fun Prefs.TvLayout.label(): String = when (this) {
     Prefs.TvLayout.CLASSIC -> "经典"
     Prefs.TvLayout.NETFLIX -> "Netflix 风格"
+}
+
+/** 焦点移动效果的两档文案（只在 TV 设置页出现，只有新版布局的海报卡读这个值） */
+internal fun Prefs.CardMotion.label(): String = when (this) {
+    Prefs.CardMotion.ART_ZOOM -> "只涨图"
+    Prefs.CardMotion.LIFT -> "上抬"
 }
 
 @Composable
@@ -420,7 +426,8 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 onDismiss = { choice = null }
             )
 
-            SettingChoice.TvLayout, null -> Unit
+            // 这两组只挂在 TV 设置页：手机端没有对应开关，落到这里就是空转
+            SettingChoice.TvLayout, SettingChoice.CardMotion, null -> Unit
         }
     }
 }

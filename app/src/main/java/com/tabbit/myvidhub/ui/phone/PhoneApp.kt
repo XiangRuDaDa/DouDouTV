@@ -215,7 +215,6 @@ fun PhoneApp(vm: LibraryViewModel) {
                         vm = vm,
                         mediaId = target.mediaId,
                         isTv = false,
-                        onBack = goBack,
                         onPlay = { id ->
                             context.startActivity(PhonePlayerActivity.intent(context, id))
                         }

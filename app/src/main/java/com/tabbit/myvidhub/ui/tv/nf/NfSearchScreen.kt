@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
 import com.tabbit.myvidhub.ui.ReturnSpot
@@ -94,6 +95,9 @@ fun NfSearchScreen(
     val sugFirstFocus = remember(state.suggestions.firstOrNull()) { FocusRequester() }
     val gridFirstFocus = remember(state.results.firstOrNull()?.id) { FocusRequester() }
     val stand = remember { StandTarget() }
+    // 搜索历史：和手机端同一份 Prefs 记录，提交一次搜索或清空历史时 historyEpoch 自增触发重读
+    val history = remember(state.historyEpoch) { Prefs.getSearchHistory() }
+    val histFirstFocus = remember(history.firstOrNull()) { FocusRequester() }
 
     // 首次进搜索页后台拉一次热门榜补齐联想（24h 内走本地缓存，不联网）
     LaunchedEffect(Unit) {
@@ -146,23 +150,30 @@ fun NfSearchScreen(
 
     val showSuggestions =
         state.submittedKeyword.isEmpty() && state.keyword.isNotBlank() && state.suggestions.isNotEmpty()
+    // 历史只在「还没提交、也还没打字」的空态铺开：一开始打字就让位给联想
+    val showHistory =
+        state.submittedKeyword.isEmpty() && state.keyword.isBlank() && history.isNotEmpty()
     val grouped = remember(state.results) {
         state.results.groupBy { it.sourceName.ifBlank { "未知来源" } }
     }
 
-    // 输入框 ↓ / 导航条 ↓ 的落点：联想列表 > 结果首卡 > 输入框自身（空态时页面只有输入框可聚焦，
-    // 不能留焦点死区 —— 规范 R6）。
+    // 输入框 ↓ / 导航条 ↓ 的落点：联想列表 > 结果首卡 > 历史首行 > 输入框自身
+    // （空态且没有历史时页面只有输入框可聚焦，不能留焦点死区 —— 规范 R6）。
     val belowField = when {
         showSuggestions -> sugFirstFocus
         state.results.isNotEmpty() -> gridFirstFocus
+        showHistory -> histFirstFocus
         else -> fieldFocus
     }
 
     val resumeTick = tvResumeTick()
+    // tick 里刻意不放 showSuggestions：联想是「打出第一个字 200ms 后」冒出来的，
+    // 一旦进 tick，抢焦就会把焦点从 BasicTextField 挪到输入框外层那颗 focusable 节点上 ——
+    // 输入法面板跟着关闭，用户才打了一个字就得重新按 OK 弹框。
+    // 联想出现时焦点该留在原处：往下走由输入框自己的 ↓（nfFocusRoute）显式交点。
     tvClaimFocusOnEnter(
-        tick = listOf(resumeTick, showSuggestions, state.results.size),
-        // 输入 / 联想阶段这一串锚点只留输入框自己：打第一个字之后联想列表冒出来，
-        // tick 跟着变，抢焦会把焦点从正在打字的输入框拽到联想首行 —— 用户还没动手，光标就跑了。
+        tick = listOf(resumeTick, state.results.size),
+        // 输入 / 联想阶段这一串锚点只留输入框自己：
         // 焦点往下走只有两条正当路径：用户自己按 ↓（nfFocusRoute 显式交点），或提交搜索出结果。
         // 提交之后（submittedKeyword 非空）恢复原来的抢焦：还站在离开时那张卡，没有记录才落首卡。
         anchorsProvider = {
@@ -286,7 +297,15 @@ fun NfSearchScreen(
                         hint = "换个关键词试试，结果按来源分组铺开"
                     )
 
-                    else -> NfInlineEmpty(
+                    else -> if (showHistory) {
+                        NfSearchHistory(
+                            history = history,
+                            firstFocus = histFirstFocus,
+                            upFocusRequester = fieldFocus,
+                            onSelect = { state.submit(it) },
+                            onClear = { state.clearHistory() }
+                        )
+                    } else NfInlineEmpty(
                         text = "搜索媒体库",
                         hint = "输入片名、演员或拼音首字母，选中联想或按「搜索」确认"
                     )
@@ -395,6 +414,47 @@ private fun NfSuggestionRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
+    }
+}
+
+/**
+ * 空态的「最近搜索」：与联想同款行，OK 直接拿这条词再搜一次。
+ * 首行的 ↑ 显式还给输入框，行与行之间走系统自然搜索；
+ * 末行「清空历史」是这一段的最后一站（↓ 从输入框一路走得到，不留焦点死区）。
+ */
+@Composable
+private fun NfSearchHistory(
+    history: List<String>,
+    firstFocus: FocusRequester,
+    upFocusRequester: FocusRequester,
+    onSelect: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    Column(Modifier.fillMaxSize()) {
+        Text(
+            "最近搜索 · 按 OK 直接搜",
+            color = TvText.Meta,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(start = TvPagePadding, bottom = 8.dp)
+        )
+        LazyColumn(
+            contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            items(history.take(8), key = { "nf_hist_$it" }) { kw ->
+                NfSuggestionRow(
+                    title = kw,
+                    onClick = { onSelect(kw) },
+                    modifier = if (kw == history.firstOrNull())
+                        Modifier.nfFocusRoute(up = upFocusRequester).focusRequester(firstFocus)
+                    else Modifier
+                )
+            }
+            item(key = "nf_hist_clear") {
+                NfActionButton(text = "清空历史", onClick = onClear)
+            }
+        }
     }
 }
 

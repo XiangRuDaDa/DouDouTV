@@ -92,7 +92,8 @@ import com.tabbit.myvidhub.ui.theme.TvText
  *
  * 焦点机制直接复用经典版那套纯机制 helper（tvMoveFocus / tvClaimFocusOnEnter），不写第二份。
  * 相对旧件新增两件事：
- *   · 焦点「translateY 抬起」：放大之外再上移，配合描边做出离地感；
+ *   · 焦点「移动效果」两档可切（[Prefs.tvCardMotion]）：默认只放大图片那一层、片名不参与，
+ *     另一档整卡不涨只上抬；
  *   · 列表「逐格入场 stagger」：只在每行首次拿到数据那一段时间里播，滚动中不重播
  *     （海报淡入在电视上会读成「整屏刷新了一下」，这里绕开同一个坑）。
  */
@@ -100,6 +101,19 @@ import com.tabbit.myvidhub.ui.theme.TvText
 /** 焦点抬起量。必须小于所在行的纵向 contentPadding（[NfRowVerticalPadding]），否则抬出容器边界被裁掉 */
 private val CardLift = 8.dp
 private val ButtonLift = 4.dp
+
+/**
+ * 海报卡「上抬」档的位移量：不放大，只把整卡抬起来。
+ * 12dp 是行内余量 [NfRowVerticalPadding]（14dp）之内能给的极限，再大就被容器裁掉顶边。
+ */
+private val PosterLift = 12.dp
+
+/**
+ * 海报卡「只涨图」档的缩放倍率：只有图片这一层涨，片名不参与。
+ * 图片是 2:3，涨 5% 上下各出 (卡宽×1.5×0.05)/2 —— 最大档 192dp 也才 7.2dp，
+ * 上面余量 14dp、下面到片名有 8dp 间距，两头都撞不到线。
+ */
+private const val ArtZoom = 1.05f
 
 /** 入场动画时长与逐格间隔 */
 private const val EnterMillis = 220
@@ -245,7 +259,8 @@ private fun NfNavTab(
     text: String,
     selected: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    secondary: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
@@ -255,6 +270,7 @@ private fun NfNavTab(
     val lift = animateFloatAsState(if (focused) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "tabLift")
     Box(
         modifier
+            .heightIn(min = 40.dp)
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer {
                 scaleX = scale.value
@@ -272,13 +288,22 @@ private fun NfNavTab(
             .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .padding(horizontal = 18.dp, vertical = 8.dp)
+            .padding(horizontal = 18.dp, vertical = 8.dp),
+        contentAlignment = Alignment.Center
     ) {
         Text(
             text,
-            color = if (selected || focused) TvText.Title else TvText.Body,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            color = when {
+                selected || focused -> Color.White
+                secondary -> TvText.Meta
+                else -> TvText.Section
+            },
+            style = if (secondary) {
+                MaterialTheme.typography.titleSmall
+            } else {
+                MaterialTheme.typography.titleMedium
+            },
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
             maxLines = 1
         )
     }
@@ -303,7 +328,7 @@ private fun NfScopeChip(
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(Radius.Md)
-            .background(if (focused) AppColors.Brand.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.12f))
+            .background(if (focused) AppColors.Brand.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.08f))
             .then(
                 if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
                 else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md)
@@ -316,22 +341,23 @@ private fun NfScopeChip(
     ) {
         Text(
             sourceName,
-            color = TvText.Title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            color = if (focused) Color.White else TvText.Body,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 260.dp)
+            modifier = Modifier.weight(1f, fill = false).widthIn(max = 220.dp)
         )
         if (!siteName.isNullOrBlank()) {
             Text("›", color = TvText.Muted, style = MaterialTheme.typography.titleMedium)
             Text(
                 siteName,
-                color = TvText.Section,
-                style = MaterialTheme.typography.titleMedium,
+                color = if (focused) Color.White else TvText.Body,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.widthIn(max = 200.dp)
+                modifier = Modifier.weight(1f, fill = false).widthIn(max = 160.dp)
             )
         }
     }
@@ -386,19 +412,23 @@ fun NfNavBar(
                 modifier = route.focusRequester(tabFocus(NfTab.Search))
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.weight(1f).padding(start = 24.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             if (scanning) {
-                Text("↻ 刷新中…", color = TvText.Body, style = MaterialTheme.typography.labelMedium)
+                Text("↻ 刷新中…", color = TvText.Body, style = MaterialTheme.typography.bodyMedium)
             } else {
-                NfNavTab("↻ 刷新", false, onRefresh, modifier = route)
+                NfNavTab("↻ 刷新", false, onRefresh, modifier = route, secondary = true)
             }
             NfScopeChip(
                 sourceName = sourceName,
                 siteName = siteName,
                 onClick = onScope,
-                modifier = route.focusRequester(scopeFocus)
+                modifier = Modifier.weight(1f, fill = false).then(route).focusRequester(scopeFocus)
             )
-            NfNavTab("设置", false, onSettings, modifier = route)
+            NfNavTab("设置", false, onSettings, modifier = route, secondary = true)
         }
     }
 }
@@ -433,9 +463,14 @@ fun NfRowTitle(
 }
 
 /**
- * 竖版海报卡（2:3）。焦点态 = 放大 8% + 上移抬起 + 白描边；入场时淡入并自下 [EnterRise] 归位。
+ * 竖版海报卡（2:3）：图片 + 排在图片外面的片名，没有底板方框。
+ *
+ * 焦点态看 [Prefs.tvCardMotion] 两档：
+ * · 只涨图（默认）—— 只有图片那一层涨 5%，片名的位置和字号一动不动；
+ * · 上抬 —— 整卡不涨，往上走 [PosterLift]。
+ * 两档都只给图片描一圈白环。入场时淡入并自下 [EnterRise] 归位。
  * 放在 LazyRow / LazyVerticalGrid 里时，行的纵向 contentPadding 至少给 [NfRowVerticalPadding]，
- * 否则抬起的像素会被 Lazy 容器的边界裁掉。
+ * 否则抬起/涨出来的那几像素会被 Lazy 容器的边界裁掉。
  */
 @Composable
 fun NfPosterCard(
@@ -450,10 +485,11 @@ fun NfPosterCard(
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val density = LocalDensity.current
-    val liftPx = with(density) { CardLift.toPx() }
+    val liftPx = with(density) { PosterLift.toPx() }
     val risePx = with(density) { EnterRise.toPx() }
-    val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCard")
-    val lift = animateFloatAsState(if (focused) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCardLift")
+    val liftMode = Prefs.tvCardMotion == Prefs.CardMotion.LIFT
+    val lift = animateFloatAsState(if (focused && liftMode) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCardLift")
+    val artScale = animateFloatAsState(if (focused && !liftMode) ArtZoom else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCardArt")
     val cardShape = remember { Radius.Md }
 
     Column(
@@ -462,43 +498,61 @@ fun NfPosterCard(
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer {
                 alpha = entrance
-                scaleX = scale.value
-                scaleY = scale.value
                 translationY = -lift.value + (1f - entrance) * risePx
-                if (anchorStart) translationX = (scale.value - 1f) * size.width / 2f
-                shape = cardShape
-                clip = true
             }
-            .background(AppColors.Surface)
-            .then(
-                if (focused) Modifier.border(2.5.dp, Color.White, cardShape)
-                else Modifier.border(1.dp, Edge.Hairline, cardShape)
-            )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
     ) {
-        // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组卡片外壳
-        // （zIndex / 描边 / 抬起都跟着变），参数没变时内容体整块被跳过，图片和文字不跟着重排。
-        NfPosterBody(
-            model = item.posterUrl.ifBlank { item.backdropUrl },
-            title = item.title,
-            subtitle = item.year.takeIf { it > 0 }?.toString().orEmpty(),
-            fillCell = fillCell,
-            width = width
+        // 圆角、白环、放大都只作用在图片这一层。片名要是跟着一起放大，同一行的字号就齐不了，
+        // 涨出来的高度还会往下压到下一行的片名上 —— 图外字幕这版排版要的就是文字层稳定。
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .then(
+                    if (liftMode) Modifier else Modifier.graphicsLayer {
+                        scaleX = artScale.value
+                        scaleY = artScale.value
+                        // 首卡往右扩：绕中心放大把左缘往左推了半个增量，行首卡就比下面各行更靠左，
+                        // 用平移精确补回来（和经典版同一个做法）。
+                        if (anchorStart) translationX = (artScale.value - 1f) * size.width / 2f
+                    }
+                )
+                .clip(cardShape)
+                .then(if (focused) Modifier.border(2.5.dp, Color.White, cardShape) else Modifier)
+        ) {
+            // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组外壳（白环 / 层级 / 位移都跟着变），
+            // 参数没变时内容体整块被跳过，图片不跟着重排。一屏几十张卡，这块不切开就白吃一遍布局。
+            NfPosterBody(
+                model = item.posterUrl.ifBlank { item.backdropUrl },
+                title = item.title,
+                fillCell = fillCell,
+                width = width
+            )
+        }
+        Text(
+            item.title,
+            color = TvText.Section,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 8.dp)
         )
     }
 }
 
 /**
- * [NfPosterCard] 的内容体：图 + 标题。
+ * [NfPosterCard] 的图片体：海报，或者按片名哈希出来的渐变封面。
  *
  * 参数刻意只有 [String] / [Boolean] / [Dp] 这类稳定原语，这样它是可跳过的 ——
  * 焦点态翻转只重组外壳，这块原样复用。
+ *
+ * 封面不再排片名（[PosterFallback] 的 showTitle 关掉，只留一个首字水印）：
+ * 名字已经排在盒子外面了，图里再排一遍就是重复。
  */
 @Composable
 private fun NfPosterBody(
     model: String,
     title: String,
-    subtitle: String,
     fillCell: Boolean,
     width: Dp,
 ) {
@@ -511,21 +565,11 @@ private fun NfPosterBody(
         PosterArt(model = model, contentDescription = title) {
             PosterFallback(
                 title = title,
-                subtitle = subtitle,
-                titleFontSize = MaterialTheme.typography.titleMedium.fontSize,
-                subtitleFontSize = MaterialTheme.typography.bodySmall.fontSize
+                showTitle = false,
+                titleFontSize = 30.sp
             )
         }
     }
-    Text(
-        title,
-        color = TvText.Section,
-        style = MaterialTheme.typography.bodyMedium,
-        fontWeight = FontWeight.Medium,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
-    )
 }
 
 /**

@@ -29,7 +29,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.FavoriteBorder
@@ -110,7 +109,6 @@ fun DetailScreen(
     vm: LibraryViewModel,
     mediaId: Long,
     isTv: Boolean,
-    onBack: () -> Unit,
     onPlay: (Long) -> Unit
 ) {
     var media by remember { mutableStateOf<MediaEntity?>(null) }
@@ -395,6 +393,11 @@ fun DetailScreen(
             val effectiveOverview = item.overview.ifBlank { tmdb?.overview.orEmpty() }
             val effectiveRating = if (item.rating > 0) item.rating else tmdb?.rating ?: 0.0
 
+            // 简介折叠态。溢出与否读真实排版结果（hasVisualOverflow），不用字数当代理：
+            // 同样长度的简介在不同字号/屏宽下行数差很多，按字数判断会漏展开入口或凭空多一个。
+            var descExpanded by remember(mediaId) { mutableStateOf(false) }
+            var descOverflow by remember(mediaId, effectiveOverview) { mutableStateOf(false) }
+
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 32.dp)
@@ -429,21 +432,6 @@ fun DetailScreen(
                                 .fillMaxSize()
                                 .background(headerScrim)
                         )
-
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(12.dp)
-                                .clip(Radius.Pill)
-                                .background(Color.Black.copy(alpha = 0.45f))
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回",
-                                tint = Color.White
-                            )
-                        }
 
                         // 标题覆盖层：水平居中、贴海报下沿（距底 16dp）
                         Column(
@@ -594,9 +582,25 @@ fun DetailScreen(
                             Spacer(Modifier.height(6.dp))
                             Text(
                                 effectiveOverview,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = AppColors.TextSecondary
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = AppColors.TextSecondary,
+                                maxLines = if (descExpanded) Int.MAX_VALUE else 4,
+                                overflow = if (descExpanded) TextOverflow.Clip else TextOverflow.Ellipsis,
+                                onTextLayout = { layout ->
+                                    if (!descExpanded) descOverflow = layout.hasVisualOverflow
+                                }
                             )
+                            if (descExpanded || descOverflow) {
+                                Text(
+                                    if (descExpanded) "收起" else "展开更多",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = AppColors.Brand,
+                                    modifier = Modifier
+                                        .clip(Radius.Sm)
+                                        .clickable { descExpanded = !descExpanded }
+                                        .padding(horizontal = 2.dp, vertical = 8.dp)
+                                )
+                            }
                         }
                     }
                 }

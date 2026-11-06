@@ -32,6 +32,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
 import com.tabbit.myvidhub.ui.LibraryViewModel
@@ -172,87 +173,99 @@ fun TvApp(vm: LibraryViewModel) {
             label = "tv_route",
             modifier = Modifier.fillMaxSize()
         ) { target ->
-            when (target) {
-                is TvRoute.Home -> if (Prefs.tvLayout == Prefs.TvLayout.NETFLIX) {
-                    NfHomeScreen(
+            val nfLayout = Prefs.tvLayout == Prefs.TvLayout.NETFLIX
+            val baseTypography = MaterialTheme.typography
+            // 14sp 是 TV 端小字下限，两套布局共用：三米外 12/13sp 只能看出形状。
+            val typography = remember(baseTypography) {
+                baseTypography.copy(
+                    bodySmall = baseTypography.bodySmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
+                    labelMedium = baseTypography.labelMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
+                    labelSmall = baseTypography.labelSmall.copy(fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.2.sp)
+                )
+            }
+            MaterialTheme(typography = typography) {
+                when (target) {
+                    is TvRoute.Home -> if (nfLayout) {
+                        NfHomeScreen(
+                            vm = vm,
+                            onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                            onDetail = { id -> push(TvRoute.Detail(id)) },
+                            onPlay = playFromRoot,
+                            onSources = { push(TvRoute.Sources) },
+                            onSettings = { push(TvRoute.Settings) }
+                        )
+                    } else TvHomeScreen(
                         vm = vm,
-                        onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                        onSearch = { push(TvRoute.Search) },
                         onDetail = { id -> push(TvRoute.Detail(id)) },
+                        onGenre = { kind, genre -> push(TvRoute.Genre(kind, genre)) },
+                        onCategory = { typeId, typeName -> push(TvRoute.Category(typeId, typeName)) },
                         onPlay = playFromRoot,
                         onSources = { push(TvRoute.Sources) },
                         onSettings = { push(TvRoute.Settings) }
                     )
-                } else TvHomeScreen(
-                    vm = vm,
-                    onSearch = { push(TvRoute.Search) },
-                    onDetail = { id -> push(TvRoute.Detail(id)) },
-                    onGenre = { kind, genre -> push(TvRoute.Genre(kind, genre)) },
-                    onCategory = { typeId, typeName -> push(TvRoute.Category(typeId, typeName)) },
-                    onPlay = playFromRoot,
-                    onSources = { push(TvRoute.Sources) },
-                    onSettings = { push(TvRoute.Settings) }
-                )
 
-                is TvRoute.Browse -> NfBrowseScreen(
-                    vm = vm,
-                    onTab = { tab -> switchTab(nfRouteOf(tab)) },
-                    onDetail = { id -> push(TvRoute.Detail(id)) },
-                    onSources = { push(TvRoute.Sources) },
-                    onSettings = { push(TvRoute.Settings) }
-                )
-
-                is TvRoute.Mine -> NfMineScreen(
-                    vm = vm,
-                    onTab = { tab -> switchTab(nfRouteOf(tab)) },
-                    onDetail = { id -> push(TvRoute.Detail(id)) },
-                    onSources = { push(TvRoute.Sources) },
-                    onSettings = { push(TvRoute.Settings) }
-                )
-
-                is TvRoute.Search -> if (Prefs.tvLayout == Prefs.TvLayout.NETFLIX) {
-                    // Netflix 版：搜索是导航条上的第四颗 tab，外壳和其他三页完全一样
-                    NfSearchScreen(
+                    is TvRoute.Browse -> NfBrowseScreen(
                         vm = vm,
-                        state = searchState,
                         onTab = { tab -> switchTab(nfRouteOf(tab)) },
                         onDetail = { id -> push(TvRoute.Detail(id)) },
                         onSources = { push(TvRoute.Sources) },
                         onSettings = { push(TvRoute.Settings) }
                     )
-                } else TvSearchScreen(
-                    vm = vm,
-                    state = searchState,
-                    onBack = pop,
-                    onDetail = { id -> push(TvRoute.Detail(id)) }
-                )
 
-                is TvRoute.Genre -> TvGenreScreen(
-                    vm = vm,
-                    initialKind = target.kind,
-                    initialGenre = target.genre,
-                    onBack = pop,
-                    onDetail = { id -> push(TvRoute.Detail(id)) }
-                )
+                    is TvRoute.Mine -> NfMineScreen(
+                        vm = vm,
+                        onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                        onDetail = { id -> push(TvRoute.Detail(id)) },
+                        onSources = { push(TvRoute.Sources) },
+                        onSettings = { push(TvRoute.Settings) }
+                    )
 
-                is TvRoute.Category -> TvCategoryScreen(
-                    vm = vm,
-                    typeId = target.typeId,
-                    typeName = target.typeName,
-                    onBack = pop,
-                    onDetail = { id -> push(TvRoute.Detail(id)) }
-                )
+                    is TvRoute.Search -> if (nfLayout) {
+                        // Netflix 版：搜索是导航条上的第四颗 tab，外壳和其他三页完全一样
+                        NfSearchScreen(
+                            vm = vm,
+                            state = searchState,
+                            onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                            onDetail = { id -> push(TvRoute.Detail(id)) },
+                            onSources = { push(TvRoute.Sources) },
+                            onSettings = { push(TvRoute.Settings) }
+                        )
+                    } else TvSearchScreen(
+                        vm = vm,
+                        state = searchState,
+                        onBack = pop,
+                        onDetail = { id -> push(TvRoute.Detail(id)) }
+                    )
 
-                is TvRoute.Detail -> TvDetailScreen(
-                    vm = vm,
-                    mediaId = target.mediaId,
-                    onBack = pop,
-                    onPlay = { id ->
-                        context.startActivity(TvPlayerActivity.intent(context, id))
-                    }
-                )
+                    is TvRoute.Genre -> TvGenreScreen(
+                        vm = vm,
+                        initialKind = target.kind,
+                        initialGenre = target.genre,
+                        onBack = pop,
+                        onDetail = { id -> push(TvRoute.Detail(id)) }
+                    )
 
-                is TvRoute.Sources -> TvSourcesScreen(vm = vm)
-                is TvRoute.Settings -> TvSettingsScreen(vm = vm)
+                    is TvRoute.Category -> TvCategoryScreen(
+                        vm = vm,
+                        typeId = target.typeId,
+                        typeName = target.typeName,
+                        onBack = pop,
+                        onDetail = { id -> push(TvRoute.Detail(id)) }
+                    )
+
+                    is TvRoute.Detail -> TvDetailScreen(
+                        vm = vm,
+                        mediaId = target.mediaId,
+                        onBack = pop,
+                        onPlay = { id ->
+                            context.startActivity(TvPlayerActivity.intent(context, id))
+                        }
+                    )
+
+                    is TvRoute.Sources -> TvSourcesScreen(vm = vm)
+                    is TvRoute.Settings -> TvSettingsScreen(vm = vm)
+                }
             }
         }
 

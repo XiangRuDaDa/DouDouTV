@@ -20,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tabbit.myvidhub.R
@@ -91,7 +92,13 @@ sealed interface Badge {
  * 尺寸与内边距一字未改，只换材质 —— 徽章行在详情页覆盖层的第三行，动内边距会挤动整行。
  */
 @Composable
-fun TextBadge(label: String, bg: Color) {
+fun TextBadge(
+    label: String,
+    bg: Color,
+    fontSize: TextUnit = 12.sp,
+    lineHeight: TextUnit = 14.sp,
+    letterSpacing: TextUnit = 0.6.sp
+) {
     Box(
         Modifier
             .clip(Radius.Sm)
@@ -103,10 +110,10 @@ fun TextBadge(label: String, bg: Color) {
         Text(
             text = label,
             color = Color.White.copy(alpha = 0.9f),
-            fontSize = 11.sp,
+            fontSize = fontSize,
             fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.6.sp,
-            lineHeight = 12.sp
+            letterSpacing = letterSpacing,
+            lineHeight = lineHeight
         )
     }
 }

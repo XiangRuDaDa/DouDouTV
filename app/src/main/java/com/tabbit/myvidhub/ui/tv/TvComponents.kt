@@ -16,9 +16,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
@@ -52,6 +54,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import com.tabbit.myvidhub.core.Prefs
 import com.tabbit.myvidhub.data.model.MediaEntity
@@ -540,6 +544,45 @@ private fun posterMetaLine(item: MediaEntity): String {
 }
 
 private val TvGenreSplit = Regex("[,，、/\\s]+")
+
+/**
+ * 片名艺术字（刮削来的 ClearLogo）优先、文字兜底。
+ *
+ * 详情页两套布局都走这里，和 NF 首页轮播同为一档 80dp：原来详情页只让 Logo 长到 48dp，
+ * 贴在元信息上面小得像水印，同一部片在首页和详情页是两种量级的标题。
+ * 图挂不上就回落 44sp 文字标题，不留一格空白。
+ */
+@Composable
+fun TvMediaTitle(
+    title: String,
+    logoUrl: String,
+    modifier: Modifier = Modifier
+) {
+    var logoFailed by remember(logoUrl) { mutableStateOf(false) }
+    Box(
+        modifier.widthIn(max = 520.dp).heightIn(min = 80.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        if (logoUrl.isNotBlank() && !logoFailed) {
+            AsyncImage(
+                model = logoUrl,
+                contentDescription = title,
+                contentScale = ContentScale.Fit,
+                alignment = Alignment.CenterStart,
+                onError = { logoFailed = true },
+                modifier = Modifier.height(80.dp).widthIn(max = 420.dp)
+            )
+        } else {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.displayLarge,
+                color = TvText.Title,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
 
 /** 分区标题：电视上字要大，右侧可挂「更多」 */
 @Composable

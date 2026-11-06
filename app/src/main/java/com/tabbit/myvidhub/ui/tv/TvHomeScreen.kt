@@ -807,7 +807,8 @@ internal fun TvHero(
      * 由调用方算一次，和下面那条 [TvHeroSeamFade] 传同一个值 —— 两处必须同色同相位，
      * 各自独立取样的话换页那一瞬接缝会错开，就又看得见一条线。
      */
-    ambient: Color
+    ambient: Color,
+    titleContent: (@Composable (MediaEntity) -> Unit)? = null
 ) {
     val imageUrl = item.backdropUrl.ifBlank { item.posterUrl }
 
@@ -944,7 +945,9 @@ internal fun TvHero(
                 label = "heroText"
             ) { current ->
                 Column {
-                    if (current.logoUrl.isNotBlank()) {
+                    if (titleContent != null) {
+                        titleContent(current)
+                    } else if (current.logoUrl.isNotBlank()) {
                         AsyncImage(
                             model = current.logoUrl,
                             contentDescription = current.title,

@@ -15,6 +15,7 @@ object Prefs {
     private const val KEY_TMDB_ENABLED = "tmdb_enabled"
     private const val KEY_POSTER_SIZE = "poster_size"
     private const val KEY_TV_LAYOUT = "tv_layout_style"
+    private const val KEY_TV_CARD_MOTION = "tv_card_motion"
     private const val KEY_TONE_PREFIX = "detail_tone_"
     private const val KEY_HOME_SOURCE_ID = "home_source_id"
     private const val KEY_HOME_SITE_KEY = "home_site_key"
@@ -57,6 +58,26 @@ object Prefs {
 
     /** TV 端布局风格的两个取值；默认 NETFLIX，让新那套在真机上先被看到 */
     enum class TvLayout { CLASSIC, NETFLIX }
+
+    /**
+     * TV 新版（[TvLayout.NETFLIX]）海报行的焦点移动档。只管 nf 那套，经典版海报卡不受影响。
+     *
+     * 两档都必须留在行内纵向余量（nf 包的 `NfRowVerticalPadding` = 14dp）以内，
+     * 超出就会被 Lazy 容器边界裁掉一条边：
+     * · [ART_ZOOM] 图片从中心涨 5%，上下各 6~7dp；
+     * · [LIFT] 整卡不涨、只上抬 12dp。
+     */
+    var tvCardMotion: CardMotion
+        get() {
+            val name = sp.getString(KEY_TV_CARD_MOTION, CardMotion.ART_ZOOM.name)
+            return runCatching { CardMotion.valueOf(name.orEmpty()) }.getOrDefault(CardMotion.ART_ZOOM)
+        }
+        set(value) {
+            sp.edit().putString(KEY_TV_CARD_MOTION, value.name).apply()
+        }
+
+    /** 焦点移动的两档；默认只涨图（片名不参与缩放） */
+    enum class CardMotion { ART_ZOOM, LIFT }
 
     /**
      * 网盘直链磁盘缓存的容量档。

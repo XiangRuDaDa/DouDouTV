@@ -134,10 +134,10 @@ private val MobileTypography = Typography(
     titleSmall = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium),
     bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 22.sp),
     bodyMedium = TextStyle(fontSize = 13.5.sp, lineHeight = 20.sp, fontFeatureSettings = TabularDigits),
-    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontFeatureSettings = TabularDigits),
+    bodySmall = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontFeatureSettings = TabularDigits),
     labelLarge = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits),
-    labelMedium = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits),
-    labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits)
+    labelMedium = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits),
+    labelSmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium, fontFeatureSettings = TabularDigits)
 )
 
 /**

@@ -177,8 +177,8 @@ fun HeroBanner(
                             contentDescription = item.title,
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
-                                .height(if (isTv) 100.dp else 72.dp)
-                                .widthIn(max = if (isTv) 420.dp else 300.dp)
+                                .height(if (isTv) 100.dp else 80.dp)
+                                .widthIn(max = if (isTv) 420.dp else 360.dp)
                         )
                     } else {
                         Text(

@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -565,43 +567,46 @@ fun TvDetailScreen(
                     ?: media.overview
             }.orEmpty()
             ).let { HtmlText.strip(it) }
-        // 收起态只排 4 行，按这个长度阈值判断「还有看不到的部分」；
-        // 宁可偶尔多给一颗用不上的按钮，也不要长简介没有展开入口。
-        val descTruncated = overview.length > TV_DESC_COLLAPSE_CHARS
+        var descOverflow by remember(item?.id, overview) { mutableStateOf(false) }
         val descFocusRequester = remember { FocusRequester() }
         var descExpanded by remember(item?.id) { mutableStateOf(false) }
+        val descTruncated = descExpanded || descOverflow
         // 每颗头像一个焦点站：requester 由本页先建好再交给头像行，
         // 「播放键 ↓ 落到谁」要在这里就能算出来，不能让组件自己造。
         val castFocusRequesters = remember(tvCast) { List(tvCast.size) { FocusRequester() } }
 
         /**
-         * 播放区按下 ↓ 的落点。有控制条就先落控制条：
-         * 原来这里写死第一集，从播放键一按就越过源/季切换直达剧集，
-         * 想换云盘还得先按 ↑ 走回来（规范 R1/R4：一层一层走，不许跨层抢）。
+         * 播放区按下 ↓ 的落点。展开按钮排在简介正下方，所以有长简介时它是第一站；
+         * 之后才是选集链（控制条 > 首格），电影没有分集就落到主演头像行。
          *
          * 电影 / Emby 单条内容没有分集：这一层原来一个可聚焦元件都没有，下键只能 Cancel ——
-         * 焦点走不动，滚动也就不发生，完整简介和主演永远看不到。现在按版面顺序依次找
-         * 主演头像行、展开按钮当落点（头像行排在展开按钮上方，所以优先级也在它之前）。
+         * 焦点走不动，滚动也就不发生，完整简介和主演永远看不到（规范 R1/R4：一层一层走，不许跨层抢）。
          */
         val belowPlay: FocusRequester = when {
+            descTruncated -> descFocusRequester
             hasEpisodes && hasControlAnchor -> controlsFocusRequester
             hasEpisodes -> firstEpFocusRequester
             hasCast -> castFocusRequesters.first()
-            descTruncated -> descFocusRequester
             else -> FocusRequester.Cancel
         }
-        /** 头像行的上一站：它上面只有不接收焦点的简介与导演，直接回播放键 */
-        val castUpTarget: FocusRequester = playFocusRequester
-        /** 头像行的下一站：先接展开按钮（它排在头像下方），再接选集链；电影到这就是最后一站 */
-        val castDownTarget: FocusRequester = when {
-            descTruncated -> descFocusRequester
+        /** 展开按钮的下一站：往下依次是主演头像行、选集控制条、剧集网格；电影到这就是最后一站 */
+        val belowDesc: FocusRequester = when {
+            hasCast -> castFocusRequesters.first()
             hasEpisodes && hasControlAnchor -> controlsFocusRequester
             hasEpisodes -> firstEpFocusRequester
             else -> FocusRequester.Cancel
         }
-        /** 展开按钮的上一站：有头像行就从最后一颗头像回来，不能直接跳过那一排 */
-        val descUpTarget: FocusRequester =
-            castFocusRequesters.lastOrNull() ?: playFocusRequester
+        /** 头像行的上一站：按钮已排在它上方，没有展开按钮时才直接回播放键 */
+        val castUpTarget: FocusRequester =
+            if (descTruncated) descFocusRequester else playFocusRequester
+        /** 头像行的下一站：选集链 */
+        val castDownTarget: FocusRequester = when {
+            hasEpisodes && hasControlAnchor -> controlsFocusRequester
+            hasEpisodes -> firstEpFocusRequester
+            else -> FocusRequester.Cancel
+        }
+        /** 展开按钮的上一站：它紧贴简介，往上就是播放键 */
+        val descUpTarget: FocusRequester = playFocusRequester
 
         /** 焦点回到首屏锚点时，构图也要回到首屏（规范 R7）。
          *  只靠 bring-into-view 的最小滚动，标题与大海报会留在视口外，
@@ -641,39 +646,13 @@ fun TvDetailScreen(
                             .fillMaxWidth(0.72f)
                             .padding(start = TvPagePadding, end = 12.dp)
                     ) {
-                        // 标题位：Logo 与文字标题共用同一块「标题槽」，
-                        // 起始高度一致、Logo 高度封顶，刮削成功与否页面骨架都长得一样。
-                        val titleSlotHeight = 48.dp
-                        var logoFailed by remember(logo) { mutableStateOf(false) }
+                        // 标题位：Logo 与文字标题共用同一块标题槽，两套布局同一尺度（[TvMediaTitle]）
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                // fill = false：标题按内容取宽，短标题时收藏紧跟字尾；
-                                // 长标题才吃掉剩余宽度，收藏不会被挤出屏幕。
-                                Modifier
-                                    .weight(1f, fill = false)
-                                    .heightIn(min = titleSlotHeight),
-                                contentAlignment = Alignment.CenterStart
-                            ) {
-                                if (logo.isNotBlank() && !logoFailed) {
-                                    AsyncImage(
-                                        model = logo,
-                                        contentDescription = item.title,
-                                        contentScale = ContentScale.Fit,
-                                        onError = { logoFailed = true },
-                                        modifier = Modifier
-                                            .heightIn(max = titleSlotHeight)
-                                            .widthIn(max = 340.dp)
-                                    )
-                                } else {
-                                    Text(
-                                        item.title,
-                                        color = TvText.Title,
-                                        style = MaterialTheme.typography.displayLarge,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
+                            TvMediaTitle(
+                                title = item.title,
+                                logoUrl = logo,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
                             Spacer(Modifier.width(14.dp))
                             // 收藏是焦点链最顶端：↑ 到此为止，同时把构图送回「海报 + 大标题」的首屏态；
                             // 下键回播放。
@@ -851,7 +830,7 @@ fun TvDetailScreen(
                             .bringIntoViewRequester(contentAnchor)
                             .padding(start = TvPagePadding, end = TvPagePadding)
                     ) {
-                        // ---------- 简介：只读，收起态下键会跳过它（展开入口在只读区末尾） ----------
+                        // ---------- 简介：只读，收起态下键会跳过它（展开入口紧贴其下方） ----------
                         // overview 已在焦点链之前算好：有没有那颗按钮要参与决定下键落点。
                         if (overview.isNotBlank()) {
                             Spacer(Modifier.height(16.dp))
@@ -859,10 +838,44 @@ fun TvDetailScreen(
                                 text = overview,
                                 color = TvText.Body,
                                 style = MaterialTheme.typography.bodyLarge,
-                                // 4 行以内：保证简介 + 主演 + 选集首行能挤进同一屏
+                                // 4 行以内：保证简介 + 展开按钮 + 导演 + 主演能挤进同一屏
                                 maxLines = if (descExpanded) Int.MAX_VALUE else 4,
-                                overflow = if (descExpanded) TextOverflow.Visible else TextOverflow.Ellipsis
+                                overflow = if (descExpanded) TextOverflow.Visible else TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 620.dp),
+                                onTextLayout = { layout ->
+                                    if (!descExpanded) descOverflow = layout.hasVisualOverflow
+                                }
                             )
+
+                            // ---------- 展开 / 收起简介：只读区里唯一的焦点站 ----------
+                            // 聚焦它时把内容块顶部对齐视口：电视上没有滚轮，只读的导演 / 主演一旦被
+                            // 顶到视口外就再也滚不到（Emby 电影没有分集，这里往下就是末站）。
+                            // 展开态不做这个对齐：那时按钮自己得留在视口里，才按得到「收起」。
+                            if (descTruncated) {
+                                Spacer(Modifier.height(12.dp))
+                                TvPillButton(
+                                    text = if (descExpanded) "收起" else "展开更多",
+                                    primary = false,
+                                    size = TvButtonSize.Md,
+                                    modifier = Modifier
+                                        .focusRequester(descFocusRequester)
+                                        .onFocusChanged {
+                                            if (it.isFocused && !descExpanded) {
+                                                scope.launch { runCatching { contentAnchor.bringIntoView() } }
+                                            }
+                                        }
+                                        .focusProperties {
+                                            up = descUpTarget
+                                            down = belowDesc
+                                        }
+                                        .then(publishStand(descFocusRequester)),
+                                    onClick = {
+                                        descExpanded = !descExpanded
+                                        // 展开和收起都从简介第一行起读，而不是停在贴着按钮的那一屏
+                                        scope.launch { runCatching { contentAnchor.bringIntoView() } }
+                                    }
+                                )
+                            }
                         }
 
                         // ---------- 导演：紧接简介，只读、不接收焦点 ----------
@@ -902,33 +915,6 @@ fun TvDetailScreen(
                             TmdbCreditLine()
                         }
 
-                        // ---------- 展开 / 收起简介：只读区里唯一的焦点站 ----------
-                        // 位置在主演与署名之后、选集之前：聚焦它时视口底部贴着它，
-                        // 于是简介 + 导演 + 主演一起滚进同一屏。电视上没有滚轮，
-                        // 焦点走不到的内容就等于看不到 —— Emby 电影没有分集，原来这里下键直接 Cancel。
-                        if (descTruncated) {
-                            Spacer(Modifier.height(14.dp))
-                            TvPillButton(
-                                text = if (descExpanded) "收起" else "展开更多",
-                                primary = false,
-                                size = TvButtonSize.Md,
-                                modifier = Modifier
-                                    .focusRequester(descFocusRequester)
-                                    .focusProperties {
-                                        up = descUpTarget
-                                        down = if (hasEpisodes) belowPlay else FocusRequester.Cancel
-                                    }
-                                    .then(publishStand(descFocusRequester)),
-                                onClick = {
-                                    descExpanded = !descExpanded
-                                    if (descExpanded) {
-                                        // 展开后从简介第一行开始读，而不是停在贴着按钮的那一屏
-                                        scope.launch { runCatching { contentAnchor.bringIntoView() } }
-                                    }
-                                }
-                            )
-                        }
-
                         // ---------- 选集：标题 + 控制条 + 网格 ----------
                         if (hasEpisodes) {
                             TvSectionTitle(
@@ -952,9 +938,10 @@ fun TvDetailScreen(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     val pillFocus = Modifier.focusProperties {
-                                        // ↑ 先停在「展开更多」上（有这颗按钮时），再 ↑ 才回播放键：
-                                        // 有分集的剧集下键仍直达控制条，手感不变
-                                        up = if (descTruncated) descFocusRequester else playFocusRequester
+                                        // ↑ 按版面顺序往回走：主演头像 > 展开按钮 > 播放键
+                                        // （展开按钮已上移到简介下方，不再是控制条的上一站）
+                                        up = castFocusRequesters.lastOrNull()
+                                            ?: if (descTruncated) descFocusRequester else playFocusRequester
                                         down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
                                     }.then(publishStand(controlsFocusRequester))
                                     // 播放源 / 云盘切换：多条源时展示，默认第一条
@@ -1227,11 +1214,6 @@ private fun TvCastRow(
 
 /** 每页显示的分集数：40 集一页，超出用翻页按钮切换 */
 private const val TV_EPS_PAGE = 40
-/**
- * 简介超过这个长度就给出「展开更多」：收起态只排 4 行，超出的部分在电视上没有任何办法看到。
- * 阈值按 4 行的字符数往下估，宁可偶尔多给一颗用不上的按钮，也别让长简介没有展开入口。
- */
-private const val TV_DESC_COLLAPSE_CHARS = 200
 
 /** 分集网格列数：分集名是源给的原名（如 "[5.4GB]E01.mkv【…】"），
  *  10 列时一格不到 90dp，名字全被省略号吃掉；4 列后单格够宽，集名能看清。 */
@@ -1331,6 +1313,7 @@ private fun TvEpisodeCard(
  * 源自己给的信息（[sourceInfo]：更新状态、集数、线路数）与画质徽章并存，
  * 画质在前、源信息在后；两边都没有就整行不出现。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun FormatBadgesRow(
     tmdbEnabled: Boolean,
@@ -1358,12 +1341,15 @@ private fun FormatBadgesRow(
     sourceInfo.forEach { badges.add(it to Color(0xFF455A64)) }
     if (badges.isEmpty()) return
 
-    Row(
+    // 徽章是电视上最小的一类字，11sp 在三米外只剩一个形状；抬到 14sp 并允许换行，
+    // 免得「共 xx 集」「x 条线路」这类右侧信息被裁掉。手机端仍用原来的小档。
+    FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // 与手机端详情页的 FormatBadgesRow 用同一套 TextBadge，双端徽章尺寸一致
-        badges.forEach { (label, bg) -> TextBadge(label, bg) }
+        badges.forEach { (label, bg) ->
+            TextBadge(label, bg, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.2.sp)
+        }
     }
 }
 

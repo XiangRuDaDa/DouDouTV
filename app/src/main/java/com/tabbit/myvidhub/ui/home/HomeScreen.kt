@@ -367,25 +367,24 @@ fun HomeScreen(
             }
 
             // 来源/线路图标按钮（搜索按钮左侧）＋ 选了 TVBox 源后动态追加的线路按钮
+            // 工具栏统一 40dp 见方的按钮：48dp 时图标之间视觉间隔有 24~29dp，看着像散开在两角
             if (sources.isNotEmpty()) {
                 HomeSourceSelector(
                     sources = sources,
                     selectedId = selectedSource?.id,
                     onSelect = { vm.selectHomeSource(it) }
                 )
-                Spacer(Modifier.width(5.dp))
                 if (showLineButton) {
                     HomeLineSelector(
                         sites = namedSites,
                         selectedKey = vm.homeSiteKey,
                         onSelect = { key, site -> vm.selectHomeSite(key, site) }
                     )
-                    Spacer(Modifier.width(5.dp))
                 }
             }
 
             // 右侧：搜索/刷新工具栏，常驻不淡出
-            IconButton(onClick = onOpenSearch) {
+            IconButton(onClick = onOpenSearch, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Filled.Search, contentDescription = "搜索", tint = Color.White)
             }
             if (vm.scanning) {
@@ -395,7 +394,7 @@ fun HomeScreen(
                     color = Color.White
                 )
             } else {
-                IconButton(onClick = { vm.refreshHome() }) {
+                IconButton(onClick = { vm.refreshHome() }, modifier = Modifier.size(40.dp)) {
                     Icon(Icons.Filled.Refresh, contentDescription = "刷新当前来源", tint = Color.White)
                 }
             }
@@ -726,7 +725,7 @@ private fun HomeSourceSelector(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        IconButton(onClick = { expanded = true }) {
+        IconButton(onClick = { expanded = true }, modifier = Modifier.size(40.dp)) {
             Icon(Icons.Filled.Source, contentDescription = "选择来源", tint = Color.White)
         }
         HomePickerMenu(
@@ -783,7 +782,7 @@ private fun HomeLineSelector(
         scrollState.scrollTo(target)
     }
     Box {
-        IconButton(onClick = { expanded = true }) {
+        IconButton(onClick = { expanded = true }, modifier = Modifier.size(40.dp)) {
             Icon(Icons.Filled.AltRoute, contentDescription = "选择线路", tint = Color.White)
         }
         HomePickerMenu(
