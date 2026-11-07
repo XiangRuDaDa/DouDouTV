@@ -60,11 +60,12 @@ object Prefs {
     enum class TvLayout { CLASSIC, NETFLIX }
 
     /**
-     * TV 新版（[TvLayout.NETFLIX]）海报行的焦点移动档。只管 nf 那套，经典版海报卡不受影响。
+     * TV 端海报卡的焦点移动档，两套布局共用（nf 版在 NfPosterCard，经典版在 TvPosterCard）。
      *
-     * 两档都必须留在行内纵向余量（nf 包的 `NfRowVerticalPadding` = 14dp）以内，
-     * 超出就会被 Lazy 容器边界裁掉一条边：
-     * · [ART_ZOOM] 图片从中心涨 5%，上下各 6~7dp；
+     * 两档都必须留在行内纵向余量以内，超出就会被 Lazy 容器边界裁掉一条边：
+     * nf 版取 `NfRowVerticalPadding` = 14dp，经典版横排取 `TvRowVerticalPadding` = 14dp
+     * （原来只有 6~7dp，放大档那 10% 也一直是被切掉一点的）：
+     * · [ART_ZOOM] nf 版图片从中心涨 5%（上下各 6~17dp，随卡宽），经典版整卡涨 10%；
      * · [LIFT] 整卡不涨、只上抬 12dp。
      */
     var tvCardMotion: CardMotion

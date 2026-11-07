@@ -38,6 +38,12 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -93,6 +99,7 @@ import com.chen.doudoutv.ui.FocusPulse
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.components.PosterArt
 import com.chen.doudoutv.ui.components.PosterFallback
@@ -188,7 +195,7 @@ fun TvHomeScreen(
      */
     val heroAmbient = rememberHeroAmbient(hero?.let { it.backdropUrl.ifBlank { it.posterUrl } }.orEmpty())
 
-    val listState = ReturnSpot.listState(TvHomeKey)
+    val listState = ReturnSpot.listState(TvHomeKey, precompose = PrecomposeWindow.Tv)
     val scope = rememberCoroutineScope()
     // 轮播进度按 50ms 推进而不是逐帧：进度条宽度 120dp，50ms 只走 0.6dp，看不出台阶；
     // 但静止时 GPU 的渲染频率从 60 次/秒降到 20 次/秒。列表滚动中不推进，
@@ -394,7 +401,7 @@ fun TvHomeScreen(
             // ---------- 我的收藏 ----------
             // 收藏是用户主动留下的内容，优先级高于「继续观看」，双端都排在它上面
             if (favorites.isNotEmpty()) {
-                item(key = "fav_title") { TvSectionTitle("★ 我的收藏") }
+                item(key = "fav_title") { TvSectionTitle("我的收藏") }
                 item(key = "fav_row") {
                     TvPosterRow(items = favorites, onDetail = onDetail, rowKey = "fav", stand = standTarget)
                 }
@@ -402,7 +409,7 @@ fun TvHomeScreen(
 
             // ---------- 继续观看 ----------
             if (continueItems.isNotEmpty()) {
-                item(key = "continue_title") { TvSectionTitle("▶ 继续观看") { } }
+                item(key = "continue_title") { TvSectionTitle("继续观看") { } }
                 item(key = "continue_row") {
                     TvContinueRow(
                         items = continueItems,
@@ -593,7 +600,8 @@ private fun TvTopBar(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (isEmpty) {
                 TvPillButton(
-                    text = "＋ 添加来源", primary = true, size = TvButtonSize.Sm, onClick = onSources,
+                    text = "添加来源", primary = true, size = TvButtonSize.Sm,
+                    icon = Icons.Filled.Add, onClick = onSources,
                     modifier = topBarRoute
                         .focusRequester(sourceFocusRequester)
                         .onFocusChanged(markTopBarFocus)
@@ -608,7 +616,12 @@ private fun TvTopBar(
                     onFocusChanged = markTopBarFocus
                 )
                 if (onHomeSite != null && !siteName.isNullOrBlank()) {
-                    Text("›", color = TvText.Muted, style = MaterialTheme.typography.titleMedium)
+                    androidx.compose.material3.Icon(
+                        imageVector = Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = TvText.Muted,
+                        modifier = Modifier.size(18.dp)
+                    )
                     TvSourceChainPill(
                         label = "线路",
                         value = siteName,
@@ -982,17 +995,19 @@ internal fun TvHero(
                 }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 TvPillButton(
-                    text = if (item.positionMs > 5_000L) "▶ 继续播放" else "▶ 播放",
+                    text = if (item.positionMs > 5_000L) "继续播放" else "播放",
                     modifier = heroUpKey.focusRequester(playFocusRequester),
                     primary = true,
                     size = TvButtonSize.Lg,
+                    icon = Icons.Filled.PlayArrow,
                     onClick = onPlay
                 )
                 TvPillButton(
-                    text = "ⓘ 详情",
+                    text = "详情",
                     modifier = heroUpKey,
                     primary = false,
                     size = TvButtonSize.Lg,
+                    icon = Icons.Filled.Info,
                     onClick = onDetail
                 )
             }
@@ -1032,6 +1047,15 @@ internal fun TvHero(
         }
     }
 }
+
+/** Hero 空态底部的一颗按钮：文案 + 真图标 + 主次 + 动作。
+ *  以前图标是塞在文案里的 Unicode 字符（＋ / ↻），整套电视界面因此有两套图标语汇。 */
+private class HeroAction(
+    val label: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val primary: Boolean,
+    val onClick: () -> Unit
+)
 
 /** 空态主视觉：轮播区常驻，但没有可推荐内容时占位。
  *  高度走同一个 [tvHeroHeight]，避免首页在「加载中 / 空库」之间上下跳版。 */
@@ -1082,12 +1106,12 @@ internal fun TvHeroEmpty(
      * 顶栏按 ↓ 时焦点在视口内找不到任何落点，就卡在工具栏上出不去。
      * 按钮行的位置与有内容时一致（左下、bottom 44dp），顶栏的 ↓ 正好落在这第一颗上。
      */
-    val actions: List<Triple<String, Boolean, () -> Unit>> = when {
-        libraryIsEmpty -> listOf(Triple("＋ 添加来源", true, onAddSource))
-        scanning -> listOf(Triple("＋ 添加来源", false, onAddSource))
+    val actions: List<HeroAction> = when {
+        libraryIsEmpty -> listOf(HeroAction("添加来源", Icons.Filled.Add, true, onAddSource))
+        scanning -> listOf(HeroAction("添加来源", Icons.Filled.Add, false, onAddSource))
         else -> listOf(
-            Triple("↻ 立即同步", true, onRefresh),
-            Triple("＋ 切换来源", false, onAddSource)
+            HeroAction("立即同步", Icons.Filled.Refresh, true, onRefresh),
+            HeroAction("切换来源", Icons.Filled.Add, false, onAddSource)
         )
     }
     val heroUpKey: Modifier = Modifier
@@ -1118,14 +1142,15 @@ internal fun TvHeroEmpty(
                 .padding(start = TvPagePadding, bottom = 44.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            actions.forEachIndexed { index, (label, primary, onClick) ->
+            actions.forEachIndexed { index, action ->
                 val focusModifier = if (index == 0) heroUpKey.focusRequester(firstFocusRequester) else heroUpKey
                 TvPillButton(
-                    text = label,
+                    text = action.label,
                     modifier = focusModifier,
-                    primary = primary,
+                    primary = action.primary,
                     size = TvButtonSize.Lg,
-                    onClick = onClick
+                    icon = action.icon,
+                    onClick = action.onClick
                 )
             }
         }
@@ -1187,7 +1212,7 @@ private fun TvShimmerRow(count: Int = 6) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(bottom = 34.dp),
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = TvRowVerticalPadding),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         items(count) {
@@ -1208,7 +1233,7 @@ private fun TvPosterRow(
     /** 落点卡片 requester 的交接点，由首页传入 */
     stand: StandTarget
 ) {
-    val rowState = ReturnSpot.listState("$TvHomeKey/$rowKey")
+    val rowState = ReturnSpot.listState("$TvHomeKey/$rowKey", precompose = PrecomposeWindow.Tv)
     if (onNearEnd != null) {
         val nearEnd by remember(items.size) {
             derivedStateOf {
@@ -1221,7 +1246,7 @@ private fun TvPosterRow(
     LazyRow(
         state = rowState,
         modifier = Modifier.fillMaxWidth(),
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 7.dp),
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = TvRowVerticalPadding),
         horizontalArrangement = Arrangement.spacedBy(18.dp)
     ) {
         itemsIndexed(items, key = { _, it -> "tv_${it.id}" }, contentType = { _, _ -> "poster" }) { index, item ->
@@ -1248,7 +1273,7 @@ private fun TvContinueRow(
     rowKey: String,
     stand: StandTarget
 ) {
-    val rowState = ReturnSpot.listState("$TvHomeKey/$rowKey")
+    val rowState = ReturnSpot.listState("$TvHomeKey/$rowKey", precompose = PrecomposeWindow.Tv)
     LazyRow(
         state = rowState,
         modifier = Modifier.fillMaxWidth(),

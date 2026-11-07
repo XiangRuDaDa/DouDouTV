@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,6 +30,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -57,12 +60,13 @@ import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.gridState
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.TvSearchUiState
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
-import com.chen.doudoutv.ui.tv.tvGridColumns
+import com.chen.doudoutv.ui.tv.tvPosterColumns
 import com.chen.doudoutv.ui.tv.tvMoveFocus
 import com.chen.doudoutv.ui.tv.tvResumeTick
 import com.chen.doudoutv.ui.theme.AppColors
@@ -174,14 +178,19 @@ fun NfSearchScreen(
     // 一旦进 tick，抢焦就会把焦点从 BasicTextField 挪到输入框外层那颗 focusable 节点上 ——
     // 输入法面板跟着关闭，用户才打了一个字就得重新按 OK 弹框。
     // 联想出现时焦点该留在原处：往下走由输入框自己的 ↓（nfFocusRoute）显式交点。
+    // 从别的 tab 点「搜索」切过来：焦点留在标签上，不交给输入框（NfTabSwitch）
+    val viaTab = remember { NfTabSwitch.consume(NfTab.Search) }
     tvClaimFocusOnEnter(
         tick = listOf(resumeTick, state.results.size),
         // 输入 / 联想阶段这一串锚点只留输入框自己：
         // 焦点往下走只有两条正当路径：用户自己按 ↓（nfFocusRoute 显式交点），或提交搜索出结果。
         // 提交之后（submittedKeyword 非空）恢复原来的抢焦：还站在离开时那张卡，没有记录才落首卡。
         anchorsProvider = {
-            if (state.submittedKeyword.isEmpty()) listOf(fieldFocus)
-            else listOfNotNull(stand.requester, belowField, fieldFocus)
+            when {
+                viaTab -> listOf(chrome.tabOf(NfTab.Search))
+                state.submittedKeyword.isEmpty() -> listOf(fieldFocus)
+                else -> listOfNotNull(stand.requester, belowField, fieldFocus)
+            }
         }
     )
 
@@ -352,7 +361,12 @@ private fun NfSearchField(
         contentAlignment = Alignment.CenterStart
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("🔍", style = MaterialTheme.typography.titleMedium, color = TvText.Meta)
+            androidx.compose.material3.Icon(
+                imageVector = Icons.Filled.Search,
+                contentDescription = null,
+                tint = TvText.Meta,
+                modifier = Modifier.size(22.dp)
+            )
             Spacer(Modifier.width(12.dp))
             Box(Modifier.weight(1f)) {
                 if (value.isEmpty()) {
@@ -402,10 +416,11 @@ private fun NfSuggestionRow(
             .padding(horizontal = 18.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            "🔍",
-            style = MaterialTheme.typography.titleMedium,
-            color = if (focused) Color.Black else TvText.Meta
+        androidx.compose.material3.Icon(
+            imageVector = Icons.Filled.Search,
+            contentDescription = null,
+            tint = if (focused) Color.Black else TvText.Meta,
+            modifier = Modifier.size(22.dp)
         )
         Spacer(Modifier.width(12.dp))
         Text(
@@ -469,18 +484,19 @@ private fun NfHistoryChip(
     Row(
         modifier
             .widthIn(max = 420.dp)
-            .clip(Radius.Pill)
+            .clip(Radius.Md)
             .background(if (focused) Color.White else AppColors.Surface)
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Pill) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(horizontal = 20.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            "🔍",
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (focused) Color.Black else TvText.Meta
+        androidx.compose.material3.Icon(
+            imageVector = Icons.Filled.Search,
+            contentDescription = null,
+            tint = if (focused) Color.Black else TvText.Meta,
+            modifier = Modifier.size(18.dp)
         )
         Spacer(Modifier.width(10.dp))
         Text(
@@ -537,8 +553,8 @@ private fun NfSearchGrid(
     upFocusRequester: FocusRequester,
     onDetail: (Long) -> Unit
 ) {
-    val gridState = ReturnSpot.gridState("$NfSearchKey/results")
-    val columns = tvGridColumns()
+    val gridState = ReturnSpot.gridState("$NfSearchKey/results", precompose = PrecomposeWindow.Tv)
+    val columns = tvPosterColumns()
     val total = groups.values.sumOf { it.size }
     val stagger = nfFirstFillStagger(total, NfSearchKey)
     val firstId = groups.values.firstOrNull()?.firstOrNull()?.id
@@ -550,7 +566,8 @@ private fun NfSearchGrid(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfGridTopPadding, bottom = 24.dp
+            // 首项是分组表头（纯文字、不聚焦），不需要给焦点外扩留 [NfGridTopPadding] 那一段
+            top = 8.dp, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)

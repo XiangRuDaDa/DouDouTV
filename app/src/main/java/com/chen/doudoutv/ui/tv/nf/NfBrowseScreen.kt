@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -34,7 +37,7 @@ import com.chen.doudoutv.ui.StandTarget
 import com.chen.doudoutv.ui.components.ShimmerCard
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
-import com.chen.doudoutv.ui.tv.tvGridColumns
+import com.chen.doudoutv.ui.tv.tvPosterColumns
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.TvText
 
@@ -111,10 +114,15 @@ fun NfBrowseScreen(
     /** 这一屏真正能接住 ↓ 的元件：有内容是网格首卡，没内容是空态那颗按钮 */
     val contentAnchor = if (contentReady) gridFirstFocus else emptyFocus
 
+    // 从别的 tab 点「分类」切过来：焦点留在标签上，不交给网格/分类条（NfTabSwitch）
+    val viaTab = remember { NfTabSwitch.consume(NfTab.Browse) }
     // 首屏数据到位后把焦点交给卡片，遥控器立刻可用；离开时站在哪张卡就还给哪张（规范 R6/R7）
     tvClaimFocusOnEnter(
         tick = listOf(contentReady, scopeKey),
-        anchorsProvider = { listOfNotNull(stand.requester, contentAnchor) }
+        anchorsProvider = {
+            if (viaTab) listOf(chrome.tabOf(NfTab.Browse))
+            else listOfNotNull(stand.requester, contentAnchor)
+        }
     )
 
     LaunchedEffect(currentTypeId, vm.homeRefreshEpoch) {
@@ -149,7 +157,8 @@ fun NfBrowseScreen(
                     !isTvBox && localShown.isEmpty() -> NfInlineEmpty(
                         text = if (vm.scanning) "正在同步这个 Emby 媒体库…" else "这个库里还没有可分类的内容",
                         hint = if (vm.scanning) null else "先在顶栏刷新，或切换到别的来源",
-                        actionLabel = if (vm.scanning) null else "↻ 立即同步",
+                        actionLabel = if (vm.scanning) null else "立即同步",
+                        actionIcon = if (vm.scanning) null else Icons.Filled.Refresh,
                         onAction = if (vm.scanning) null else { { vm.refreshHome() } },
                         focusRequester = emptyFocus
                     )
@@ -168,6 +177,7 @@ fun NfBrowseScreen(
                         text = "TVBox 要先选定一条线路",
                         hint = "分类内容按线路请求，「全部站点」是聚合视图、没有分页入口",
                         actionLabel = "选择线路",
+                        actionIcon = Icons.Filled.List,
                         onAction = { chrome.openScopeDrawer = true },
                         focusRequester = emptyFocus
                     )
@@ -177,7 +187,8 @@ fun NfBrowseScreen(
                         // 这时候判「没有下发分类」是误报
                         text = if (catsLoading) "正在读取这条线路的分类…" else "这条线路没有下发分类",
                         hint = if (catsLoading) null else "换一条线路，或先在来源里同步",
-                        actionLabel = if (catsLoading) null else "↻ 立即同步",
+                        actionLabel = if (catsLoading) null else "立即同步",
+                        actionIcon = if (catsLoading) null else Icons.Filled.Refresh,
                         onAction = if (catsLoading) null else { { vm.refreshHome() } },
                         focusRequester = emptyFocus
                     )
@@ -186,6 +197,7 @@ fun NfBrowseScreen(
                         text = "加载失败：${vm.browseItemsError(currentTypeId.orEmpty())}",
                         hint = "重试这一页，或者换一条线路",
                         actionLabel = "重试",
+                        actionIcon = Icons.Filled.Refresh,
                         onAction = { currentTypeId?.let { vm.retryBrowsePage(it) } },
                         focusRequester = emptyFocus
                     )
@@ -260,7 +272,7 @@ private fun NfGridFooter(loading: Boolean, ended: Boolean, error: String?) {
 @Composable
 private fun NfSkeletonGrid() {
     LazyVerticalGrid(
-        columns = GridCells.Fixed(tvGridColumns()),
+        columns = GridCells.Fixed(tvPosterColumns()),
         contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = NfGridTopPadding),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding),

@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -43,6 +44,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.layout.LocalPinnableContainer
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -110,12 +115,43 @@ import com.chen.doudoutv.ui.theme.Motion
       首屏必须存在一条「能往下走」的路。空态比满态更容易犯这条。
    R7 可见即恢复。Activity resume（进出播放器）与上级页 pop 回来时，把焦点交回该页声明的
       入口锚点；恢复焦点要与恢复构图（滚动位置）成对做，只靠 bring-into-view 的最小滚动
-      回不到首屏大图。1.6.8 的 FocusManager 既不暴露 hasFocus 也不暴露 currentFocus，
-      查不到「当前有没有焦点」，所以只能统一重抢一次；入口锚点已经持有焦点时重复请求是空操作。
+      回不到首屏大图。FocusManager 不暴露 hasFocus/currentFocus，查不到「当前有没有焦点」，
+      所以只能统一重抢一次；1.9 的 requestFocus 会返回落没落上，抢到了就不再抢第二次。
    R8 引用别的子树或条件分支里的 requester 前，先确认它这一帧真的挂载了。
       淡出即摘除的元件不能当路由目标；跨分支 requestFocus 一律走 tvMoveFocus（内部已兜异常）。
-      1.6.8 的 requestFocus() 返回 Unit，成功与否读不到，所以入口抢焦要补抢一次（见 tvClaimFocusOnEnter）。
+      requestFocus 返回 false 就说明这一帧没挂上，等一帧再试，不要当成功。
    ======================================================== */
+
+/**
+ * Compose 1.9：把「当前有焦点的那一项」钉在 Lazy 容器里，焦点就不会被清空。
+ *
+ * 为什么需要它：
+ * 1.9 改了焦点目标的析构语义 —— 焦点所在的那一项一旦被 Lazy 容器回收，
+ * [FocusTargetNode.onReset] 会直接在 owner 级 clearFocus，焦点当场消失。
+ * 于是在网格里往下移几行、容器滚动把旧项回收掉时，焦点就掉了；
+ * 用户再按方向键，框架从根节点重新找焦点，找回来的就是第一列第一张卡。
+ *
+ * 1.9 同时给了 [LocalPinnableContainer]：被 pin 的项即使滚出视口也不会被回收。
+ * 这里在卡片拿到焦点时 pin 住自己所在的那一项、失焦时 release，
+ * 焦点所在的那一项从此不会被回收，焦点也就不会被清空 ——
+ * 「往下移几行后焦点消失、再移动跳回第一列」这条链子从根上断掉。
+ *
+ * 不在 Lazy 容器里（[LocalPinnableContainer] 为 null）时什么都不做。
+ */
+@Composable
+fun tvKeepFocusedItemAlive(focused: Boolean) {
+    val pinnable = LocalPinnableContainer.current
+    DisposableEffect(pinnable, focused) {
+        // pin() 在「项已被回收」时会抛（checkPrecondition），这里兜住：
+        // 组合完成到 effect 生效之间，列表数据可能已经变了。
+        val handle = if (focused && pinnable != null) {
+            runCatching { pinnable.pin() }.getOrNull()
+        } else {
+            null
+        }
+        onDispose { runCatching { handle?.release() } }
+    }
+}
 
 /**
  * R1：声明一颗可聚焦元件的上/下落点。
@@ -131,8 +167,14 @@ fun Modifier.tvFocusRoute(
 
 /**
  * R3：跳焦点的唯一入口。
- * 按顺序试各个落点，[FocusRequester.requestFocus] 没抛异常就算到位并立即返回；
- * 全部没挂载时才按 [direction] 降级到默认几何搜索。绝不读 onFocusChanged 的状态位再校验一遍。
+ *
+ * 按顺序试各个落点，第一个成功的就返回。
+ *
+ * Compose 1.9 起 [FocusRequester.requestFocus] 直接返回「有没有落到目标节点」，
+ * 所以这里不用再靠「抛异常 = 没挂载」反推成功与否：带方向的版本还能让框架
+ * 按这个方向做最小滚动（往下跳就往下翻一格，不多滚）。
+ * 全部没挂载时才按 [direction] 降级到默认几何搜索。
+ * 绝不读 onFocusChanged 的状态位再校验一遍。
  */
 fun tvMoveFocus(
     vararg targets: FocusRequester,
@@ -140,7 +182,9 @@ fun tvMoveFocus(
     direction: FocusDirection? = null,
 ): Boolean {
     for (target in targets) {
-        if (runCatching { target.requestFocus() }.isSuccess) return true
+        val landed = runCatching { target.requestFocus(direction ?: FocusDirection.Enter) }
+            .getOrDefault(false)
+        if (landed) return true
     }
     if (focusManager != null && direction != null) {
         runCatching { focusManager.moveFocus(direction) }
@@ -166,9 +210,9 @@ fun tvResumeTick(): Int {
 /**
  * R7：入口抢焦。[tick] 每次变化（首次组合 + 每次界面回到前台）都把焦点交给第一个已挂载的落点。
  *
- * 为什么不在这里判断「当前是不是已经有焦点」：1.6.8 的 FocusManager 不暴露焦点查询，
- * 而跨 Activity 回来时（进播放器再退出）恰恰是「焦点状态还在、视觉选中框没了」和
- * 「焦点彻底丢了」两种情况混在一起，只能统一重抢一次来保证一定看得见选中态。
+ * 为什么不在这里判断「当前是不是已经有焦点」：跨 Activity 回来时（进播放器再退出）
+ * 恰恰是「焦点状态还在、视觉选中框没了」和「焦点彻底丢了」两种情况混在一起，
+ * 只能统一重抢一次来保证一定看得见选中态。
  * 代价是从播放器回来会把焦点放回该页入口锚点（而不是你离开时那颗卡片），
  * 这比「按了没反应」可预期；以后要做「记住离开位置」，把锚点表换成按层级记录的表即可。
  */
@@ -178,13 +222,18 @@ fun tvClaimFocusOnEnter(
     vararg anchors: FocusRequester,
     scrollToTop: suspend () -> Unit = {},
     settleMillis: Long = 0L,
+    keepTop: Boolean = false,
 ) {
-    tvClaimFocusOnEnter(tick, { anchors.toList() }, scrollToTop, settleMillis)
+    tvClaimFocusOnEnter(tick, { anchors.toList() }, scrollToTop, settleMillis, keepTop)
 }
 
 /**
  * [tvClaimFocusOnEnter] 的按需取锚点版本：落点由子树里的卡片在组合/拿焦点时才交出来，
  * 页面组合那一刻还读不到，所以这里传的是取值函数，效果启动时才读。
+ *
+ * [keepTop]：抢到焦点之后再把容器滚回顶部一次。1.9 的 requestFocus 自带 bring-into-view，
+ * 入口锚点排在首屏偏下时它会把页面往下滚一截，进页看到的就不是刚进来那一屏构图了
+ * （详情页的简介、设置页的分组被直接摊在眼前）。等一帧再滚，压住那次自动滚动。
  */
 @Composable
 fun tvClaimFocusOnEnter(
@@ -192,18 +241,24 @@ fun tvClaimFocusOnEnter(
     anchorsProvider: () -> List<FocusRequester>,
     scrollToTop: suspend () -> Unit = {},
     settleMillis: Long = 0L,
+    keepTop: Boolean = false,
 ) {
     LaunchedEffect(tick) {
         runCatching { scrollToTop() }
         if (settleMillis > 0) delay(settleMillis)
         // 等一帧：requester 要等节点组合完成才挂得上
         withFrameNanos { }
-        tvMoveFocus(*anchorsProvider().toTypedArray())
-        // 再补一次：路由淡入淡出、刚从播放器 resume 回来时，锚点节点这一帧可能还没挂上，
-        // 而 requestFocus 是否成功在 1.6.8 里读不到返回值。对已经持有焦点的节点重复请求是空操作，
-        // 所以补一次只会「把没抢到的焦点抢上」，不会把用户已经走到位的焦点拽回来。
-        delay(120)
-        tvMoveFocus(*anchorsProvider().toTypedArray())
+        if (!tvMoveFocus(*anchorsProvider().toTypedArray())) {
+            // 只有「这一次没抢到」才补跳：Compose 1.9 的 requestFocus 会直接告诉我们落没落上，
+            // 抢到了就说明焦点已经在该去的地方，再补一次只会把用户已经走到的焦点拽回来。
+            // 没抢到多半是锚点节点这一帧还没挂上（路由淡入淡出、刚从播放器 resume 回来），等一下再试。
+            delay(120)
+            tvMoveFocus(*anchorsProvider().toTypedArray())
+        }
+        if (keepTop) {
+            withFrameNanos { }
+            runCatching { scrollToTop() }
+        }
     }
 }
 
@@ -234,6 +289,19 @@ fun TvPillButton(
     modifier: Modifier = Modifier,
     primary: Boolean = true,
     size: TvButtonSize = TvButtonSize.Md,
+    /**
+     * 左侧图标。
+     *
+     * 以前这里靠往文案里塞 ▶ / ＋ / ↻ 这类字符当图标，整棵电视树里因此出现两套图标语汇：
+     * Material 图标只用了三处，其余全是 Unicode 字符。现在一律走真图标。
+     */
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    /**
+     * 右侧图标。
+     *
+     * 「下一页 ›」这类箭头在右边，「上一页 ‹」在左边，两种方向不能共用一个位置参数。
+     */
+    trailingIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     onClick: () -> Unit
 ) {
     // 焦点态统一由 interactionSource 驱动：clickable 与 focusable 共用同一个 source。
@@ -272,18 +340,56 @@ fun TvPillButton(
             .focusable(interactionSource = interaction)
             .padding(tvButtonPadding(size))
     ) {
-        Text(
-            text,
-            color = when {
-                // 主按钮聚焦压在浅色上，黑字最稳；其余态都在深色上，用白字
-                primary && focused -> Color.Black
-                size == TvButtonSize.Sm -> TvText.Body
-                else -> TvText.Title
-            },
-            // 三档共用同一个字号，层级交给填充与高度
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1
-        )
+        val textColor = when {
+            // 主按钮聚焦压在浅色上，黑字最稳；其余态都在深色上，用白字
+            primary && focused -> Color.Black
+            size == TvButtonSize.Sm -> TvText.Body
+            else -> TvText.Title
+        }
+        val iconSize = when (size) {
+            TvButtonSize.Sm -> 18.dp
+            TvButtonSize.Md -> 22.dp
+            TvButtonSize.Lg -> 24.dp
+        }
+        if (icon != null || trailingIcon != null) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (icon != null) {
+                    androidx.compose.material3.Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = textColor,
+                        // 图标跟按钮同档缩放，避免出现「小胶囊里塞个标准大的三角」
+                        modifier = Modifier.size(iconSize)
+                    )
+                }
+                Text(
+                    text,
+                    color = textColor,
+                    // 三档共用同一个字号，层级交给填充与高度
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1
+                )
+                if (trailingIcon != null) {
+                    androidx.compose.material3.Icon(
+                        imageVector = trailingIcon,
+                        contentDescription = null,
+                        tint = textColor,
+                        modifier = Modifier.size(iconSize)
+                    )
+                }
+            }
+        } else {
+            Text(
+                text,
+                color = textColor,
+                // 三档共用同一个字号，层级交给填充与高度
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1
+            )
+        }
     }
 }
 
@@ -338,9 +444,20 @@ fun TvPlayButton(
 }
 
 /**
- * 圆形图标按钮：电视端的次操作（收藏等）用图标而不是长条文字胶囊。
- * 圆形视觉更轻、横向只占一个按钮宽度，把省下来的空间留给海报；
+ * 共用于两套布局的按钮圆角档：NF 版一律圆角矩形，经典版保持原来的胶囊 / 圆形。
+ *
+ * 详情页、来源页、设置页这些元件两套布局共用同一份，形状靠当前布局风格分流，
+ * 不复制第二份元件 —— 改 NF 的观感时经典版一行不动。
+ */
+@Composable
+fun tvButtonShape(): Shape =
+    if (Prefs.tvLayout == Prefs.TvLayout.NETFLIX) Radius.Md else Radius.Pill
+
+/**
+ * 图标按钮：电视端的次操作（收藏等）用图标而不是长条文字按钮。
+ * 横向只占一个按钮宽度，把省下来的空间留给海报；
  * 聚焦时放大并加白边，符合十英尺界面的可辨识要求。
+ * 形状见 [tvButtonShape]：NF 版圆角矩形，经典版圆形。
  */
 @Composable
 fun TvIconButton(
@@ -358,13 +475,14 @@ fun TvIconButton(
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST), label = "tv_icon")
+    val shape = tvButtonShape()
 
     Box(
         modifier
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .size(sizeDp)
-            .clip(Radius.Pill)
+            .clip(shape)
             .background(
                 when {
                     focused -> Color.White
@@ -373,8 +491,8 @@ fun TvIconButton(
                 }
             )
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Pill)
-                else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), Radius.Pill)
+                if (focused) Modifier.border(2.dp, Color.White, shape)
+                else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), shape)
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction),
@@ -391,8 +509,14 @@ fun TvIconButton(
 }
 
 /**
- * 电视端海报卡：2:3 竖版，比手机大一圈，聚焦时放大并加白色描边。
+ * 电视端海报卡：2:3 竖版，比手机大一圈，聚焦时加白色描边，位移看 [Prefs.tvCardMotion] 两档：
+ * · 放大（默认）—— 整卡涨 10%；
+ * · 上抬 —— 整卡不涨，往上走 [TvPosterLift]。
+ * 和 NF 版同一套档位，切换在设置页「焦点移动效果」。
  * 有播放进度的条目底部带一条进度线，方便一眼看出「这片看了一半」。
+ *
+ * 放进 LazyRow / LazyVerticalGrid 时，行的纵向 contentPadding 至少给 [TvRowVerticalPadding]，
+ * 否则抬起或涨出来的那几像素会被容器边界裁掉一条边。
  */
 @Composable
 fun TvPosterCard(
@@ -416,9 +540,15 @@ fun TvPosterCard(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    val density = LocalDensity.current
+    val liftPx = with(density) { TvPosterLift.toPx() }
+    val liftMode = Prefs.tvCardMotion == Prefs.CardMotion.LIFT
+    // 焦点所在的那一项不许被 Lazy 回收，否则 1.9 会直接把焦点清空（见 tvKeepFocusedItemAlive）
+    tvKeepFocusedItemAlive(focused)
     // 不用 by 解包：放大动画每帧都变，解包等于每帧重组整张卡（含图片和文字）。
     // 保留 State 在 graphicsLayer 的 draw phase 读，动画只重绘这一层。
-    val scale = animateFloatAsState(if (focused) 1.10f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "card")
+    val scale = animateFloatAsState(if (focused && !liftMode) 1.10f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "card")
+    val lift = animateFloatAsState(if (focused && liftMode) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "cardLift")
     val cardShape = remember { Radius.Md }
 
     val progress = if (item.durationMs > 0L) {
@@ -430,11 +560,21 @@ fun TvPosterCard(
             .then(if (fillCell) Modifier.fillMaxWidth() else Modifier.width(width))
             // 放大 10% 后要抬高绘制层级，否则描边会被同行后面的卡片压住
             .zIndex(if (focused) 1f else 0f)
+            // 焦点目标（clickable）必须排在 graphicsLayer 前面：
+            // 缩放会进 Compose 的焦点矩形（rectInParent 里 layer.mapBounds），
+            // 获焦卡一大，同一行的邻卡全变成「在它下面」的合法候选，
+            // ↓ 被吃掉去横向跳格，Lazy 网格也不再补组合下一行。
+            // 缩放挪到 clickable 之后，焦点矩形回到卡片本身（与 NF 版同一顺序）。
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             // 缩放和圆角裁剪合成同一个 layer：原来 graphicsLayer + clip 是两个 layer，
             // 滚动时每张卡都多一层离屏缓冲。
             .graphicsLayer {
                 scaleX = scale.value
                 scaleY = scale.value
+                // 上抬档的位移和放大档同层、同样在 clickable 之后：
+                // translationY 会进焦点矩形，挂到 clickable 外面就会让同行邻卡被读成「在这张下面」，
+                // ↓ 被吃掉去横向跳格，网格也不再补组合下一行（和 NfPosterCard 同一条约束）。
+                translationY = -lift.value
                 // 首卡往右扩：绕中心放大 10% 会把左缘往左推掉 5% 卡宽，于是行首卡比
                 // 下面各行更靠左，左轴第二条就出现了。
                 // 这里用 translationX 精确补回这半个增量，而不是改 transformOrigin ——
@@ -453,7 +593,6 @@ fun TvPosterCard(
                 if (focused) Modifier.border(2.5.dp, Color.White, cardShape)
                 else Modifier.border(1.dp, Edge.Hairline, cardShape)
             )
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(0.dp)
     ) {
         // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组卡片外壳
@@ -644,7 +783,7 @@ fun TvMenuRow(
             .background(
                 when {
                     focused -> Color.White
-                    danger -> Color(0xFFE5484D).copy(alpha = 0.10f)
+                    danger -> AppColors.Danger.copy(alpha = 0.10f)
                     else -> AppColors.SurfaceHi.copy(alpha = 0.35f)
                 }
             )
@@ -668,9 +807,9 @@ fun TvMenuRow(
             Text(
                 text = text,
                 color = when {
-                    focused && danger -> Color(0xFFE5484D)
+                    focused && danger -> AppColors.Danger
                     focused -> Color.Black
-                    danger -> Color(0xFFFF8A65)
+                    danger -> AppColors.Warn
                     else -> TvText.Title
                 },
                 style = MaterialTheme.typography.bodyLarge,
@@ -772,12 +911,21 @@ fun TvBackButton(onBack: () -> Unit) {
             )
             .padding(horizontal = 18.dp, vertical = 9.dp)
     ) {
-        Text(
-            "← 返回",
-            // 返回按钮用 titleSmall + Body 级白：够用但不抢焦点
-            color = if (focused) Color.Black else TvText.Body,
-            style = MaterialTheme.typography.titleSmall
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.material3.Icon(
+                imageVector = androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = null,
+                tint = if (focused) Color.Black else TvText.Body,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "返回",
+                // 返回按钮用 titleSmall + Body 级白：够用但不抢焦点
+                color = if (focused) Color.Black else TvText.Body,
+                style = MaterialTheme.typography.titleSmall
+            )
+        }
     }
 }
 
@@ -792,14 +940,69 @@ fun TvBackButton(onBack: () -> Unit) {
 internal val TvPagePadding = 40.dp
 
 /**
- * 电视端网格列数：跟随设置页「缩略图大小」。
- * 所有 TV 网格页（分类 / 查看全部 / 搜索 / 来源）都取这个值，避免各处各写一套。
+ * 海报网格的最小格宽（dp）。
+ *
+ * 96dp 是 1080p 上「缩略图 = 小」档的真实格宽（(880 - 7×16) / 8 = 96dp）。
+ * 再窄，海报上的字和脸在三米外就糊成一片，那一档就不该排这么多列。
  */
-fun tvGridColumns(): Int = when (Prefs.posterSize) {
-    Prefs.PosterSize.SMALL -> 8
-    Prefs.PosterSize.MEDIUM -> 6
-    Prefs.PosterSize.LARGE -> 4
+internal val TvPosterMinCellWidth = 96.dp
+
+/**
+ * 来源卡片的最小格宽（dp）。
+ *
+ * 来源卡带名称、徽章、URL 和统计行，比海报重得多，格宽要留够；
+ * 280dp 对应 1080p 上的三列布局（(880 - 2×16) / 3 = 282dp）。
+ */
+internal val TvSourceMinCellWidth = 280.dp
+
+/**
+ * 电视端网格列数：屏宽定自然列数，档位定上限，小屏给下限。
+ *
+ * 以前是各写各的：
+ *   · 海报网格只认「缩略图大小」档位（8/6/4），完全不看屏宽 ——
+ *     720p 机器上也排 8 列，每格只剩 56dp 宽，海报根本认不出内容；
+ *   · 来源页只看屏宽（290dp 一列），不认档位 —— 同一块屏上两页的列宽对不上。
+ * 现在统一走这个函数：按最小格宽算出屏宽能排几列（自然列数），
+ * 再被档位封顶、被下限兜底，最后两边夹一次。
+ *
+ * @param screenWidth 可用屏宽。
+ * @param minCellWidth 单格最小宽度，窄于此就认不出内容。
+ * @param maxColumns 列数上限（海报取缩略图档位）。
+ * @param minColumns 列数下限，小屏上不让卡片摊成一条。
+ * @param horizontalPadding 网格左右内边距合计。
+ * @param gap 列间距。
+ */
+fun tvGridColumns(
+    screenWidth: Dp,
+    minCellWidth: Dp,
+    maxColumns: Int,
+    minColumns: Int = 1,
+    horizontalPadding: Dp = TvPagePadding * 2,
+    gap: Dp = 16.dp
+): Int {
+    val usable = screenWidth - horizontalPadding
+    if (usable <= 0.dp) return minColumns.coerceAtMost(maxColumns)
+    // 列间距也要占地方：usable 里要先把 n-1 段间距扣掉，所以按 (usable+gap)/(min+gap) 反解
+    val byWidth = ((usable + gap) / (minCellWidth + gap)).toInt()
+    return byWidth.coerceIn(minColumns.coerceAtMost(maxColumns), maxColumns)
 }
+
+/**
+ * 海报网格列数：档位封顶（8/6/4），屏宽兜底。
+ *
+ * 所有 TV 网格页（分类 / 查看全部 / 搜索 / NF 浏览 / NF 我的）都取这个值，
+ * 避免各处各写一套。1080p 上仍是 8 / 6 / 4 三档，与旧规则一致。
+ */
+@Composable
+fun tvPosterColumns(): Int = tvGridColumns(
+    screenWidth = LocalConfiguration.current.screenWidthDp.dp,
+    minCellWidth = TvPosterMinCellWidth,
+    maxColumns = when (Prefs.posterSize) {
+        Prefs.PosterSize.SMALL -> 8
+        Prefs.PosterSize.MEDIUM -> 6
+        Prefs.PosterSize.LARGE -> 4
+    }
+)
 
 /**
  * 网格首行上方的余量。
@@ -813,6 +1016,19 @@ fun tvGridColumns(): Int = when (Prefs.posterSize) {
  */
 internal val TvGridTopPadding = 24.dp
 
+/**
+ * 「上抬」档的抬起量，取 NF 版同一个数（`NfComponents.PosterLift`），两套布局切换时观感才连得上。
+ */
+internal val TvPosterLift = 12.dp
+
+/**
+ * 海报横排的纵向 contentPadding：必须同时容得下两档移动效果，
+ * 上抬抬 [TvPosterLift]=12dp，放大档整卡涨 10% 后上下各出约 9dp（卡高 ~180dp 时）。
+ * 原来只给 6~7dp，两档都会被 LazyRow 上下边界削掉一条边。
+ * NF 版同一处取 14dp（`NfRowVerticalPadding`），这里对齐。
+ */
+internal val TvRowVerticalPadding = 14.dp
+
 /** 电视端可聚焦的小尺寸标签（题材筛选等） */
 @Composable
 fun TvFilterChip(
@@ -823,7 +1039,8 @@ fun TvFilterChip(
     var focused by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .clip(Radius.Pill)
+            // 与 TvPillButton 同档圆角：这颗原来是胶囊，和同一屏里的按钮不是一套元件
+            .clip(Radius.Md)
             .background(
                 when {
                     focused -> Color.White
@@ -831,7 +1048,7 @@ fun TvFilterChip(
                     else -> AppColors.SurfaceHi
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Pill) else Modifier)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },

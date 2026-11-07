@@ -1,6 +1,8 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    // Compose 编译器插件：Kotlin 2.0 起由 Kotlin 仓库发布，取代旧的 composeOptions 写法
+    id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
 
@@ -12,7 +14,8 @@ ksp {
 
 android {
     namespace = "com.chen.doudoutv"
-    compileSdk = 34
+    // Compose 1.9 的 foundation 要求 compileSdk 35（aar-metadata 里 minCompileSdk=35）
+    compileSdk = 35
 
     // 固定 debug 签名：确保升级安装不丢数据
     signingConfigs {
@@ -68,10 +71,6 @@ android {
         compose = true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.14"
-    }
-
     packaging {
         resources.excludes += setOf(
             "/META-INF/{AL2.0,LGPL2.1}",
@@ -88,12 +87,12 @@ dependencies {
     implementation("com.google.code.gson:gson:2.10.1")
 
     implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.activity:activity-compose:1.9.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.4")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
 
-    // Compose
-    implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+    // Compose：BOM 2025.08.00 = ui/foundation 1.9.0 + material3 1.3.2
+    implementation(platform("androidx.compose:compose-bom:2025.08.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -123,9 +122,10 @@ dependencies {
     implementation("com.alibaba:fastjson:1.2.83")
 
     // 本地媒体库
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")
-    ksp("androidx.room:room-compiler:2.6.1")
+    // Room 2.6.1 的编译器在 Kotlin 2.x / KSP2 下不工作，必须跟到 2.7.2
+    implementation("androidx.room:room-runtime:2.7.2")
+    implementation("androidx.room:room-ktx:2.7.2")
+    ksp("androidx.room:room-compiler:2.7.2")
 
     // 海报图
     implementation("io.coil-kt:coil-compose:2.6.0")

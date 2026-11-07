@@ -85,7 +85,18 @@ fun ContinueCard(
             .width(248.dp)
             .height(140.dp)
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .then(if (focused) Modifier.shadow(Lift.Focus, ContinueShape) else Modifier)
+            .then(
+                if (focused) {
+                    // Compose 1.9 的 shadow 支持 ambient/spot 两色：投影染主题色
+                    Modifier.shadow(
+                        elevation = Lift.Focus,
+                        shape = ContinueShape,
+                        clip = false,
+                        ambientColor = AppColors.Brand.copy(alpha = 0.35f),
+                        spotColor = AppColors.Brand.copy(alpha = 0.55f)
+                    )
+                } else Modifier
+            )
             .clip(ContinueShape)
             .background(if (focused) AppColors.SurfaceRaise else AppColors.Surface)
             .then(

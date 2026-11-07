@@ -27,6 +27,9 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Circle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -456,11 +459,26 @@ private fun NfSourceRow(
             )
             // 光标停在这行 = 右列正在列它家的线路；TVBox 行还要提示「再按 → 才去挑线路」
             if (source.kind == SourceKind.TVBOX) {
-                Text(
-                    if (isCursor) "线路 ●" else "线路 ›",
-                    color = if (isCursor) AppColors.Brand else TvText.Muted,
-                    style = MaterialTheme.typography.labelMedium
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "线路",
+                        color = if (isCursor) AppColors.Brand else TvText.Muted,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    androidx.compose.material3.Icon(
+                        imageVector = if (isCursor) {
+                            Icons.Filled.Circle
+                        } else {
+                            Icons.Filled.ChevronRight
+                        },
+                        contentDescription = null,
+                        tint = if (isCursor) AppColors.Brand else TvText.Muted,
+                        modifier = Modifier.size(if (isCursor) 8.dp else 16.dp)
+                    )
+                }
             } else if (active) {
                 Text("使用中", color = AppColors.Brand, style = MaterialTheme.typography.labelMedium)
             }

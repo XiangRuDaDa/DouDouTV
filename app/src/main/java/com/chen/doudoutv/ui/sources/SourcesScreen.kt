@@ -206,7 +206,7 @@ fun SourcesScreen(vm: LibraryViewModel, isTv: Boolean = false) {
                         deleting = null
                     },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFE5484D),
+                        containerColor = AppColors.Danger,
                         contentColor = Color.White
                     )
                 ) { Text("删除") }
@@ -286,8 +286,8 @@ private fun GroupLabel(title: String, count: Int) {
 /** 状态圆点：停用=灰，Emby token 失效=橙，其余=绿 */
 private fun statusColor(source: SourceEntity): Color = when {
     !source.enabled -> AppColors.TextTertiary
-    source.kind == SourceKind.EMBY && source.token.isBlank() -> Color(0xFFFF8A65)
-    else -> Color(0xFF34C759)
+    source.kind == SourceKind.EMBY && source.token.isBlank() -> AppColors.Warn
+    else -> AppColors.Ok
 }
 
 @Composable
@@ -470,9 +470,9 @@ private fun SourceCard(
                             }
                         )
                         DropdownMenuItem(
-                            text = { Text("删除来源", color = Color(0xFFE5484D)) },
+                            text = { Text("删除来源", color = AppColors.Danger) },
                             leadingIcon = {
-                                Icon(Icons.Filled.Delete, contentDescription = null, tint = Color(0xFFE5484D), modifier = Modifier.size(18.dp))
+                                Icon(Icons.Filled.Delete, contentDescription = null, tint = AppColors.Danger, modifier = Modifier.size(18.dp))
                             },
                             onClick = {
                                 menuOpen = false

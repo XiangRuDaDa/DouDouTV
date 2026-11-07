@@ -2,8 +2,10 @@ package com.chen.doudoutv.ui
 
 import android.os.Handler
 import android.os.Looper
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
+import androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
@@ -14,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.unit.dp
 
 /**
  * 「离开时站在哪、回来还站在哪」的进程级记录。
@@ -104,13 +107,65 @@ object FocusPulse {
     }
 }
 
+/**
+ * 预组合档位（Compose 1.9 新增的 [LazyLayoutCacheWindow]）。
+ *
+ * 视口外再多留这么一截，容器会提前把相邻的行组合好：
+ *  · 滚动时不再出现「先空白、下一帧才有图」的空行、空卡，甩动更连贯；
+ *  · 上下滚动回来看过的内容不用重新组合，来回切更跟手。
+ *
+ * 窗口按「一屏里装得下几行」定，不按视口比例定 —— 比例在电视（960×540dp）和
+ * 手机（窄长屏）上的含义差太远，按 dp 定量才 predictable：
+ *  · 电视端一屏 6 列，网格一行约 230dp、首页横排一格约 142dp。
+ *    往前 480dp 够两行网格或三格横排，往后 240dp 够一行。
+ *  · 手机端一格约 122dp、一行海报约 165dp。往前 280dp 够两格多，往后 140dp 够一格。
+ *
+ * 用枚举而不是直接把 [LazyLayoutCacheWindow] 暴露在签名里：那个类型带
+ * `@ExperimentalFoundationApi`，出现在公开签名上会让每个调用点都被迫写 opt-in，
+ * 二十多个页面挨个加注解不划算。这里把实验 API 关在这一个文件里。
+ */
+enum class PrecomposeWindow {
+    /** 不预组合：保持 Compose 默认行为（视口外即释放） */
+    Off,
+
+    /** 电视端：往前两行、往后一行 */
+    Tv,
+
+    /** 手机端：往前两格多、往后一格 */
+    Phone
+}
+
+/**
+ * 建带预组合窗口的列表 state。
+ *
+ * 窗口类型是实验 API，所以整个构造过程关在这个私有函数里 ——
+ * 公开的 [listState] / [gridState] 签名上只出现 [PrecomposeWindow] 这个普通枚举，
+ * 调用方（二十多个页面）一个 opt-in 注解都不用写。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private fun newListState(tier: PrecomposeWindow, index: Int, offset: Int): LazyListState = when (tier) {
+    PrecomposeWindow.Off -> LazyListState(index, offset)
+    PrecomposeWindow.Tv -> LazyListState(LazyLayoutCacheWindow(ahead = 480.dp, behind = 240.dp), index, offset)
+    PrecomposeWindow.Phone -> LazyListState(LazyLayoutCacheWindow(ahead = 280.dp, behind = 140.dp), index, offset)
+}
+
+/** 网格版的同款构造 */
+@OptIn(ExperimentalFoundationApi::class)
+private fun newGridState(tier: PrecomposeWindow, index: Int, offset: Int): LazyGridState = when (tier) {
+    PrecomposeWindow.Off -> LazyGridState(index, offset)
+    PrecomposeWindow.Tv -> LazyGridState(LazyLayoutCacheWindow(ahead = 480.dp, behind = 240.dp), index, offset)
+    PrecomposeWindow.Phone -> LazyGridState(LazyLayoutCacheWindow(ahead = 280.dp, behind = 140.dp), index, offset)
+}
+
 /** 列表（纵向/横向都用它）：按记录里的位置起滚，之后的滚动实时记回去。 */
 @Composable
-fun ReturnSpot.listState(key: String): LazyListState {
+fun ReturnSpot.listState(key: String, precompose: PrecomposeWindow = PrecomposeWindow.Off): LazyListState {
     val saved = scrollOf(key)
     // 不用 rememberLazyListState：它内部走 rememberSaveable，恢复时机和值都不由这里决定，
     // 而这套记录要的就是「组合重建的第一帧就站在离开时的位置」。
-    val state = remember(key) { LazyListState(saved?.index ?: 0, saved?.offset ?: 0) }
+    val state = remember(key) {
+        newListState(precompose, saved?.index ?: 0, saved?.offset ?: 0)
+    }
     LaunchedEffect(state, key) {
         snapshotFlow { state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
             .collect { (index, offset) -> saveScroll(key, ReturnSpot.Scroll(index, offset)) }
@@ -120,9 +175,11 @@ fun ReturnSpot.listState(key: String): LazyListState {
 
 /** 网格页（分类 / 查看全部 / 搜索）的版本 */
 @Composable
-fun ReturnSpot.gridState(key: String): LazyGridState {
+fun ReturnSpot.gridState(key: String, precompose: PrecomposeWindow = PrecomposeWindow.Off): LazyGridState {
     val saved = scrollOf(key)
-    val state = remember(key) { LazyGridState(saved?.index ?: 0, saved?.offset ?: 0) }
+    val state = remember(key) {
+        newGridState(precompose, saved?.index ?: 0, saved?.offset ?: 0)
+    }
     LaunchedEffect(state, key) {
         snapshotFlow { state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
             .collect { (index, offset) -> saveScroll(key, ReturnSpot.Scroll(index, offset)) }

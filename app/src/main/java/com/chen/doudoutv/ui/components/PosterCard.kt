@@ -85,7 +85,19 @@ fun PosterCard(
             .aspectRatio(2f / 3f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
             // 投影只挂在焦点卡上：一屏七十张卡各挂一层就是七十多个图层，弱盒子吃不消
-            .then(if (focused) Modifier.shadow(Lift.Focus, PosterShape) else Modifier)
+            // Compose 1.9 的 shadow 多了 ambient/spot 两色：投影染成主题色，
+            // 焦点卡片在近黑底上会带一层很淡的品牌色光晕，而不是一片死灰
+            .then(
+                if (focused) {
+                    Modifier.shadow(
+                        elevation = Lift.Focus,
+                        shape = PosterShape,
+                        clip = false,
+                        ambientColor = AppColors.Brand.copy(alpha = 0.35f),
+                        spotColor = AppColors.Brand.copy(alpha = 0.55f)
+                    )
+                } else Modifier
+            )
             .clip(PosterShape)
             .background(if (focused) AppColors.SurfaceRaise else AppColors.Surface)
             .then(

@@ -39,6 +39,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
@@ -47,6 +48,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -83,6 +85,7 @@ import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.data.tvbox.TvBoxClient.TvBoxSite
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.components.ContinueCard
 import com.chen.doudoutv.ui.components.HeroBanner
 import com.chen.doudoutv.ui.components.PosterCard
@@ -108,6 +111,7 @@ import kotlinx.coroutines.launch
  * 顶栏（软件名/刷新/搜索）悬浮在轮播图之上，下滑时平滑淡出，
  * 顶到轮播图顶部时再淡入。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     vm: LibraryViewModel,
@@ -168,7 +172,7 @@ fun HomeScreen(
 
     // 首页纵向位置 + 每条横向行的位置都记在 ReturnSpot：进详情再返回（这一页子树被
     // AnimatedContent 整个销毁重建）时，组合的第一帧就站在离开时的位置。
-    val listState = ReturnSpot.listState(PhoneHomeKey)
+    val listState = ReturnSpot.listState(PhoneHomeKey, precompose = PrecomposeWindow.Phone)
     // 软件名淡出距离：轮播图高度的 ~55%
     val configuration = androidx.compose.ui.platform.LocalConfiguration.current
     val heroCollapseDist = (configuration.screenWidthDp * 0.55f).toInt()
@@ -179,6 +183,14 @@ fun HomeScreen(
     // 「Brand@0.09 → Bg」的顶部渐变，往下整屏都是纯黑，换主题色在首页读不出来；
     // 而且挂在滚动节点上，光晕会跟着内容一起滚走。
     Box(Modifier.fillMaxSize().themeBackdrop()) {
+        // Material3 1.3.2 的下拉刷新：列表顶部下拉即刷新当前来源/线路，
+        // 不用再抬手去够右上角那颗刷新按钮。刷新中沿用 vm.scanning，
+        // 与顶栏那颗按钮的转圈是同一个状态，不会出现两个指示器打架。
+        PullToRefreshBox(
+            isRefreshing = vm.scanning,
+            onRefresh = { vm.refreshHome() },
+            modifier = Modifier.fillMaxSize()
+        ) {
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -214,7 +226,7 @@ fun HomeScreen(
                 item { SectionTitle("继续观看") }
                 item {
                     LazyRow(
-                        state = ReturnSpot.listState("$PhoneHomeKey/continue"),
+                        state = ReturnSpot.listState("$PhoneHomeKey/continue", precompose = PrecomposeWindow.Phone),
                         contentPadding = PaddingValues(horizontal = 18.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -235,7 +247,7 @@ fun HomeScreen(
                 item { SectionTitle("我的收藏", trailing = { CountBadge(favorites.size) }) }
                 item {
                     LazyRow(
-                        state = ReturnSpot.listState("$PhoneHomeKey/fav"),
+                        state = ReturnSpot.listState("$PhoneHomeKey/fav", precompose = PrecomposeWindow.Phone),
                         contentPadding = PaddingValues(horizontal = 18.dp),
                         horizontalArrangement = Arrangement.spacedBy(9.dp)
                     ) {
@@ -275,7 +287,7 @@ fun HomeScreen(
                         // 这一行滚进可见区才触发加载（首屏 2 个分类已由上面的 ensure 预载）
                         LaunchedEffect(cat.typeId, vm.homeRefreshEpoch) { vm.ensureCategoryPreview(cat.typeId) }
                         LazyRow(
-                            state = ReturnSpot.listState("$PhoneHomeKey/cat_${cat.typeId}"),
+                            state = ReturnSpot.listState("$PhoneHomeKey/cat_${cat.typeId}", precompose = PrecomposeWindow.Phone),
                             contentPadding = PaddingValues(horizontal = 18.dp),
                             horizontalArrangement = Arrangement.spacedBy(9.dp)
                         ) {
@@ -323,6 +335,7 @@ fun HomeScreen(
                 onMore = onOpenGenre,
                 onOpenDetail = onOpenDetail
             )
+        }
         }
 
         // ---------- 透明悬浮顶栏（左软件名滚动淡出；右工具栏 + 来源/线路按钮常驻） ----------
@@ -498,7 +511,7 @@ private fun ContinueMenuAction(
         Text(
             text = text,
             style = MaterialTheme.typography.bodyLarge,
-            color = if (danger) Color(0xFFE5484D) else AppColors.TextPrimary
+            color = if (danger) AppColors.Danger else AppColors.TextPrimary
         )
         if (!hint.isNullOrBlank()) {
             Text(
@@ -615,7 +628,7 @@ private fun LazyListScope.GallerySection(
     item { SectionTitle(title, trailing = { MoreLink(onMore) }) }
     item {
         LazyRow(
-            state = ReturnSpot.listState("$PhoneHomeKey/sec_$title"),
+            state = ReturnSpot.listState("$PhoneHomeKey/sec_$title", precompose = PrecomposeWindow.Phone),
             contentPadding = PaddingValues(horizontal = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(9.dp)
         ) {
@@ -913,7 +926,7 @@ fun GenreScreen(
     var loadingMore by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     // 纵向位置按「页 + 当前筛选」分键，进详情返回时从这一筛选上次的位置起滚
-    val gridState = ReturnSpot.listState("phone_genre/${kind ?: "all"}/${genre ?: "all"}")
+    val gridState = ReturnSpot.listState("phone_genre/${kind ?: "all"}/${genre ?: "all"}", precompose = PrecomposeWindow.Phone)
 
     LaunchedEffect(Unit) {
         tags = runCatching { vm.genreTags() }.getOrDefault(emptyList())
@@ -1188,7 +1201,7 @@ fun SearchScreen(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     // 结果区的位置记录：状态在导航层，从详情返回时这一页重建，位置靠这里找回
-    val resultsListState = ReturnSpot.listState("phone_search/results")
+    val resultsListState = ReturnSpot.listState("phone_search/results", precompose = PrecomposeWindow.Phone)
 
     // 首次进搜索页后台拉一次豆瓣热门榜，补齐联想（24h 内走本地缓存，不联网）
     LaunchedEffect(Unit) {
@@ -1405,7 +1418,7 @@ fun SearchScreen(
                     }
                     item {
                         LazyRow(
-                            state = ReturnSpot.listState("phone_search/row_$srcName"),
+                            state = ReturnSpot.listState("phone_search/row_$srcName", precompose = PrecomposeWindow.Phone),
                             contentPadding = PaddingValues(horizontal = 18.dp),
                             horizontalArrangement = Arrangement.spacedBy(hSpacing)
                         ) {
@@ -1487,7 +1500,7 @@ fun TvBoxCategoryScreen(
     val loading = vods.isEmpty() && loadError == null && !exhausted && browseReady
 
     // 每个分类各记一份滚动位置
-    val gridState = ReturnSpot.listState("phone_cat_$currentTypeId")
+    val gridState = ReturnSpot.listState("phone_cat_$currentTypeId", precompose = PrecomposeWindow.Phone)
 
     LaunchedEffect(currentTypeId, vm.homeRefreshEpoch) {
         vm.ensureBrowsePage(currentTypeId)

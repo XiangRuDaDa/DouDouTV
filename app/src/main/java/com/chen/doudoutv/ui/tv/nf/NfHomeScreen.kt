@@ -33,6 +33,7 @@ import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.components.ShimmerCard
 import com.chen.doudoutv.ui.listState
@@ -58,6 +59,12 @@ private const val NfHomeKey = "nf_home"
  * 返回时轮播若从第一条重放，读起来就像「页面被重新加载了一遍」。
  */
 private val NfHomeHeroIndex = mutableIntStateOf(0)
+
+/**
+ * 本进程是否已经进过首页。冷启动第一次进首页要把焦点站在顶栏第一颗 tab 并回到首屏；
+ * 之后从详情/播放器返回则沿用「站在离开时那张卡」的恢复逻辑，不被这次抢焦拽回顶栏。
+ */
+private val NfHomeOpened = mutableStateOf(false)
 
 /**
  * Netflix 基准布局的首页：整屏轮播 + 一行「继续观看」，其余分类内容全部搬到「分类」页。
@@ -97,7 +104,7 @@ fun NfHomeScreen(
     // 底图下缘取样色：渐隐遮罩和下面的收色带共用一个值，见旧首页 TvHomeScreen 的同名变量
     val heroAmbient = rememberHeroAmbient(hero?.let { it.backdropUrl.ifBlank { it.posterUrl } }.orEmpty())
 
-    val listState = ReturnSpot.listState(NfHomeKey)
+    val listState = ReturnSpot.listState(NfHomeKey, precompose = PrecomposeWindow.Tv)
     val scope = rememberCoroutineScope()
     // 轮播进度按 50ms 推进而不是逐帧：列表滚动中不推进，否则滚到一半整屏换图，
     // 看起来就是「屏幕刷新了一下」（与旧首页同一套时间账）
@@ -200,12 +207,27 @@ fun NfHomeScreen(
     }
 
     val resumeTick = tvResumeTick()
+    // 冷启动第一次进首页：焦点站顶栏第一颗 tab、列表回首屏（顶栏才看得见）；
+    // 之后的返回（详情/播放器）走原来的落点恢复，不被这次抢焦拽走
+    val freshOpen = remember {
+        val first = !NfHomeOpened.value
+        NfHomeOpened.value = true
+        first
+    }
+    // 从别的 tab 点「首页」切回来：焦点同样留在标签上，内容不抢；
+    // 列表滚回顶部保证悬浮顶栏在组合里（焦点落上去时 onNavFocus 也会兜底滚一次）
+    val viaTab = remember { NfTabSwitch.consume(NfTab.Home) }
     tvClaimFocusOnEnter(
         tick = listOf(resumeTick, hero != null),
         anchorsProvider = {
-            val heroAnchor = if (hero != null) heroPlayFocus else heroEmptyFocus
-            listOfNotNull(standTarget.requester, heroAnchor)
-        }
+            if (freshOpen || viaTab) {
+                listOf(chrome.tabOf(NfTab.Home))
+            } else {
+                val heroAnchor = if (hero != null) heroPlayFocus else heroEmptyFocus
+                listOfNotNull(standTarget.requester, heroAnchor)
+            }
+        },
+        scrollToTop = { if (freshOpen || viaTab) listState.scrollToItem(0) }
     )
 
     // 「继续观看」卡片的操作菜单：长按 OK / Menu 键唤出，连同卡片自己的 requester 一起存
@@ -362,7 +384,7 @@ private fun NfContinueRow(
     onPlay: (MediaEntity) -> Unit,
     onMenu: (MediaEntity, FocusRequester) -> Unit
 ) {
-    val rowState = ReturnSpot.listState("$NfHomeKey/continue")
+    val rowState = ReturnSpot.listState("$NfHomeKey/continue", precompose = PrecomposeWindow.Tv)
     val stagger = nfFirstFillStagger(items.size, "$NfHomeKey/continue")
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val cardWidth = (screenWidth * 0.30f).coerceIn(240.dp, 380.dp)

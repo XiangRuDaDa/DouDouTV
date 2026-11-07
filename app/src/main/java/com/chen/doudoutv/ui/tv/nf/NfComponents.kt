@@ -1,6 +1,8 @@
 package com.chen.doudoutv.ui.tv.nf
 
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -11,6 +13,7 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -19,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
@@ -28,6 +32,12 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -51,6 +61,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -72,6 +83,7 @@ import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.components.PosterArt
 import com.chen.doudoutv.ui.components.PosterFallback
@@ -79,8 +91,9 @@ import com.chen.doudoutv.ui.components.continueTitle
 import com.chen.doudoutv.ui.components.episodeLabel
 import com.chen.doudoutv.ui.gridState
 import com.chen.doudoutv.ui.tv.TvPagePadding
-import com.chen.doudoutv.ui.tv.tvGridColumns
+import com.chen.doudoutv.ui.tv.tvPosterColumns
 import com.chen.doudoutv.ui.tv.tvMoveFocus
+import com.chen.doudoutv.ui.tv.tvKeepFocusedItemAlive
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.Edge
 import com.chen.doudoutv.ui.theme.Motion
@@ -100,7 +113,6 @@ import com.chen.doudoutv.ui.theme.TvText
 
 /** 焦点抬起量。必须小于所在行的纵向 contentPadding（[NfRowVerticalPadding]），否则抬出容器边界被裁掉 */
 private val CardLift = 8.dp
-private val ButtonLift = 4.dp
 
 /**
  * 海报卡「上抬」档的位移量：不放大，只把整卡抬起来。
@@ -132,15 +144,41 @@ val NfRowVerticalPadding = 14.dp
  * 所以首行焦点态向外扩的那一圈必须整个装进这一段，否则海报上缘被切、
  * 看起来就像被上面那条分类栏压住。
  *
- * 两个方向都要量：上抬档抬 PosterLift（12dp）；放大档图片绕中心涨 5%，向上出 0.025×海报高，
- * 而网格是 fillCell 铺满格子，格子宽随屏幕走（不是固定 192dp）——
- * 大卡档海报高约 310~670dp，也就是 8~17dp。28dp 留够余量，且和 [NfRowVerticalPadding]
- * 的行距观感连得上；[NfGridTopPadding] 只加在顶部，底部不用，最后一行下面有 contentPadding 兜。
+ * 两档移动效果取大者：上抬档固定抬 PosterLift（12dp）；放大档图片绕中心涨 5%，
+ * 向上出 0.025×海报高，海报高 = 单元宽×1.5，单元宽随列数走（LARGE 档 4 列封顶、
+ * 单元宽 ≤ 288dp，向上至多 10.8dp）。18dp 两档都装得下，再往上缩就会切到首行海报上缘。
+ * 默认/小卡档列更多、单元更窄，外扩更小，这一段只显宽不显窄。
+ * 只加在顶部，底部不用，最后一行下面有 contentPadding 兜。
+ * 首项是文字表头的网格（我的 / 搜索结果分组）不用这一段，表头不聚焦、不会被裁。
  */
-val NfGridTopPadding = 28.dp
+val NfGridTopPadding = 18.dp
 
 /** 一级导航的四个落点 */
 enum class NfTab { Home, Browse, Mine, Search }
+
+/**
+ * 「刚点过导航条 tab」的进程级标记：点哪颗、哪页接住。
+ *
+ * 页面在 tab 互切时整块销毁重建，入口抢焦（tvClaimFocusOnEnter）默认会把焦点交给内容首卡，
+ * 读起来就是「切完页焦点自己跑进去了」。点击时先记下目标 tab，目标页第一轮组合取走标记、
+ * 把锚点换成本页那颗 tab —— 焦点留在标签上，什么时候进内容由用户按 ↓ 决定。
+ * 进详情/播放器再返回不经过这里，仍走「站在离开时那张卡」的恢复逻辑。
+ */
+object NfTabSwitch {
+    private var pending: NfTab? = null
+
+    /** 导航条点击时记下目标 tab（在路由切换之前调用） */
+    fun arm(tab: NfTab) {
+        pending = tab
+    }
+
+    /** 目标页第一轮组合取走标记；其他页面/返回路径取不到，行为不变 */
+    fun consume(tab: NfTab): Boolean {
+        if (pending != tab) return false
+        pending = null
+        return true
+    }
+}
 
 /**
  * 上/下落点走按键拦截 + [tvMoveFocus]，不用 focusProperties：
@@ -155,6 +193,8 @@ enum class NfTab { Home, Browse, Mine, Search }
 fun Modifier.nfFocusRoute(
     up: FocusRequester? = null,
     down: FocusRequester? = null,
+    left: FocusRequester? = null,
+    right: FocusRequester? = null,
 ): Modifier {
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -163,11 +203,24 @@ fun Modifier.nfFocusRoute(
     val pendingHandover = remember { mutableStateOf<Job?>(null) }
     return onPreviewKeyEvent { e ->
         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-        val isUp = e.key.nativeKeyCode == android.view.KeyEvent.KEYCODE_DPAD_UP
-        val isDown = e.key.nativeKeyCode == android.view.KeyEvent.KEYCODE_DPAD_DOWN
-        if (!isUp && !isDown) return@onPreviewKeyEvent false
-        val requested = if (isUp) up else down
-        val direction = if (isUp) FocusDirection.Up else FocusDirection.Down
+        val code = e.key.nativeKeyCode
+        val direction = when (code) {
+            android.view.KeyEvent.KEYCODE_DPAD_UP -> FocusDirection.Up
+            android.view.KeyEvent.KEYCODE_DPAD_DOWN -> FocusDirection.Down
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT -> FocusDirection.Left
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> FocusDirection.Right
+            else -> return@onPreviewKeyEvent false
+        }
+        val requested = when (direction) {
+            FocusDirection.Up -> up
+            FocusDirection.Down -> down
+            FocusDirection.Left -> left
+            else -> right
+        }
+        // 左右没给显式落点时原样交回默认几何搜索（同一行内移动本来就允许靠几何）
+        if (requested == null && (direction == FocusDirection.Left || direction == FocusDirection.Right)) {
+            return@onPreviewKeyEvent false
+        }
         pendingHandover.value?.cancel()
         if (requested === FocusRequester.Cancel) return@onPreviewKeyEvent true // 这一向到头，别让焦点飞出屏
         if (requested == null) {
@@ -183,7 +236,7 @@ fun Modifier.nfFocusRoute(
     }
 }
 
-/** [nfFocusRoute] 的交棒时序：等一帧 → 跳 → 180ms 补跳 → 仍不动就交回默认几何搜索 */
+/** [nfFocusRoute] 的交棒时序：等一帧 → 跳 → 180ms 补跳 → 仍不动就交回默认几何搜索（仅上下） */
 @OptIn(ExperimentalComposeUiApi::class)
 private suspend fun nfHandover(
     target: FocusRequester,
@@ -191,9 +244,15 @@ private suspend fun nfHandover(
     direction: FocusDirection,
 ) {
     withFrameNanos { }
-    if (tvMoveFocus(target)) return
+    // 带上方向：1.9 的 requestFocus 会按这个方向做最小滚动（往下就往下翻一格，不多滚）
+    if (tvMoveFocus(target, direction = direction)) return
     delay(180)
-    if (!tvMoveFocus(target)) runCatching { focusManager.moveFocus(direction) }
+    if (tvMoveFocus(target, direction = direction)) return
+    // 左右给了显式落点就不再降级到几何搜索：分类条上方就是一级 tab 栏，
+    // 几何搜索在「邻项这一帧还没组合」时会把焦点甩到 tab 上去。
+    if (direction == FocusDirection.Up || direction == FocusDirection.Down) {
+        runCatching { focusManager.moveFocus(direction) }
+    }
 }
 
 /**
@@ -266,64 +325,68 @@ fun nfEntrance(index: Int, stagger: Boolean): Float {
     return animateFloatAsState(if (shown) 1f else 0f, tween(EnterMillis, easing = Motion.Ease), label = "nfEnter").value
 }
 
-/** 导航条的一颗 tab：选中态加粗+淡底，焦点态品牌色底 + 白边 + 轻微抬起（与旧按钮同一套层级语言） */
+/**
+ * 导航条的一颗 tab：状态完全由「文字色 + 下方横线」表达，不再有任何方框底块。
+ * 选中 = 白字加粗 + 主题色横线；焦点 = 白字 + 白色横线 + 微放大；其余 = 灰字无横线。
+ *
+ * 焦点移动的全部视觉量都走过渡而不是硬切：文字色与横线色用 [animateColorAsState]，
+ * 缩放和横线展开用 spring —— 硬切 + 120ms 硬 tween 的组合在遥控器连按时
+ * 读作「一卡一卡」，spring 在目标中途换向时速度连续，不会每按一次都从零起步。
+ */
 @Composable
 private fun NfNavTab(
     text: String,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    secondary: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val density = LocalDensity.current
-    val liftPx = with(density) { ButtonLift.toPx() }
-    val scale = animateFloatAsState(if (focused) 1.05f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "tab")
-    val lift = animateFloatAsState(if (focused) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "tabLift")
-    Box(
+    val scale = animateFloatAsState(if (focused) 1.04f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "tab")
+    val line = animateFloatAsState(if (selected || focused) 1f else 0f, spring(dampingRatio = 0.85f, stiffness = 380f), label = "tabLine")
+    val textColor = animateColorAsState(
+        if (selected || focused) Color.White else TvText.Meta,
+        tween(Motion.BASE, easing = Motion.Ease), label = "tabText"
+    )
+    val lineColor = animateColorAsState(
+        if (selected) AppColors.Brand else Color.White.copy(alpha = 0.9f),
+        tween(Motion.BASE, easing = Motion.Ease), label = "tabLineColor"
+    )
+    Column(
         modifier
-            .heightIn(min = 40.dp)
+            // 下划线要 fillMaxWidth 对齐字宽，但 Column 本身必须收在字的固有宽度：
+            // 不收的话 fillMaxWidth 会把这颗 tab 撑满整条 Row，把兄弟 tab 和右簇全挤出去
+            .width(IntrinsicSize.Max)
             .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer {
-                scaleX = scale.value
-                scaleY = scale.value
-                translationY = -lift.value
-            }
-            .clip(Radius.Md)
-            .background(
-                when {
-                    focused -> AppColors.Brand.copy(alpha = 0.55f)
-                    selected -> Color.White.copy(alpha = 0.14f)
-                    else -> Color.Transparent
-                }
-            )
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            // 焦点目标排在 graphicsLayer 外层：缩放不进焦点矩形（同海报卡的顺序约束）
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .padding(horizontal = 18.dp, vertical = 8.dp),
-        contentAlignment = Alignment.Center
+            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             text,
-            color = when {
-                selected || focused -> Color.White
-                secondary -> TvText.Meta
-                else -> TvText.Section
-            },
-            style = if (secondary) {
-                MaterialTheme.typography.titleSmall
-            } else {
-                MaterialTheme.typography.titleMedium
-            },
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            color = textColor.value,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1
+        )
+        Box(
+            Modifier
+                .padding(top = 5.dp)
+                .height(3.dp)
+                .fillMaxWidth()
+                .graphicsLayer { scaleX = line.value }
+                .clip(Radius.Pill)
+                .background(lineColor.value)
         )
     }
 }
 
 /**
- * 作用域胶囊：`来源 › 线路`，点它开双列抽屉。
+ * 作用域按钮：`来源 › 线路`，点它开双列抽屉。圆角矩形 + 细描边（Radius.Md），
+ * 末尾不再挂下拉箭头 —— 整颗按钮本身就是入口，箭头只是重复一遍「这里能点」。
  * Emby 来源没有线路概念，只显示左半段。
  */
 @Composable
@@ -335,22 +398,26 @@ private fun NfScopeChip(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale = animateFloatAsState(if (focused) 1.05f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "scope")
+    val scale = animateFloatAsState(if (focused) 1.04f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "scope")
+    val bg = animateColorAsState(
+        if (focused) AppColors.Brand.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.05f),
+        tween(Motion.BASE, easing = Motion.Ease), label = "scopeBg"
+    )
     Row(
         modifier
             .zIndex(if (focused) 1f else 0f)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
             .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(Radius.Md)
-            .background(if (focused) AppColors.Brand.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.08f))
+            .background(bg.value)
             .then(
                 if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
                 else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md)
             )
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .focusable(interactionSource = interaction)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 14.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Text(
             sourceName,
@@ -359,10 +426,15 @@ private fun NfScopeChip(
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false).widthIn(max = 220.dp)
+            modifier = Modifier.weight(1f, fill = false).widthIn(max = 120.dp)
         )
         if (!siteName.isNullOrBlank()) {
-            Text("›", color = TvText.Muted, style = MaterialTheme.typography.titleMedium)
+            Icon(
+                imageVector = Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = TvText.Muted,
+                modifier = Modifier.size(14.dp)
+            )
             Text(
                 siteName,
                 color = if (focused) Color.White else TvText.Body,
@@ -370,14 +442,62 @@ private fun NfScopeChip(
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false).widthIn(max = 160.dp)
+                modifier = Modifier.weight(1f, fill = false).widthIn(max = 120.dp)
             )
         }
     }
 }
 
 /**
- * 导航条：左 = 首页/分类/我的/搜索，右 = 刷新 / 作用域胶囊 / 设置。
+ * 导航条右簇的纯图标按钮（刷新 / 设置）：圆角矩形淡底只在焦点态出现，平时只留一枚图标。
+ * [loading] 时把图标换成转圈，保留「正在刷新」的可见信号。
+ */
+@Composable
+private fun NfNavIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    loading: Boolean = false,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    val scale = animateFloatAsState(if (focused) 1.08f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "navIcon")
+    val bg = animateColorAsState(
+        if (focused) Color.White.copy(alpha = 0.14f) else Color.Transparent,
+        tween(Motion.BASE, easing = Motion.Ease), label = "navIconBg"
+    )
+    Box(
+        modifier
+            .zIndex(if (focused) 1f else 0f)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            .focusable(interactionSource = interaction)
+            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+            .clip(Radius.Md)
+            .background(bg.value)
+            .then(if (focused) Modifier.border(1.5.dp, Color.White, Radius.Md) else Modifier)
+            .padding(9.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = if (focused) Color.White else AppColors.Brand,
+                strokeWidth = 2.dp
+            )
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = if (focused) Color.White else TvText.Body,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+/**
+ * 导航条：左 = 品牌字 + 首页/分类/我的/搜索（下划线选中），右 = 作用域胶囊 / 刷新 / 设置（后两颗纯图标）。
  * 背景完全透明 —— 不压暗、不加渐变，页面主题底色直接透出来。
  *
  * 焦点：↑ = Cancel（其上无物，禁止向别的 tab 逃逸）；↓ = [belowFocusRequester]。
@@ -400,48 +520,72 @@ fun NfNavBar(
     modifier: Modifier = Modifier
 ) {
     val route = Modifier.nfFocusRoute(up = FocusRequester.Cancel, down = belowFocusRequester)
+    // 点 tab 先记标记再切路由：目标页的入口抢焦凭它把焦点留在标签上，而不是交给内容首卡
+    val goTab: (NfTab) -> Unit = { tab ->
+        NfTabSwitch.arm(tab)
+        onTab(tab)
+    }
     Row(
         modifier
             .fillMaxWidth()
-            .padding(start = TvPagePadding, end = TvPagePadding, top = 16.dp),
+            .padding(start = TvPagePadding, end = TvPagePadding, top = 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            NfNavTab(
-                "首页", NfTab.Home == current, { onTab(NfTab.Home) },
-                modifier = route.focusRequester(tabFocus(NfTab.Home))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "DouDouTV",
+                color = Color.White,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1
             )
-            NfNavTab(
-                "分类", NfTab.Browse == current, { onTab(NfTab.Browse) },
-                modifier = route.focusRequester(tabFocus(NfTab.Browse))
-            )
-            NfNavTab(
-                "我的", NfTab.Mine == current, { onTab(NfTab.Mine) },
-                modifier = route.focusRequester(tabFocus(NfTab.Mine))
-            )
-            NfNavTab(
-                "搜索", NfTab.Search == current, { onTab(NfTab.Search) },
-                modifier = route.focusRequester(tabFocus(NfTab.Search))
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                NfNavTab(
+                    "首页", NfTab.Home == current, { goTab(NfTab.Home) },
+                    modifier = route.focusRequester(tabFocus(NfTab.Home))
+                )
+                NfNavTab(
+                    "分类", NfTab.Browse == current, { goTab(NfTab.Browse) },
+                    modifier = route.focusRequester(tabFocus(NfTab.Browse))
+                )
+                NfNavTab(
+                    "我的", NfTab.Mine == current, { goTab(NfTab.Mine) },
+                    modifier = route.focusRequester(tabFocus(NfTab.Mine))
+                )
+                NfNavTab(
+                    "搜索", NfTab.Search == current, { goTab(NfTab.Search) },
+                    modifier = route.focusRequester(tabFocus(NfTab.Search))
+                )
+            }
         }
         Row(
             modifier = Modifier.weight(1f).padding(start = 24.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (scanning) {
-                Text("↻ 刷新中…", color = TvText.Body, style = MaterialTheme.typography.bodyMedium)
-            } else {
-                NfNavTab("↻ 刷新", false, onRefresh, modifier = route, secondary = true)
-            }
             NfScopeChip(
                 sourceName = sourceName,
                 siteName = siteName,
                 onClick = onScope,
                 modifier = Modifier.weight(1f, fill = false).then(route).focusRequester(scopeFocus)
             )
-            NfNavTab("设置", false, onSettings, modifier = route, secondary = true)
+            NfNavIconButton(
+                icon = Icons.Filled.Refresh,
+                contentDescription = "刷新",
+                onClick = onRefresh,
+                modifier = route,
+                loading = scanning
+            )
+            NfNavIconButton(
+                icon = Icons.Filled.Tune,
+                contentDescription = "设置",
+                onClick = onSettings,
+                modifier = route
+            )
         }
     }
 }
@@ -481,7 +625,7 @@ fun NfRowTitle(
  * 焦点态看 [Prefs.tvCardMotion] 两档：
  * · 放大（默认）—— 只有图片那一层涨 5%，片名的位置和字号一动不动；
  * · 上抬 —— 整卡不涨，往上走 [PosterLift]。
- * 两档都只给图片描一圈白环。入场时淡入并自下 [EnterRise] 归位。
+ * 焦点不描白环，落点完全由这一档位移表达。入场时淡入并自下 [EnterRise] 归位。
  * 放在 LazyRow / LazyVerticalGrid 里时，行的纵向 contentPadding 至少给 [NfRowVerticalPadding]，
  * 否则抬起/涨出来的那几像素会被 Lazy 容器的边界裁掉。
  */
@@ -500,6 +644,8 @@ fun NfPosterCard(
     val density = LocalDensity.current
     val liftPx = with(density) { PosterLift.toPx() }
     val risePx = with(density) { EnterRise.toPx() }
+    // 焦点所在的那一项不许被 Lazy 回收，否则 1.9 会直接把焦点清空（见 tvKeepFocusedItemAlive）
+    tvKeepFocusedItemAlive(focused)
     val liftMode = Prefs.tvCardMotion == Prefs.CardMotion.LIFT
     val lift = animateFloatAsState(if (focused && liftMode) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCardLift")
     val artScale = animateFloatAsState(if (focused && !liftMode) ArtZoom else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCardArt")
@@ -521,8 +667,9 @@ fun NfPosterCard(
                 translationY = -lift.value + (1f - entrance) * risePx
             }
     ) {
-        // 圆角、白环、放大都只作用在图片这一层。片名要是跟着一起放大，同一行的字号就齐不了，
+        // 圆角和放大只作用在图片这一层。片名要是跟着一起放大，同一行的字号就齐不了，
         // 涨出来的高度还会往下压到下一行的片名上 —— 图外字幕这版排版要的就是文字层稳定。
+        // 焦点不再描白环：落点由「放大 / 上抬」这一档位移表达，海报边缘保持干净。
         Box(
             Modifier
                 .fillMaxWidth()
@@ -536,9 +683,8 @@ fun NfPosterCard(
                     }
                 )
                 .clip(cardShape)
-                .then(if (focused) Modifier.border(2.5.dp, Color.White, cardShape) else Modifier)
         ) {
-            // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组外壳（白环 / 层级 / 位移都跟着变），
+            // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组外壳（层级 / 位移都跟着变），
             // 参数没变时内容体整块被跳过，图片不跟着重排。一屏几十张卡，这块不切开就白吃一遍布局。
             NfPosterBody(
                 model = item.posterUrl.ifBlank { item.backdropUrl },
@@ -648,6 +794,12 @@ fun NfContinueCard(
             .width(cardWidth)
             .aspectRatio(16f / 9f)
             .zIndex(if (focused) 1f else 0f)
+            // 焦点目标（clickable）必须排在 graphicsLayer 前面：
+            // 缩放和上抬会进 Compose 的焦点矩形（rectInParent 里 layer.mapBounds），
+            // 获焦卡一大，同一行的邻卡全变成「在它下面」的合法候选，
+            // ↓ 被吃掉去横向跳格，Lazy 行也不再补组合下一行。
+            // 变换挪到 clickable 之后，焦点矩形回到卡片本身（与 NfPosterCard 同一顺序）。
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .graphicsLayer {
                 alpha = entrance
                 scaleX = scale.value
@@ -658,11 +810,8 @@ fun NfContinueCard(
                 clip = true
             }
             .background(AppColors.SurfaceHi)
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, cardShape)
-                else Modifier.border(1.dp, Edge.Hairline, cardShape)
-            )
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            // 焦点不描白环（落点由放大 + 上抬表达），只留常态那圈细边勾出卡片轮廓
+            .border(1.dp, Edge.Hairline, cardShape)
     ) {
         PosterArt(model = item.backdropUrl.ifBlank { item.posterUrl }, contentDescription = item.title) {
             PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
@@ -722,6 +871,10 @@ fun NfSubNav(
     firstChipFocus: FocusRequester? = null
 ) {
     val state = rememberLazyListState()
+    // 每颗 chip 一个锚点：左右移动逐颗交棒，不靠几何搜索。
+    // 分类条正上方就是一级 tab 栏，几何搜索一旦在 LazyRow 里找不到邻项
+    // （滚动中邻项被回收那一帧）就会把焦点甩到 tab 上去。
+    val anchors = remember(labels.size) { List(labels.size) { FocusRequester() } }
     LaunchedEffect(selectedIndex) {
         // 选中项被程序改掉（切来源后分类重置）时把它带进视野，否则高亮停在屏幕外
         if (selectedIndex in labels.indices) {
@@ -731,11 +884,11 @@ fun NfSubNav(
     LazyRow(
         modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp),
+            .heightIn(min = 44.dp),
         state = state,
         verticalAlignment = Alignment.CenterVertically,
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         itemsIndexed(labels) { index, label ->
             NfSubChip(
@@ -743,13 +896,25 @@ fun NfSubNav(
                 selected = index == selectedIndex,
                 onClick = { onSelect(index) },
                 modifier = Modifier
-                    .nfFocusRoute(up = upFocusRequester, down = downFocusRequester)
+                    .nfFocusRoute(
+                        up = upFocusRequester,
+                        down = downFocusRequester,
+                        left = if (index == 0) FocusRequester.Cancel else anchors[index - 1],
+                        right = if (index == labels.lastIndex) FocusRequester.Cancel else anchors[index + 1]
+                    )
+                    .focusRequester(anchors[index])
                     .then(if (index == 0 && firstChipFocus != null) Modifier.focusRequester(firstChipFocus) else Modifier)
             )
         }
     }
 }
 
+/**
+ * 二级分类的一颗 tab：与一级导航 [NfNavTab] 同一套视觉语言 ——
+ * 状态只由「文字色 + 下方横线」表达，没有任何方框底块。
+ * 选中 = 亮字加粗 + 主题色横线，焦点 = 亮字 + 白色横线 + 微放大。
+ * 字号比一级小一档（labelLarge），纵向内边距收紧，整条分类栏贴着导航条排。
+ */
 @Composable
 private fun NfSubChip(
     text: String,
@@ -759,29 +924,46 @@ private fun NfSubChip(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    Box(
+    // 焦点所在的 chip 不许被 LazyRow 回收：1.9 回收获焦项会直接 clearFocus，
+    // 焦点随后落到整页第一个可聚焦节点 —— 也就是一级 tab 栏
+    tvKeepFocusedItemAlive(focused)
+    val scale = animateFloatAsState(if (focused) 1.04f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "subChip")
+    val line = animateFloatAsState(if (selected || focused) 1f else 0f, spring(dampingRatio = 0.85f, stiffness = 380f), label = "subChipLine")
+    val textColor = animateColorAsState(
+        if (focused || selected) TvText.Title else TvText.Body,
+        tween(Motion.BASE, easing = Motion.Ease), label = "subChipText"
+    )
+    val lineColor = animateColorAsState(
+        if (selected) AppColors.Brand else Color.White.copy(alpha = 0.9f),
+        tween(Motion.BASE, easing = Motion.Ease), label = "subChipLineColor"
+    )
+    Column(
         modifier
+            // 同一级 tab：下划线 fillMaxWidth 对齐字宽，Column 收在固有宽度，不撑满 LazyRow
+            .width(IntrinsicSize.Max)
             .zIndex(if (focused) 1f else 0f)
-            .clip(Radius.Pill)
-            .background(
-                when {
-                    focused -> AppColors.Brand.copy(alpha = 0.55f)
-                    selected -> Color.White.copy(alpha = 0.16f)
-                    else -> Color.Transparent
-                }
-            )
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Pill) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .padding(horizontal = 18.dp, vertical = 9.dp)
+            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+            .padding(horizontal = 14.dp, vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             text,
-            color = if (focused || selected) TvText.Title else TvText.Body,
+            color = textColor.value,
             style = MaterialTheme.typography.labelLarge,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
+        )
+        Box(
+            Modifier
+                .padding(top = 4.dp)
+                .height(3.dp)
+                .fillMaxWidth()
+                .graphicsLayer { scaleX = line.value }
+                .clip(Radius.Pill)
+                .background(lineColor.value)
         )
     }
 }
@@ -810,11 +992,11 @@ fun NfPosterGrid(
     upFocusRequester: FocusRequester? = null,
     footer: (@Composable () -> Unit)? = null
 ) {
-    val columns = tvGridColumns()
+    val columns = tvPosterColumns()
     // 记录要在建 gridState 之前读出来：数据还没补齐时 LazyGrid 会把位置 clamp 到末尾，
     // 并通过 gridState 的写回把原记录改小，之后就再也回不到离开时那一屏
     val saved = remember(pageKey) { ReturnSpot.scrollOf(pageKey) }
-    val gridState = ReturnSpot.gridState(pageKey)
+    val gridState = ReturnSpot.gridState(pageKey, precompose = PrecomposeWindow.Tv)
     val stagger = nfFirstFillStagger(items.size, pageKey)
     val firstId = items.firstOrNull()?.id
     var scrollRestored by remember(pageKey) { mutableStateOf(false) }

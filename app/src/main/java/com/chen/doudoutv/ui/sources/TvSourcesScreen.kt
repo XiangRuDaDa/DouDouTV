@@ -28,6 +28,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -76,6 +79,8 @@ import com.chen.doudoutv.ui.tv.TvFilterChip
 import com.chen.doudoutv.ui.tv.TvMenuRow
 import com.chen.doudoutv.ui.tv.TvPillButton
 import com.chen.doudoutv.ui.tv.TvPagePadding
+import com.chen.doudoutv.ui.tv.TvSourceMinCellWidth
+import com.chen.doudoutv.ui.tv.tvGridColumns
 
 /**
  * TV 端来源管理 —— 10 英尺界面。
@@ -107,10 +112,18 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
 
     BoxWithConstraints {
         val screenWidth = maxWidth
-        // 响应式列数：**290dp 基准**（75 寸 1080p ≈ 5 列，1080p ≈ 5-6 列，4K ≈ 12+ 列）；最小 3 列
-        val columns = maxOf(3, (screenWidth / 290.dp).toInt())
         val cardGap = 16.dp
-        val usableWidth = screenWidth - 72.dp // 左右各 36dp
+        // 列数与海报网格走同一套算法：最小格宽 280dp、左右各 40dp（= 网格真正的内边距）。
+        // 1080p 排三列、4K 排六列，小屏最少三列（不让大卡摊成一条）。
+        val columns = tvGridColumns(
+            screenWidth = screenWidth,
+            minCellWidth = TvSourceMinCellWidth,
+            maxColumns = 6,
+            minColumns = 3
+        )
+        // 卡宽按网格真正的左右内边距算：原来写的是 72dp（左右各 36），
+        // 而网格两侧各留了 40dp，差出来的 8dp 全落在最后一列上，卡片右边会被裁掉一点。
+        val usableWidth = screenWidth - TvPagePadding * 2
         val cardWidth = (usableWidth - cardGap * (columns - 1)) / columns
         // 卡片高度按内容实测反推：56dp 图标去掉后，正文只剩「名称行 28 / 徽章行 24 / URL 24」
         // 加间距 22，底下是「分割线 1 + 间距 12 + 统计行 ~20」，连同上下各 14dp 内边距约 159dp。
@@ -355,9 +368,9 @@ private fun TvEmptySourcesHint() {
    来源状态圆点颜色 —— 与手机端保持一致
    ======================================================== */
 private fun tvStatusColor(source: SourceEntity): Color = when {
-    !source.enabled -> Color(0xFF6B7482)
-    source.kind == SourceKind.EMBY && source.token.isBlank() -> Color(0xFFFF8A65)
-    else -> Color(0xFF34C759)
+    !source.enabled -> AppColors.Disabled
+    source.kind == SourceKind.EMBY && source.token.isBlank() -> AppColors.Warn
+    else -> AppColors.Ok
 }
 
 /* ========================================================
@@ -497,25 +510,58 @@ private fun TvSourceCard(
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                         count?.let {
-                            Text(
-                                text = "🎬 $it 部",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = TvText.Body
-                            )
-                        }
-                        if (source.kind == SourceKind.EMBY) {
-                            if (source.token.isBlank()) {
-                                Text(
-                                    text = "⚠ 登录失效",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = Color(0xFFFF8A65)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                androidx.compose.material3.Icon(
+                                    imageVector = androidx.compose.material.icons.Icons.Filled.Movie,
+                                    contentDescription = null,
+                                    tint = TvText.Body,
+                                    modifier = Modifier.size(16.dp)
                                 )
-                            } else {
                                 Text(
-                                    text = "👤 ${source.username.ifBlank { "—" }}",
+                                    text = "$it 部",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = TvText.Body
                                 )
+                            }
+                        }
+                        if (source.kind == SourceKind.EMBY) {
+                            if (source.token.isBlank()) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    androidx.compose.material3.Icon(
+                                        imageVector = androidx.compose.material.icons.Icons.Filled.Warning,
+                                        contentDescription = null,
+                                        tint = AppColors.Warn,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "登录失效",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = AppColors.Warn
+                                    )
+                                }
+                            } else {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    androidx.compose.material3.Icon(
+                                        imageVector = androidx.compose.material.icons.Icons.Filled.Person,
+                                        contentDescription = null,
+                                        tint = TvText.Body,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = source.username.ifBlank { "—" },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = TvText.Body
+                                    )
+                                }
                             }
                         }
                     }
@@ -930,7 +976,7 @@ private fun TvFormField(
                 color = TvText.Body
             )
             if (required) {
-                Box(Modifier.size(6.dp).background(Color(0xFFE5484D), CircleShape))
+                Box(Modifier.size(6.dp).background(AppColors.Danger, CircleShape))
             }
         }
         OutlinedTextField(
@@ -1014,13 +1060,14 @@ private fun TvDeleteConfirmDialog(
                         Modifier
                             .size(56.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFFE5484D).copy(alpha = 0.15f)),
+                            .background(AppColors.Danger.copy(alpha = 0.15f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = "⚠",
-                            fontSize = 28.sp,
-                            color = Color(0xFFFF8A65)
+                        androidx.compose.material3.Icon(
+                            imageVector = androidx.compose.material.icons.Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = AppColors.Warn,
+                            modifier = Modifier.size(28.dp)
                         )
                     }
                     Column(modifier = Modifier.weight(1f)) {
@@ -1042,20 +1089,20 @@ private fun TvDeleteConfirmDialog(
                 // 危险提示条
                 Box(
                     Modifier.fillMaxWidth().padding(horizontal = 28.dp).background(
-                        Color(0xFFE5484D).copy(alpha = 0.08f),
+                        AppColors.Danger.copy(alpha = 0.08f),
                         Radius.Md
-                    ).border(1.dp, Color(0xFFE5484D).copy(alpha = 0.25f), Radius.Md).padding(16.dp, 14.dp),
+                    ).border(1.dp, AppColors.Danger.copy(alpha = 0.25f), Radius.Md).padding(16.dp, 14.dp),
                 ) {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
                             text = "• 已同步的 ${if (itemCount > 0) "$itemCount 部影片" else "内容"} 将被永久删除",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFFF8A65)
+                            color = AppColors.Warn
                         )
                         Text(
                             text = "• 此操作不可撤销 — 服务器本身不受影响",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFFF8A65)
+                            color = AppColors.Warn
                         )
                     }
                 }
@@ -1097,7 +1144,7 @@ private fun TvDeleteConfirmDialog(
                             .graphicsLayer { scaleX = delScale; scaleY = delScale }
                             .clip(Radius.Md)
                             .background(
-                                if (delFocused) Color.White else Color(0xFFE5484D)
+                                if (delFocused) Color.White else AppColors.Danger
                             )
                             .then(
                                 if (delFocused) Modifier.border(2.dp, Color.White, Radius.Md)
@@ -1119,12 +1166,12 @@ private fun TvDeleteConfirmDialog(
                             Icon(
                                 imageVector = Icons.Filled.Delete,
                                 contentDescription = null,
-                                tint = if (delFocused) Color(0xFFE5484D) else Color.White,
+                                tint = if (delFocused) AppColors.Danger else Color.White,
                                 modifier = Modifier.size(20.dp)
                             )
                             Text(
                                 text = "确认删除",
-                                color = if (delFocused) Color(0xFFE5484D) else Color.White,
+                                color = if (delFocused) AppColors.Danger else Color.White,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold
                             )

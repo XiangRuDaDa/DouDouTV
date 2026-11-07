@@ -61,6 +61,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import coil.compose.AsyncImage
 import com.chen.doudoutv.MainActivity
 import com.chen.doudoutv.data.emby.EmbyClient
@@ -205,6 +207,8 @@ fun TvDetailScreen(
     val playFocusRequester = remember { FocusRequester() }
     val controlsFocusRequester = remember { FocusRequester() }
     val firstEpFocusRequester = remember { FocusRequester() }
+    // 滚动状态提到抢焦之前建：入口抢焦要在焦点落定后把首屏构图压回顶部
+    val scrollState = rememberScrollState()
 
     /**
      * 离开时焦点站在哪个元件上（播放 / 收藏 / 控制条 / 某一集），回来就还站在它上面。
@@ -424,10 +428,26 @@ fun TvDetailScreen(
      * key 只带「数据到位与否 + resume 次数」：刮削回填会换掉 media 实例，
      * 但 id 不变，所以不会把用户已经站好的焦点从选集抢走（等价于原来的 initialFocusDone 只落一次）。
      */
+    // 第一次进这一页：焦点站播放键（首屏大图构图），不读上次离开时的落点 ——
+    // 读了会把焦点直接交到下面的选集/控制条，bring-into-view 顺势把详情滚出来，首屏大图就没了。
+    // stand 是本组合私有的：第一次进来还没人拿过焦点，它必然是空的，天然就落到播放键；
+    // 从播放器回来（子树重建）时 recallEpisodeId 会在组合期把那一格交给 stand，于是还站在那一集。
+    // 不再另立 entered 标记：LaunchedEffect(Unit) 和抢焦效果同一帧启动，抢焦还在 delay 里
+    // 标记就已经翻真，读出来的永远是「已进过」，等于没有这道闸。
+    val landOnPlay = remember { booleanArrayOf(false) }
     tvClaimFocusOnEnter(
         tick = listOf(resumeTick, if (loading) null else media?.id),
-        anchorsProvider = { listOfNotNull(stand.requester, playFocusRequester) },
-        settleMillis = 120
+        anchorsProvider = {
+            val stood = stand.requester
+            landOnPlay[0] = stood == null
+            listOfNotNull(stood, playFocusRequester)
+        },
+        settleMillis = 120,
+        // 播放键排在首屏 55% 占位之下，1.9 的 requestFocus 会把它「滚到可见」，顺势把简介摊出来。
+        // 只有这一次确实落在播放键上才把页面压回顶部；从播放器回来落在某一集上时不能滚，
+        // 否则那一集又被滚出视口。
+        keepTop = true,
+        scrollToTop = { if (landOnPlay[0]) scrollState.scrollTo(0) }
     )
 
     val item = media
@@ -581,7 +601,6 @@ fun TvDetailScreen(
         }
 
         val screenH = LocalConfiguration.current.screenHeightDp.dp
-        val scrollState = rememberScrollState()
         val contentAnchor = remember { BringIntoViewRequester() }
 
         /**
@@ -1047,7 +1066,8 @@ fun TvDetailScreen(
                                     }
                                     if (totalPages > 1) {
                                         TvPillButton(
-                                            text = "‹ 上一页",
+                                            text = "上一页",
+                                            icon = androidx.compose.material.icons.Icons.Filled.ChevronLeft,
                                             primary = false,
                                             // 单源单季但分集多页时，翻页按钮就是控制条的第一个元件。
                                             // requester 得跟着挂到这里，否则网格首行的上键指向一个
@@ -1067,7 +1087,8 @@ fun TvDetailScreen(
                                             style = MaterialTheme.typography.bodyMedium
                                         )
                                         TvPillButton(
-                                            text = "下一页 ›",
+                                            text = "下一页",
+                                            trailingIcon = androidx.compose.material.icons.Icons.Filled.ChevronRight,
                                             primary = false,
                                             modifier = pillFocus,
                                             onClick = {
@@ -1412,7 +1433,8 @@ private fun TvEpisodeCard(
     focusDown: FocusRequester? = null,
     onClick: () -> Unit
 ) {
-    var focused by remember { mutableStateOf(false) }
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.05f else 1f, tween(Motion.FAST), label = "ep_card")
 
     val label = episode.episodeLabel()
@@ -1424,6 +1446,25 @@ private fun TvEpisodeCard(
     Column(
         modifier
             .zIndex(if (focused) 1f else 0f)
+            // 焦点路由必须排在焦点目标之前，才挂得到这个焦点目标上
+            .focusProperties {
+                if (focusUp != null) up = focusUp
+                if (focusDown != null) down = focusDown
+            }
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            // clickable 必须排在 focusable 外面，两者共用一个 interactionSource。
+            // 反过来写（focusable().clickable()）焦点会落在外面那颗裸 focusable 上，
+            // 它没有点击/按键处理，OK 键沿父链往上冒泡、永远到不了里层 clickable ——
+            // 表现就是「选中了剧集按 OK 没反应，播放器 Activity 压根没被启动」。
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            )
+            .focusable(interactionSource = interaction)
+            // 缩放挂在焦点目标内层：挂外面会把 1.05 倍算进焦点矩形，
+            // 获焦卡上下各涨一截，verticalScroll 的 bring-into-view 每次都补一点滚动，
+            // 左右切集时整屏就跟着上下抖。
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(Radius.Md)
             .background(if (watched) AppColors.Brand.copy(alpha = 0.18f) else AppColors.Surface)
@@ -1431,19 +1472,6 @@ private fun TvEpisodeCard(
                 width = if (focused) 2.dp else 1.dp,
                 color = if (focused) AppColors.Brand else AppColors.SurfaceHi,
                 shape = Radius.Md
-            )
-            .onFocusChanged { focused = it.isFocused }
-            // 焦点路由必须排在 focusable 之前，才挂得到这个焦点目标上
-            .focusProperties {
-                if (focusUp != null) up = focusUp
-                if (focusDown != null) down = focusDown
-            }
-            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .focusable()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
             )
             .padding(horizontal = 12.dp, vertical = 12.dp)
     ) {

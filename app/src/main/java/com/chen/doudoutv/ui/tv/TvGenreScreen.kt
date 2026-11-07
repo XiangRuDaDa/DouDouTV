@@ -39,6 +39,7 @@ import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.components.ShimmerCard
 import com.chen.doudoutv.ui.gridState
@@ -81,8 +82,10 @@ fun TvGenreScreen(
     // 记录先读出来再建 gridState：首屏只有一页数据时位置会被 clamp 到末尾并写回记录，
     // 之后就拿不到离开时的真实位置了。
     val savedScroll = remember(filterKey) { ReturnSpot.scrollOf(filterKey) }
-    val gridState = ReturnSpot.gridState(filterKey)
+    val gridState = ReturnSpot.gridState(filterKey, precompose = PrecomposeWindow.Tv)
     val firstCardFocus = remember { FocusRequester() }
+    // 列数在组合期算一次：读两次可能读到不同的屏幕尺寸快照，网格的列数必须前后一致
+    val columns = tvPosterColumns()
     val stand = remember { StandTarget() }
     val firstId = items.firstOrNull()?.id
     /** 落点是否已解析完（该补的页补到位）；补页期间不抢焦点，免得焦点先落到首卡再跳。 */
@@ -233,7 +236,7 @@ fun TvGenreScreen(
             items.isEmpty() -> TvEmptyState("这个分类下还没有内容", "换个题材，或先在来源里同步媒体库")
             else -> LazyVerticalGrid(
                 state = gridState,
-                columns = GridCells.Fixed(tvGridColumns()),
+                columns = GridCells.Fixed(columns),
                 contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = TvGridTopPadding, bottom = 24.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -245,7 +248,7 @@ fun TvGenreScreen(
                         item = item,
                         onClick = { onDetail(item.id) },
                         // 每行首格放大时锚住左缘，否则越过左边距与首页各行的首列对不齐
-                        anchorStart = index % tvGridColumns() == 0,
+                        anchorStart = index % columns == 0,
                         // 首卡同时是这一页的入口锚点，落点记账复用它自己的 requester：
                         // 同一节点挂第二个 requester 在 1.6.8 上不可靠。
                         modifier = ReturnSpot.cardStand(
@@ -326,8 +329,10 @@ fun TvCategoryScreen(
     // 记录要在建 gridState 之前读出来：数据还没补齐时 LazyGrid 会把位置 clamp 到末尾，
     // 并通过 gridState 的写回把原记录改小，之后就再也回不到离开时那一屏。
     val savedScroll = remember(pageKey) { ReturnSpot.scrollOf(pageKey) }
-    val gridState = ReturnSpot.gridState(pageKey)
+    val gridState = ReturnSpot.gridState(pageKey, precompose = PrecomposeWindow.Tv)
     val firstFocus = remember { FocusRequester() }
+    // 列数在组合期算一次：读两次可能读到不同的屏幕尺寸快照，网格的列数必须前后一致
+    val columns = tvPosterColumns()
     val stand = remember { StandTarget() }
     val firstId = items.firstOrNull()?.id
 
@@ -416,7 +421,7 @@ fun TvCategoryScreen(
 
         when {
             firstLoading -> LazyVerticalGrid(
-                columns = GridCells.Fixed(tvGridColumns()),
+                columns = GridCells.Fixed(tvPosterColumns()),
                 contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = TvGridTopPadding, bottom = 24.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -435,7 +440,7 @@ fun TvCategoryScreen(
 
             else -> LazyVerticalGrid(
                 state = gridState,
-                columns = GridCells.Fixed(tvGridColumns()),
+                columns = GridCells.Fixed(columns),
                 contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = TvGridTopPadding, bottom = 24.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -448,7 +453,7 @@ fun TvCategoryScreen(
                         onClick = { onDetail(item.id) },
                         fillCell = true,
                         // 每行首格放大时锚住左缘，否则越过左边距与首页各行的首列对不齐
-                        anchorStart = index % tvGridColumns() == 0,
+                        anchorStart = index % columns == 0,
                         // 首卡就是这一页的入口锚点，落点记账复用它的 requester，不再挂第二个
                         modifier = ReturnSpot.cardStand(
                             pageKey = pageKey,

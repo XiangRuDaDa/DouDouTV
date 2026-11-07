@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -26,6 +27,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -59,6 +62,7 @@ import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.gridState
 import com.chen.doudoutv.ui.theme.AppColors
@@ -206,7 +210,7 @@ fun TvSearchScreen(
     // 从详情返回时结果子树被重建：落点卡在组合时把新生成的 requester 交回 stand，
     // 网格滚动位置由 resultsGridState 按同一份记录起滚。
     val stand = remember { StandTarget() }
-    val resultsGridState = ReturnSpot.gridState("tv_search/results")
+    val resultsGridState = ReturnSpot.gridState("tv_search/results", precompose = PrecomposeWindow.Tv)
     val firstResultId = state.results.firstOrNull()?.id
 
     // 进页自动聚焦输入框；从详情返回（已有搜索结果）时把焦点交给结果卡而不是输入框
@@ -322,7 +326,7 @@ fun TvSearchScreen(
                 )
                 LazyVerticalGrid(
                     state = resultsGridState,
-                    columns = GridCells.Fixed(tvGridColumns()),
+                    columns = GridCells.Fixed(tvPosterColumns()),
                     contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = TvGridTopPadding, bottom = 24.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -403,10 +407,11 @@ private fun TvSuggestionRow(
             .padding(horizontal = 18.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            "🔍",
-            style = MaterialTheme.typography.titleMedium,
-            color = if (focused) Color.Black else TvText.Meta
+        androidx.compose.material3.Icon(
+            imageVector = androidx.compose.material.icons.Icons.Filled.Search,
+            contentDescription = null,
+            tint = if (focused) Color.Black else TvText.Meta,
+            modifier = Modifier.size(22.dp)
         )
         Spacer(Modifier.width(12.dp))
         Text(
@@ -487,7 +492,12 @@ private fun TvSearchField(
         contentAlignment = Alignment.CenterStart
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("🔍", style = MaterialTheme.typography.titleMedium, color = TvText.Meta)
+            androidx.compose.material3.Icon(
+                imageVector = androidx.compose.material.icons.Icons.Filled.Search,
+                contentDescription = null,
+                tint = TvText.Meta,
+                modifier = Modifier.size(22.dp)
+            )
             Spacer(Modifier.width(12.dp))
             Box(Modifier.weight(1f)) {
                 if (value.isEmpty()) {

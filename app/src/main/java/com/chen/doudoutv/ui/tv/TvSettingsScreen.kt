@@ -138,7 +138,10 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     tvClaimFocusOnEnter(
         resumeTick,
         entryFocus,
-        scrollToTop = { scrollState.scrollTo(0) }
+        scrollToTop = { scrollState.scrollTo(0) },
+        // 入口行排在「状态」分组下面，1.9 的 requestFocus 会把它滚到可见，
+        // 标题和状态分组就被推出视口。抢完再压回顶部，进页看到的是完整的第一屏。
+        keepTop = true
     )
     // 图片缓存的体积只在进页读一次会停在旧值上：回到这一页（resume tick）再读一遍。
     // 读体积是磁盘遍历（缓存里可能几万个条目），放 IO 线程，不在主线程上按文件数卡帧。

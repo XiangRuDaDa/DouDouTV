@@ -10,6 +10,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -29,8 +31,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chen.doudoutv.core.Prefs
@@ -84,6 +88,18 @@ private fun tabStack(current: List<TvRoute>, route: TvRoute): List<TvRoute> {
 }
 
 /**
+ * 一级 tab 在导航条上的左右次序，只用来判断切页动画往哪边推。
+ * 非 tab 页（详情 / 分类 / 来源 / 设置）统一算「更深一层」，压在四颗 tab 右边。
+ */
+private fun tabOrderOf(route: TvRoute): Int = when (route) {
+    is TvRoute.Home -> 0
+    is TvRoute.Browse -> 1
+    is TvRoute.Mine -> 2
+    is TvRoute.Search -> 3
+    else -> 4
+}
+
+/**
  * 进程级的导航栈。
  *
  * 内嵌的爬虫壳在播放期间也会顺手 finish 宿主 MainActivity，MainActivity 于是 recreate()；
@@ -120,18 +136,23 @@ fun TvApp(vm: LibraryViewModel) {
     LaunchedEffect(navStack) { TvNavHistory.stack = navStack }
     // 搜索页状态放在导航层：进详情再返回时结果不丢，真正退出搜索页才清空
     val searchState = remember { TvSearchUiState() }
+    // 切页动画的推进方向：入栈 / 往右的 tab 向前推，出栈 / 往左的 tab 往回拉
+    var navForward by remember { mutableStateOf(true) }
     val push: (TvRoute) -> Unit = {
+        navForward = true
         navStack = navStack + it
     }
     val pop: () -> Unit = {
         if (navStack.size > 1) {
             if (navStack.last() is TvRoute.Search) searchState.clear()
             if (navStack.last() is TvRoute.Detail) TvNavHistory.forgetEpisode()
+            navForward = false
             navStack = navStack.dropLast(1)
         }
     }
     // Netflix 版导航条：四颗 tab 互切走 tabStack 规则，并带上当前布局风格（切风格要重建栈底）
     val switchTab: (TvRoute) -> Unit = { route ->
+        navForward = tabOrderOf(route) >= tabOrderOf(navStack.last())
         navStack = tabStack(navStack, route)
     }
 
@@ -166,24 +187,52 @@ fun TvApp(vm: LibraryViewModel) {
         context.startActivity(TvPlayerActivity.intent(context, item.id))
     }
 
+    val nfLayout = Prefs.tvLayout == Prefs.TvLayout.NETFLIX
+    val nfShell = rememberNfShell()
+    val nfTab = nfTabOf(navStack.last())
+
+    val baseTypography = MaterialTheme.typography
+    // 14sp 是 TV 端小字下限，三米外更小只剩色块。
+    // 但下限不等于「都压成 14sp」：原来 bodySmall / labelMedium / labelSmall
+    // 三个 role 被写成同一个 14sp，徽章、计数、副标题看上去一样重，层级全平了。
+    // 现在按用途拆出可见台阶（label 家族 16 / 15 / 14，body 家族 17 / 15 / 14）：
+    //   labelLarge  16sp —— 按钮与强调文字
+    //   labelMedium 15sp —— 徽章、标签，比小正文醒目一档
+    //   bodySmall   14sp —— 小正文，行高 20sp（和徽章同字号但更松）
+    //   labelSmall  14sp —— 计数与极弱提示，行高 18sp + 字距 0.5sp，视觉更紧更小
+    // 字号覆盖挂在转场之外：常驻顶栏和页面内容必须用同一套 typography，
+    // 否则顶栏量出来的高度和页面让位的高度对不上。
+    val typography = remember(baseTypography) {
+        baseTypography.copy(
+            labelLarge = baseTypography.labelLarge.copy(fontSize = 16.sp, lineHeight = 22.sp),
+            bodySmall = baseTypography.bodySmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
+            labelMedium = baseTypography.labelMedium.copy(fontSize = 15.sp, lineHeight = 20.sp),
+            labelSmall = baseTypography.labelSmall.copy(fontSize = 14.sp, lineHeight = 18.sp, letterSpacing = 0.5.sp)
+        )
+    }
+
+    MaterialTheme(typography = typography) {
+    CompositionLocalProvider(LocalNfShell provides (if (nfLayout) nfShell else null)) {
     Box(Modifier.fillMaxSize()) {
+        // 主题底色铺在转场之外：切页时两页之间不会露出窗口底，顶栏也有稳定的衬底
+        if (nfLayout) Box(Modifier.fillMaxSize().themeBackdrop())
         AnimatedContent(
             targetState = navStack.last(),
-            transitionSpec = { fadeIn(tween(Motion.BASE)).togetherWith(fadeOut(tween(Motion.FAST))) },
+            // 切页不能再走淡入淡出：旧页淡出 120ms 比新页淡入 200ms 先结束，
+            // 中间那 80ms 屏幕上只剩一张半透明的新页压在近黑底上，亮度骤降一下 —— 用户看到的「闪」就是这个。
+            // 而且任何交叉淡化在中点都会漏底：in*t + out*(1-t)² + B*t(1-t)，两页都不满 alpha 时底色透上来约 25%。
+            // 改成等时长的纯位移（alpha 恒为 1），两页各自不透明、行进距离只有 1/8 屏宽，
+            // 新页盖在旧页上推进，全程满屏有内容，数学上不可能漏底；位移小到不会甩动整屏海报。
+            transitionSpec = {
+                val sign = if (navForward) 1 else -1
+                val spec = tween<IntOffset>(Motion.BASE, easing = Motion.Ease)
+                (slideInHorizontally(spec) { sign * it / 8 } togetherWith
+                    slideOutHorizontally(spec) { -sign * it / 8 })
+                    .apply { targetContentZIndex = 1f }
+            },
             label = "tv_route",
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize().clipToBounds()
         ) { target ->
-            val nfLayout = Prefs.tvLayout == Prefs.TvLayout.NETFLIX
-            val baseTypography = MaterialTheme.typography
-            // 14sp 是 TV 端小字下限，两套布局共用：三米外 12/13sp 只能看出形状。
-            val typography = remember(baseTypography) {
-                baseTypography.copy(
-                    bodySmall = baseTypography.bodySmall.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                    labelMedium = baseTypography.labelMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
-                    labelSmall = baseTypography.labelSmall.copy(fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.2.sp)
-                )
-            }
-            MaterialTheme(typography = typography) {
                 when (target) {
                     is TvRoute.Home -> if (nfLayout) {
                         NfHomeScreen(

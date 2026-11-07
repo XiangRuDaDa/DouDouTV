@@ -14,6 +14,8 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,11 +41,12 @@ import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
+import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
 import com.chen.doudoutv.ui.gridState
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
-import com.chen.doudoutv.ui.tv.tvGridColumns
+import com.chen.doudoutv.ui.tv.tvPosterColumns
 import com.chen.doudoutv.ui.tv.tvMoveFocus
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.Edge
@@ -91,10 +94,13 @@ fun NfMineScreen(
     var pendingFocus by remember { mutableStateOf<FocusRequester?>(null) }
     val scope = rememberCoroutineScope()
 
+    // 从别的 tab 点「我的」切过来：焦点留在标签上，不交给收藏首卡（NfTabSwitch）
+    val viaTab = remember { NfTabSwitch.consume(NfTab.Mine) }
     tvClaimFocusOnEnter(
         tick = groups.sumOf { it.items.size },
         anchorsProvider = {
-            listOfNotNull(stand.requester, if (favorites.isEmpty()) emptyFocus else firstFocus)
+            if (viaTab) listOf(chrome.tabOf(NfTab.Mine))
+            else listOfNotNull(stand.requester, if (favorites.isEmpty()) emptyFocus else firstFocus)
         }
     )
 
@@ -113,8 +119,9 @@ fun NfMineScreen(
             if (favorites.isEmpty()) {
                 NfInlineEmpty(
                     text = "还没有收藏任何内容",
-                    hint = "在详情页按 ★ 收藏，它们会按来源分组出现在这里",
+                    hint = "在详情页点收藏，它们会按来源分组出现在这里",
                     actionLabel = "去分类",
+                    actionIcon = Icons.Filled.GridView,
                     onAction = { onTab(NfTab.Browse) },
                     focusRequester = emptyFocus
                 )
@@ -212,8 +219,8 @@ private fun NfFavoriteGrid(
     upFocusRequester: FocusRequester,
     onOpen: (NfFavoriteGroup, MediaEntity, FocusRequester) -> Unit
 ) {
-    val gridState = ReturnSpot.gridState(NfMineKey)
-    val columns = tvGridColumns()
+    val gridState = ReturnSpot.gridState(NfMineKey, precompose = PrecomposeWindow.Tv)
+    val columns = tvPosterColumns()
     val stagger = nfFirstFillStagger(groups.sumOf { it.items.size }, NfMineKey)
     val firstItemId = groups.firstOrNull()?.items?.firstOrNull()?.id
     val firstGroupKey = groups.firstOrNull()?.key
@@ -224,7 +231,8 @@ private fun NfFavoriteGrid(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfGridTopPadding, bottom = 24.dp
+            // 首项是分组表头（纯文字、不聚焦），不需要给焦点外扩留 [NfGridTopPadding] 那一段
+            top = 8.dp, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)

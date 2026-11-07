@@ -6,20 +6,27 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,8 +36,11 @@ import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.theme.AppColors
@@ -40,6 +50,39 @@ import com.chen.doudoutv.ui.theme.themeBackdrop
 
 /** 顶栏收色带的高度：导航条本身透明，文字要有一层由页面底色淡出的衬底才读得清 */
 private val NfNavScrimHeight = 116.dp
+
+/**
+ * 常驻顶栏的外壳状态。
+ *
+ * 顶栏以前跟着页面一起放在 AnimatedContent 里，切 tab 时整条导航条被销毁重建：
+ * 用户看到的就是「顶栏也跟着闪一下 / 滑一下」，焦点还得靠 NfTabSwitch 标记重新抢回来。
+ * 现在导航条提到转场之外常驻一份，只有内容区参与动画。
+ *
+ * 四页的装配参数（↓ 落点、可见性、淡出曲线、是否流内）按 tab 各存一份：
+ * 转场期间新旧两页同时在组合里，各写各的键，顶栏只读当前路由那一页的。
+ */
+class NfShellState {
+    val chrome = NfChromeState()
+
+    /** 导航条实测高度：流内装配的页面用它给内容让位。初值取常态量得的高度，首帧不跳 */
+    var navHeight by mutableStateOf(56.dp)
+
+    internal val configs = mutableStateMapOf<NfTab, NfNavConfig>()
+}
+
+/** 一页交给常驻顶栏的装配参数 */
+internal class NfNavConfig(
+    val below: FocusRequester?,
+    val visible: Boolean,
+    val alpha: (() -> Float)?,
+    val onFocus: (() -> Unit)?,
+    val inFlow: Boolean
+)
+
+val LocalNfShell = staticCompositionLocalOf<NfShellState?> { null }
+
+@Composable
+fun rememberNfShell(): NfShellState = remember { NfShellState() }
 
 /**
  * 一套页面的公共外壳状态：导航条上的焦点锚点 + 抽屉开关。
@@ -78,7 +121,146 @@ class NfChromeState {
 }
 
 @Composable
-fun rememberNfChrome(): NfChromeState = remember { NfChromeState() }
+fun rememberNfChrome(): NfChromeState {
+    val own = remember { NfChromeState() }
+    // 常驻外壳在时四页共用同一份锚点：顶栏只有一份，tab 的 FocusRequester 也就只有一份，
+    // 切页时焦点停在原来那颗标签上，不需要重新抢
+    return LocalNfShell.current?.chrome ?: own
+}
+
+/** 当前生效来源 + 线路名（Emby 没有线路概念，右半段为空） */
+private class NfScope(
+    val sources: List<SourceEntity>,
+    val sourceName: String,
+    val siteName: String?
+)
+
+@Composable
+private fun rememberNfScope(vm: LibraryViewModel): NfScope {
+    val sources by vm.enabledSources.collectAsStateWithLifecycle()
+    val selectedSource = sources.firstOrNull { it.id == vm.homeSourceId } ?: sources.firstOrNull()
+    val namedSites = selectedSource?.id?.let { vm.homeSitesBySource[it] }.orEmpty()
+        .filter { it.key.isNotBlank() }
+    val siteName = if (selectedSource?.kind == SourceKind.TVBOX) {
+        namedSites.firstOrNull { it.key == vm.homeSiteKey }
+            ?.name?.substringBeforeLast("（")?.trim()?.takeIf { it.isNotBlank() }
+    } else null
+    // 冷启动时没人选过来源，线路列表一直是空的 —— 主动为当前生效来源拉一次（内部有缓存）
+    LaunchedEffect(selectedSource?.id) {
+        selectedSource?.id?.let { vm.ensureHomeSites(it) }
+    }
+    return NfScope(
+        sources = sources,
+        sourceName = selectedSource?.name?.takeIf { it.isNotBlank() } ?: "未选择来源",
+        siteName = siteName
+    )
+}
+
+/** 作用域抽屉：来源 › 线路 双列选择 */
+@Composable
+private fun NfScopeDrawerHost(
+    vm: LibraryViewModel,
+    scope: NfScope,
+    chrome: NfChromeState,
+    onManageSources: () -> Unit
+) {
+    if (!chrome.openScopeDrawer) return
+    NfScopeDrawer(
+        sources = scope.sources,
+        selectedSourceId = vm.effectiveHomeSourceId(),
+        selectedSiteKey = vm.homeSiteKey,
+        sitesOf = { id -> vm.homeSitesBySource[id].orEmpty() },
+        loadingSites = vm.homeSitesLoading,
+        onEnsureSites = { vm.ensureHomeSites(it) },
+        onPickSource = { vm.selectHomeSource(it) },
+        onPickSite = { key, site -> vm.selectHomeSite(key, site) },
+        onManage = {
+            chrome.openScopeDrawer = false
+            onManageSources()
+        },
+        onDismiss = { chrome.openScopeDrawer = false }
+    )
+}
+
+/**
+ * 常驻顶栏：画在切页转场之外，切 tab 时它一动不动。
+ *
+ * 装配参数读当前路由那一页交上来的 [NfNavConfig]；转场期间旧页写的是它自己那个 tab 的键，
+ * 不会盖掉新页的。首页的「滚过轮播就淡出」也照旧生效，只是淡出的是一条常驻的顶栏。
+ */
+@Composable
+fun NfShellNav(
+    vm: LibraryViewModel,
+    shell: NfShellState,
+    current: NfTab,
+    onTab: (NfTab) -> Unit,
+    onSettings: () -> Unit,
+    onManageSources: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scope = rememberNfScope(vm)
+    val chrome = shell.chrome
+    val config = shell.configs[current]
+    val density = LocalDensity.current
+    val visible = config?.visible ?: true
+    val alpha = config?.alpha
+
+    LaunchedEffect(visible) {
+        if (!visible) chrome.navFocused = false
+    }
+
+    Box(modifier.fillMaxWidth()) {
+        if (visible) {
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .then(if (alpha != null) Modifier.graphicsLayer { this.alpha = alpha() } else Modifier)
+            ) {
+                // 收色带只在悬浮装配（首页）时有意义：流内那三页顶栏下面就是内容，
+                // 压一层渐变反而把分类条压暗
+                if (config?.inFlow != true) {
+                    Box(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .height(NfNavScrimHeight)
+                            .background(
+                                Brush.verticalGradient(
+                                    0f to AppColors.Bg.copy(alpha = 0.78f),
+                                    0.52f to AppColors.Bg.copy(alpha = 0.30f),
+                                    1f to Color.Transparent
+                                )
+                            )
+                    )
+                }
+                NfNavBar(
+                    current = current,
+                    sourceName = scope.sourceName,
+                    siteName = scope.siteName,
+                    scanning = vm.scanning,
+                    onTab = onTab,
+                    onRefresh = { vm.refreshHome() },
+                    onScope = { chrome.openScopeDrawer = true },
+                    onSettings = onSettings,
+                    belowFocusRequester = config?.below,
+                    tabFocus = chrome::tabOf,
+                    scopeFocus = chrome.scopeFocus,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .onSizeChanged { shell.navHeight = with(density) { it.height.toDp() } }
+                        .onFocusEvent {
+                            chrome.navFocused = it.hasFocus
+                            // 焦点来到顶栏 = 用户按了 ↑，此刻顶栏多半已经淡掉一半：
+                            // 先把内容滚回顶部再谈可见性，否则就是「选中框在空气上」
+                            if (it.hasFocus) config?.onFocus?.invoke()
+                        }
+                )
+            }
+        }
+        NfScopeDrawerHost(vm, scope, chrome, onManageSources)
+    }
+}
 
 /**
  * Netflix 基准那一套 TV 界面的公共外壳：主题背景 + 导航条 + 作用域抽屉。
@@ -86,6 +268,9 @@ fun rememberNfChrome(): NfChromeState = remember { NfChromeState() }
  * 顶栏可见性沿用经典版口径：透明悬浮不占内容高度、随滚动连续淡出（[navAlpha]，
  * 在 draw phase 算，不进重组）、淡到位就从组合里摘掉（[navVisible]）—— 1.6.8 的焦点
  * 搜索不看透明度，留着一个看不见的顶栏等于留着一排会被方向键选中的按钮。
+ *
+ * 外层挂着 [LocalNfShell] 时（TV 外壳常驻顶栏），这里只把装配参数交上去、只渲染内容：
+ * 背景、导航条、抽屉都由转场之外的那一份画，切页动画因此只作用在内容区。
  */
 @Composable
 fun NfScaffold(
@@ -117,32 +302,45 @@ fun NfScaffold(
     onManageSources: () -> Unit,
     content: @Composable () -> Unit
 ) {
+    val shell = LocalNfShell.current
+    if (shell != null) {
+        SideEffect {
+            shell.configs[current] = NfNavConfig(
+                below = belowFocusRequester,
+                visible = navVisible,
+                alpha = navAlpha,
+                onFocus = onNavFocus,
+                inFlow = navInFlow
+            )
+        }
+        LaunchedEffect(navVisible) {
+            if (!navVisible) chrome.navFocused = false
+        }
+        if (navInFlow) {
+            Column(Modifier.fillMaxSize()) {
+                // 顶栏常驻在转场之外，这里只给它让出高度；4dp 是它和内容之间那条窄缝
+                Spacer(Modifier.height(shell.navHeight + 4.dp))
+                Box(Modifier.fillMaxWidth().weight(1f)) { content() }
+            }
+        } else {
+            Box(Modifier.fillMaxSize()) { content() }
+        }
+        return
+    }
+
     // 顶栏被移出组合时它不再会上报「焦点离开」，这条记录得自己清 ——
     // 留着为 true 顶栏就再也收不起来了
     LaunchedEffect(navVisible) {
         if (!navVisible) chrome.navFocused = false
     }
-    val sources by vm.enabledSources.collectAsStateWithLifecycle()
-    val selectedSource = sources.firstOrNull { it.id == vm.homeSourceId } ?: sources.firstOrNull()
-    val namedSites = selectedSource?.id?.let { vm.homeSitesBySource[it] }.orEmpty()
-        .filter { it.key.isNotBlank() }
-    // 线路名只在 TVBox 来源下出现：Emby 没有线路概念，homeSiteKey 对它无意义
-    val siteName = if (selectedSource?.kind == SourceKind.TVBOX) {
-        namedSites.firstOrNull { it.key == vm.homeSiteKey }
-            ?.name?.substringBeforeLast("（")?.trim()?.takeIf { it.isNotBlank() }
-    } else null
-
-    // 冷启动时没人选过来源，线路列表一直是空的 —— 主动为当前生效来源拉一次（内部有缓存）
-    LaunchedEffect(selectedSource?.id) {
-        selectedSource?.id?.let { vm.ensureHomeSites(it) }
-    }
+    val scope = rememberNfScope(vm)
 
     // 导航条在两种装配方式下共用同一份构造：悬浮（首页）与流内（分类/我的/搜索）
     val navBar: @Composable (Modifier) -> Unit = { barModifier ->
         NfNavBar(
             current = current,
-            sourceName = selectedSource?.name?.takeIf { it.isNotBlank() } ?: "未选择来源",
-            siteName = siteName,
+            sourceName = scope.sourceName,
+            siteName = scope.siteName,
             scanning = vm.scanning,
             onTab = onTab,
             onRefresh = { vm.refreshHome() },
@@ -153,8 +351,6 @@ fun NfScaffold(
             scopeFocus = chrome.scopeFocus,
             modifier = barModifier.onFocusEvent {
                 chrome.navFocused = it.hasFocus
-                // 焦点来到顶栏 = 用户按了 ↑，此刻顶栏多半已经淡掉一半：
-                // 先把内容滚回顶部再谈可见性，否则就是「选中框在空气上」
                 if (it.hasFocus) onNavFocus?.invoke()
             }
         )
@@ -167,9 +363,10 @@ fun NfScaffold(
     ) {
         if (navInFlow) {
             Column(Modifier.fillMaxSize()) {
-                // 流内装配时导航条下面必须留一条缝：它自己只有 top padding，
-                // 紧贴着排就会和第一行内容（搜索页的输入框）糊成一块
-                navBar(Modifier.padding(bottom = 12.dp))
+                // 流内装配时导航条下面只留一条窄缝：它自己只有 top padding，
+                // 紧贴着排就会和第一行内容（搜索页的输入框）糊成一块；
+                // 12dp 时和分类条、网格上边距叠起来纵向太空，收到 4dp
+                navBar(Modifier.padding(bottom = 4.dp))
                 Box(Modifier.fillMaxWidth().weight(1f)) { content() }
             }
         } else {
@@ -203,23 +400,7 @@ fun NfScaffold(
             }
         }
 
-        if (chrome.openScopeDrawer) {
-            NfScopeDrawer(
-                sources = sources,
-                selectedSourceId = vm.effectiveHomeSourceId(),
-                selectedSiteKey = vm.homeSiteKey,
-                sitesOf = { id -> vm.homeSitesBySource[id].orEmpty() },
-                loadingSites = vm.homeSitesLoading,
-                onEnsureSites = { vm.ensureHomeSites(it) },
-                onPickSource = { vm.selectHomeSource(it) },
-                onPickSite = { key, site -> vm.selectHomeSite(key, site) },
-                onManage = {
-                    chrome.openScopeDrawer = false
-                    onManageSources()
-                },
-                onDismiss = { chrome.openScopeDrawer = false }
-            )
-        }
+        NfScopeDrawerHost(vm, scope, chrome, onManageSources)
     }
 }
 
@@ -229,6 +410,8 @@ fun NfInlineEmpty(
     text: String,
     hint: String? = null,
     actionLabel: String? = null,
+    /** 动作按钮左侧的真图标（Material Icons），不用 Unicode 字符冒充 */
+    actionIcon: androidx.compose.ui.graphics.vector.ImageVector? = null,
     onAction: (() -> Unit)? = null,
     focusRequester: FocusRequester? = null
 ) {
@@ -254,6 +437,7 @@ fun NfInlineEmpty(
         if (actionLabel != null && onAction != null) {
             NfActionButton(
                 text = actionLabel,
+                icon = actionIcon,
                 onClick = onAction,
                 modifier = Modifier.padding(top = 20.dp).then(
                     if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier
@@ -268,27 +452,50 @@ fun NfInlineEmpty(
 fun NfActionButton(
     text: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 左侧真图标；为空时只出文案 */
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    val contentColor = if (focused) Color.Black else TvText.Title
     Box(
         modifier
-            .clip(Radius.Pill)
+            .clip(Radius.Md)
             .background(if (focused) Color.White else AppColors.Brand.copy(alpha = 0.24f))
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Pill)
-                else Modifier.border(1.dp, AppColors.Brand, Radius.Pill)
+                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
+                else Modifier.border(1.dp, AppColors.Brand, Radius.Md)
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(horizontal = 26.dp, vertical = 12.dp)
     ) {
-        Text(
-            text,
-            color = if (focused) Color.Black else TvText.Title,
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1
-        )
+        if (icon != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                androidx.compose.material3.Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = contentColor,
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    text,
+                    color = contentColor,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1
+                )
+            }
+        } else {
+            Text(
+                text,
+                color = contentColor,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1
+            )
+        }
     }
 }
