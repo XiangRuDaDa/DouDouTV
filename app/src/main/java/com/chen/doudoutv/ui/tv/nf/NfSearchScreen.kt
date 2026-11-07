@@ -435,12 +435,6 @@ private fun NfSearchHistory(
     onClear: () -> Unit
 ) {
     Column(Modifier.fillMaxSize()) {
-        Text(
-            "最近搜索 · 按 OK 直接搜",
-            color = TvText.Meta,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(start = TvPagePadding, bottom = 8.dp)
-        )
         FlowRow(
             modifier = Modifier
                 .fillMaxWidth()
@@ -556,7 +550,7 @@ private fun NfSearchGrid(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfRowVerticalPadding, bottom = 24.dp
+            top = NfGridTopPadding, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)

@@ -1,6 +1,12 @@
 package com.chen.doudoutv.ui.tv
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -37,11 +43,17 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,6 +77,7 @@ import com.chen.doudoutv.ui.detail.loadPosterBitmap
 import com.chen.doudoutv.ui.detail.pageTonesOf
 import com.chen.doudoutv.ui.theme.AppColors
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.animation.core.animateFloatAsState
@@ -225,6 +238,21 @@ fun TvDetailScreen(
         )
     }
 
+    /**
+     * 已经刮过的片子先把图抢上屏。
+     *
+     * 完整那次刮削挂在下面加载链的最末端（要等分集、详情那几段跑完），而背景图的取值是
+     * 「刮削图优先、条目自有图兜底」，于是第二次及以后进同一部片，仍然会先上一帧源站老图 ——
+     * 数据其实早就躺在 scraped_meta 表里，一次网都没联。这里只读那张表，命中就直接用，
+     * 没命中什么也不做，仍由下面那条链负责（首次联网刮的行为一个字没改）。
+     * 分集行是「继续观看」进来那条：标题和类型都挂在剧集壳上，键算出来对不上，不去猜。
+     */
+    LaunchedEffect(mediaId, seedMedia?.title, seedMedia?.year, seedMedia?.kind) {
+        val seed = seedMedia ?: return@LaunchedEffect
+        if (seed.kind == MediaKind.EPISODE) return@LaunchedEffect
+        if (tmdb == null) tmdb = vm.tmdbCached(seed.title, seed.year, seed.kind)
+    }
+
     LaunchedEffect(mediaId) {
         loading = true
         // 整个加载过程兜底：任何 IO/解析异常都不允许冒泡到 Composition，
@@ -328,9 +356,10 @@ fun TvDetailScreen(
 
             // 刮削结果一律问仓储层：它先读 scraped_meta 表，表里没有才轮到「联网刮削」开关
             // 和凭据决定要不要发请求。这里再拦一道开关，会把已经刮到、躺在表里的数据一起藏掉。
-            tmdb = runCatching {
+            // 只在刮到东西时覆盖：上面那个只读表的抢跑已经摆好了图，这里失败不能把它擦回老封面。
+            runCatching {
                 vm.tmdbScrape(latest.title, latest.year, latest.kind, id)
-            }.getOrNull()
+            }.getOrNull()?.let { tmdb = it }
             // 刮削会把海报/Logo 回填进库，取回最新的再渲染
             vm.mediaOf(id)?.let { media = it }
         }
@@ -338,6 +367,27 @@ fun TvDetailScreen(
             e.printStackTrace()
         } finally {
             loading = false
+        }
+    }
+
+    /**
+     * 加载态两段：骨架晚 250ms 才出现，内容到位后用 200ms 淡入。
+     *
+     * 为什么要晚这 250ms：刮削表命中的片子整条链路只有几十毫秒，骨架立刻挂上就是
+     * 「白框架闪一下」，比原来干等更晃眼；真正慢的是 TVBox 拉分集和 TMDB 联网那两类，
+     * 它们超过 250ms 才值得给一个「正在加载」的样子。
+     * 淡入只在加载结束这一刻走一次，不参与滚动，所以和当初为滚动性能关掉的淡入动画不冲突。
+     */
+    var skeletonArmed by remember(mediaId) { mutableStateOf(false) }
+    val reveal = remember(mediaId) { Animatable(1f) }
+    LaunchedEffect(loading) {
+        if (loading) {
+            delay(250L)
+            skeletonArmed = true
+        } else {
+            skeletonArmed = false
+            reveal.snapTo(0f)
+            reveal.animateTo(1f, tween(200))
         }
     }
 
@@ -627,13 +677,23 @@ fun TvDetailScreen(
             // 落在 headerScrim 主色已较浓的区域，不挡海报主体、沉浸感更强
             Spacer(Modifier.height(screenH * 0.55f))
 
-            if (item == null) {
-                TvEmptyState(
-                    if (loading) "加载中…" else "找不到该内容",
-                    modifier = Modifier.fillMaxWidth().height(420.dp)
-                )
+            if (loading && skeletonArmed) {
+                TvDetailSkeleton()
+            } else if (item == null) {
+                // 还没到 250ms 的加载窗口里什么都不画：背景与暗层已经在下面铺着，
+                // 先弹一行「加载中…」再换成骨架是两次跳变
+                if (!loading) {
+                    TvEmptyState(
+                        "找不到该内容",
+                        modifier = Modifier.fillMaxWidth().height(420.dp)
+                    )
+                }
             } else {
-                Column(Modifier.fillMaxWidth()) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .graphicsLayer { alpha = reveal.value }
+                ) {
                     // ========== 首屏骨架：标题 / 收藏 / 元信息 / 徽章 / 操作 ==========
                     // 只占左 72%：电视是 16:9 横屏，首屏只有标题、元信息、
                     // 徽章和一个主按钮，铺满整宽会变成「左边一列字、右边一大片空」。
@@ -1117,6 +1177,124 @@ private fun TvInfoLine(label: String, value: String) {
 
 /** 电视端主演行用的轻量数据结构，避免直接依赖 Emby / TMDB 两套 Person 类型 */
 private data class TvCast(val name: String, val role: String, val imageUrl: String)
+
+/**
+ * 加载期的整页骨架：形状对着真实排版抄（首屏是左 72% 的标题块，内容区是整宽 + 40dp 左轴），
+ * 所有格子共用同一条横扫整屏的光带。
+ *
+ * 为什么这里可以动、首页骨架却必须是静态：首页是几十张卡各挂一条无限动画，
+ * 每帧重算几十个渐变还要和滚动抢填充率；这里全页只有下面这一条 transition，
+ * 每块在 drawBehind 里填一个矩形渐变，而且首屏真正在场的只有 5 组块
+ * （简介往后都在 0.55 屏高之下，屏幕外不参与绘制），加载一结束整个骨架就摘掉。
+ */
+@Composable
+private fun TvDetailSkeleton() {
+    val density = LocalDensity.current
+    val pageW = with(density) { LocalConfiguration.current.screenWidthDp.dp.toPx() }
+    val bandW = pageW * 0.34f
+    val transition = rememberInfiniteTransition(label = "tv_detail_skeleton")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1250, easing = LinearEasing), RepeatMode.Restart),
+        label = "tv_detail_band"
+    )
+    // 光带左端在「整屏坐标系」里的位置：从屏幕外左侧进、屏幕外右侧出，一轮 1.25s
+    val bandX = -bandW + phase * (pageW + bandW)
+    // 底色取 SurfaceHi → SurfaceRaise 的中段，高光在其上再叠 8.5% 白
+    val base = lerp(AppColors.SurfaceHi, AppColors.SurfaceRaise, 0.45f)
+    val hi = lerp(base, Color.White, 0.085f)
+
+    Column(Modifier.fillMaxWidth()) {
+        // ---- 首屏：标题 / 收藏 / 元信息 / 徽章 / 按钮（间距与真实代码同档）----
+        Column(
+            Modifier
+                .fillMaxWidth(0.72f)
+                .padding(start = TvPagePadding, end = 12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Skel(Modifier.width(360.dp).height(72.dp), bandX, bandW, base, hi, Radius.Sm)
+                Spacer(Modifier.width(14.dp))
+                Skel(Modifier.size(40.dp), bandX, bandW, base, hi, CircleShape)
+            }
+            Spacer(Modifier.height(8.dp))
+            Skel(Modifier.width(220.dp).height(18.dp), bandX, bandW, base, hi, Radius.Pill)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Skel(Modifier.width(64.dp).height(26.dp), bandX, bandW, base, hi, Radius.Pill)
+                Skel(Modifier.width(52.dp).height(26.dp), bandX, bandW, base, hi, Radius.Pill)
+                Skel(Modifier.width(74.dp).height(26.dp), bandX, bandW, base, hi, Radius.Pill)
+            }
+            Spacer(Modifier.height(18.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Skel(Modifier.width(176.dp).height(58.dp), bandX, bandW, base, hi, Radius.Pill)
+                Skel(Modifier.width(132.dp).height(52.dp), bandX, bandW, base, hi, Radius.Pill)
+            }
+        }
+
+        // ---- 屏幕外那一半：简介 / 主演 / 选集，尺度照真实内容排 ----
+        Column(Modifier.padding(start = TvPagePadding, end = TvPagePadding)) {
+            Spacer(Modifier.height(16.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(620, 600, 560, 430).forEach { w ->
+                    Skel(Modifier.width(w.dp).height(16.dp), bandX, bandW, base, hi, Radius.Sm)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                repeat(6) { Skel(Modifier.size(56.dp), bandX, bandW, base, hi, CircleShape) }
+            }
+            Spacer(Modifier.height(16.dp))
+            Skel(Modifier.width(220.dp).height(18.dp), bandX, bandW, base, hi, Radius.Pill)
+            Spacer(Modifier.height(10.dp))
+            repeat(2) {
+                Row(
+                    Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    repeat(TV_GRID_COLS) {
+                        Skel(Modifier.weight(1f).height(64.dp), bandX, bandW, base, hi, Radius.Md)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 骨架上的一块。
+ *
+ * 光带是按「整屏 x」算的，而 drawBehind 用的是块自己的局部坐标，所以每块要把光带位置
+ * 平移回自己这儿 —— 这一步就是「一道光横扫整屏」和「每块各自亮」的全部区别。
+ * 左边界在 onGloballyPositioned 里取一次、存进普通数组（不是 State）：每帧绘制时读它，
+ * 不需要为位置变化触发重组。
+ */
+@Composable
+private fun Skel(
+    modifier: Modifier,
+    bandX: Float,
+    bandW: Float,
+    base: Color,
+    hi: Color,
+    shape: Shape
+) {
+    val rootX = remember { FloatArray(1) }
+    Box(
+        modifier
+            .onGloballyPositioned { rootX[0] = it.positionInRoot().x }
+            .clip(shape)
+            .drawBehind {
+                val start = bandX - rootX[0]
+                drawRect(
+                    Brush.linearGradient(
+                        colors = listOf(base, hi, base),
+                        start = Offset(start, 0f),
+                        end = Offset(start + bandW, 0f)
+                    )
+                )
+            }
+    )
+}
 
 /**
  * 主演头像行：圆形头像 + 姓名 + 角色，每颗头像是一个焦点站。

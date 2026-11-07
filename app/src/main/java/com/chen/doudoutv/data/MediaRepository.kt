@@ -607,6 +607,36 @@ class MediaRepository(private val context: Context) {
             }.getOrNull()
         }
 
+    /** 刮削表里的那一行：先按「清洗名 + 年份 + 类型」精确找，再退到不限年份的同名条目 */
+    private suspend fun storedMeta(exactKey: String, titleKey: String): ScrapedMetaEntity? =
+        runCatching { metaDao.byKey(exactKey) ?: metaDao.byTitleKey(titleKey) }.getOrNull()
+
+    /**
+     * 只读 scraped_meta 表：不看联网刮削开关、不发请求、也不回填 media 行。
+     *
+     * 详情页背景图是「刮削图优先、条目自有图兜底」，而完整那次刮削排在分集/详情那条慢链之后，
+     * 于是已经刮过的片子每次进页面都会先上一帧源站老图。这一层给首帧一个抢跑的入口：
+     * 表里有就省掉整段慢链的时间，没有就返回 null，仍然由 [tmdbScrape] 那条完整链负责。
+     */
+    suspend fun scrapedMetaOf(title: String, year: Int, kind: String): TmdbClient.ScrapeResult? =
+        withContext(Dispatchers.IO) {
+            val query = ScrapeTitle.forSearch(title)
+            val meta = storedMeta(
+                TmdbCache.keyOf(query, year, kind),
+                TmdbCache.titleKeyOf(query, kind)
+            )
+            // 取证：和下面 tmdbScrape 那行成对看 —— 这行是抢跑，「刮削」那行是链末端，
+            // 两行的时间差就是老海报在屏上多停的那段。没命中也要打，否则分不清「跑了没图」和「根本没跑」。
+            Log.i(
+                "ScrapeDiag",
+                "表读 \"$title\" → \"$query\" year=$year kind=$kind " +
+                    (if (meta == null) "未命中"
+                else "命中 背景=${if (meta.backdropUrl.isBlank()) "空" else "有"} " +
+                    "海报=${if (meta.posterUrl.isBlank()) "空" else "有"}")
+            )
+            meta?.toScrapeResult()
+        }
+
     /**
      * 取一部片的刮削结果（带防频繁请求保护）。
      *
@@ -637,7 +667,7 @@ class MediaRepository(private val context: Context) {
 
         // 第一步永远先查表。命中就不联网，也让「跨重启、跨来源、跨线路」三部同名片子只刮一次，
         // 顺带让演职员、标语这些 media 行装不下的字段有了落点。
-        val stored = runCatching { metaDao.byKey(exactKey) ?: metaDao.byTitleKey(titleKey) }.getOrNull()
+        val stored = storedMeta(exactKey, titleKey)
         val result = stored?.toScrapeResult() ?: run {
             // 表里没有才轮到开关和凭据。用 resolve() 现算而不是读 ScrapeStrategy.engine 那份快照：
             // 用户在设置页刚填完密钥、没重启退回来也该立刻能刮。

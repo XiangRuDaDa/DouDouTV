@@ -323,7 +323,7 @@ fun TvSearchScreen(
                 LazyVerticalGrid(
                     state = resultsGridState,
                     columns = GridCells.Fixed(tvGridColumns()),
-                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, bottom = 24.dp),
+                    contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = TvGridTopPadding, bottom = 24.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp),
                     modifier = Modifier.fillMaxSize()
@@ -436,12 +436,6 @@ private fun TvSearchHistory(
             .fillMaxWidth()
             .padding(start = TvPagePadding, end = TvPagePadding, bottom = 24.dp)
     ) {
-        Text(
-            "最近搜索 · 按 OK 直接搜",
-            color = TvText.Meta,
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
         history.take(8).forEach { kw ->
             TvSuggestionRow(title = kw, onClick = { onSelect(kw) })
             Spacer(Modifier.height(8.dp))

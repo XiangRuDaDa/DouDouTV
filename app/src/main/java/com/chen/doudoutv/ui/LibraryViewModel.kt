@@ -17,6 +17,11 @@ import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
+import com.chen.doudoutv.data.model.SourceUrl
+import com.chen.doudoutv.data.pair.PairedSaveRequest
+import com.chen.doudoutv.data.pair.PairedSaveResult
+import com.chen.doudoutv.data.pair.PairedSource
+import com.chen.doudoutv.data.pair.SourcePairHandler
 import com.chen.doudoutv.data.tvbox.CatVodResultParser
 import com.chen.doudoutv.data.tvbox.TvBoxClient
 import com.chen.doudoutv.data.tvbox.TvBoxClient.TvBoxSite
@@ -666,31 +671,99 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun normalizeLocation(kind: SourceKind, location: String): String {
-        var url = location.trim()
-        if (url.isBlank()) return url
-        // 用户常常只填 192.168.1.2:8096 或 example.com/api.php/provide/vod/
-        // 不补协议时 OkHttp 会直接解析失败，导致同步静默返回空
-        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) {
-            url = "http://$url"
+    /**
+     * 手机扫码页要的两件事：列出已有来源、保存推送来的那一条。
+     * 列表里刻意不带 password / token —— 手机页只要知道「库里存过没有」。
+     */
+    internal fun pairHandler(): SourcePairHandler = object : SourcePairHandler {
+        override suspend fun list(): List<PairedSource> = withContext(Dispatchers.IO) {
+            repo.allSources().map {
+                PairedSource(
+                    id = it.id, name = it.name, kind = it.kind.name,
+                    location = it.location, username = it.username,
+                    hasPassword = it.password.isNotBlank(), enabled = it.enabled
+                )
+            }
         }
-        if (kind == SourceKind.EMBY) {
-            // 从浏览器地址栏复制来的常带 /web/index.html，这里裁回服务器根地址
-            url = url.substringBefore("/web/", url).substringBefore("/web", url).trimEnd('/')
-        }
-        return url
+
+        override suspend fun save(req: PairedSaveRequest): PairedSaveResult =
+            saveSourceFromPair(req)
     }
 
-    /** 新增/编辑完成后自动同步该来源，解决“添加后首页无数据” */
-    private suspend fun syncAfterChange(source: SourceEntity, label: String, action: String) {
+    /**
+     * 手机扫码页推送来的保存 —— 与电视端 addSource/updateSource 同一条链：
+     * 地址规范化、Emby 登录探测、保存后自动同步，一个环节都不省。
+     *
+     * 网页是外部输入，所以这里不校验「来源不存在」「名称为空」之外的东西，
+     * 校验结果原样变成手机页上的那句话。密码留空 = 保持库里原值（网页永远拿不到明文密码）。
+     */
+    suspend fun saveSourceFromPair(req: PairedSaveRequest): PairedSaveResult =
+        withContext(Dispatchers.Main.immediate) {
+            val name = req.name.trim()
+            val location = SourceUrl.normalize(req.kind, req.location)
+            if (name.isBlank() || location.isBlank())
+                return@withContext PairedSaveResult(false, "名称与地址不能为空")
+
+            val existing = if (req.id > 0L) repo.getSource(req.id) else null
+            if (req.id > 0L && existing == null)
+                return@withContext PairedSaveResult(false, "这条来源在电视上已被删除，请刷新手机页")
+
+            val username = req.username.trim()
+            val password = if (existing == null) req.password else req.password.ifBlank { existing.password }
+            val action: String
+            var saved: SourceEntity
+
+            if (existing == null) {
+                val entity = SourceEntity(
+                    name = name, kind = req.kind, location = location,
+                    username = username, password = password
+                )
+                saved = entity.copy(id = repo.addSource(entity))
+                action = "已添加"
+            } else {
+                val credentialsChanged = existing.location != location ||
+                    existing.username != username || existing.password != password
+                saved = existing.copy(
+                    name = name, kind = req.kind, location = location, username = username,
+                    password = password,
+                    token = if (credentialsChanged) "" else existing.token,
+                    userId = if (credentialsChanged) "" else existing.userId
+                )
+                repo.updateSource(saved)
+                action = "已更新"
+            }
+
+            if (req.kind == SourceKind.EMBY && saved.token.isBlank()) {
+                val error = repo.embyLogin(saved)
+                // 登录失败也保留配置：与电视端一致，让用户在手机页改了再推一次
+                if (error != null)
+                    return@withContext PairedSaveResult(false, "$error（配置已保存，可修正后重推）")
+            }
+
+            saved = repo.getSource(saved.id) ?: saved
+            val count = syncAfterChange(saved, name, action)
+            PairedSaveResult(
+                ok = true,
+                message = if (count >= 0) "$action「$name」，已同步 $count 个条目"
+                else "$action「$name」，但同步未取到内容"
+            )
+        }
+
+    private fun normalizeLocation(kind: SourceKind, location: String): String =
+        SourceUrl.normalize(kind, location)
+
+    /** 新增/编辑完成后自动同步该来源，解决“添加后首页无数据”。返回同步条数，-1 表示同步失败。 */
+    private suspend fun syncAfterChange(source: SourceEntity, label: String, action: String): Int {
         scanning = true
         scanMessage = "正在同步 $label…"
-        try {
+        return try {
             val count = runSync(source)
             message = if (count > 0) "$action $label，已同步 $count 个条目"
             else "$action $label，但未获取到内容"
+            count
         } catch (e: Exception) {
             message = "$action $label，同步失败：${e.message ?: "网络或接口异常"}"
+            -1
         } finally {
             scanning = false
             scanMessage = ""
@@ -807,6 +880,16 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         mediaId: Long = 0L
     ): com.chen.doudoutv.data.tmdb.TmdbClient.ScrapeResult? =
         repo.tmdbScrape(title, year, kind, mediaId)
+
+    /**
+     * 只查刮削表、绝不联网的那一份：详情页首帧拿它抢在分集/详情那条慢链之前，
+     * 把已经刮到的海报 / 背景图 / 片名 Logo 先摆上屏。表里没有就是 null。
+     */
+    suspend fun tmdbCached(
+        title: String,
+        year: Int,
+        kind: String
+    ): com.chen.doudoutv.data.tmdb.TmdbClient.ScrapeResult? = repo.scrapedMetaOf(title, year, kind)
 
     /** 清空刮削缓存，返回被清掉的缓存条目数 */
     suspend fun clearScrapeCache(): Int = repo.clearScrapeCache()

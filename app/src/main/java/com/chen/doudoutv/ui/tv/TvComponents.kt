@@ -801,6 +801,18 @@ fun tvGridColumns(): Int = when (Prefs.posterSize) {
     Prefs.PosterSize.LARGE -> 4
 }
 
+/**
+ * 网格首行上方的余量。
+ *
+ * 纵向滚动容器贴着容器上下边缘裁剪（ClipScrollableContainer 只在左右各放宽 30dp），
+ * 首行获焦时向外扩的那一圈必须整个装进这一段，超出容器上缘就被切，
+ * 看着就像被上面那条分类栏压住。经典版整卡绕中心放大 1.10，向上多出 0.05×卡高：
+ * 大卡档（4 列）单元宽约 208~288dp，海报 2:3 加字幕卡高约 340~460dp，
+ * 也就是向上 17~23dp；原来只留 14dp，正好差这一截。
+ * 行与行之间不用管，下面总有下一行兜着，且行距本来就是 20dp。
+ */
+internal val TvGridTopPadding = 24.dp
+
 /** 电视端可聚焦的小尺寸标签（题材筛选等） */
 @Composable
 fun TvFilterChip(

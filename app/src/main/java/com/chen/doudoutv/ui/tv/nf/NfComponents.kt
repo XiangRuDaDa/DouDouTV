@@ -126,6 +126,19 @@ val NfCardGap = 16.dp
 /** 抬起动画所需的行内纵向余量 */
 val NfRowVerticalPadding = 14.dp
 
+/**
+ * 网格首行上方的余量：行内还有下一行兜着，首行上面什么都没有。
+ * 纵向滚动容器只在左右各放宽 30dp 不裁，上下是贴着容器边裁的（ClipScrollableContainer），
+ * 所以首行焦点态向外扩的那一圈必须整个装进这一段，否则海报上缘被切、
+ * 看起来就像被上面那条分类栏压住。
+ *
+ * 两个方向都要量：上抬档抬 PosterLift（12dp）；放大档图片绕中心涨 5%，向上出 0.025×海报高，
+ * 而网格是 fillCell 铺满格子，格子宽随屏幕走（不是固定 192dp）——
+ * 大卡档海报高约 310~670dp，也就是 8~17dp。28dp 留够余量，且和 [NfRowVerticalPadding]
+ * 的行距观感连得上；[NfGridTopPadding] 只加在顶部，底部不用，最后一行下面有 contentPadding 兜。
+ */
+val NfGridTopPadding = 28.dp
+
 /** 一级导航的四个落点 */
 enum class NfTab { Home, Browse, Mine, Search }
 
@@ -496,11 +509,17 @@ fun NfPosterCard(
         modifier
             .then(if (fillCell) Modifier.fillMaxWidth() else Modifier.width(width))
             .zIndex(if (focused) 1f else 0f)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            // 位移必须挂在 clickable（= 焦点目标）的**内层**，不能挂外面：
+            // graphicsLayer 的 translationY 会进 Compose 的焦点矩形（NodeCoordinator.rectInParent
+            // 里 layer.mapBounds），而 isCandidate(Down) 只比纵向不比横向 —— 获焦卡一上抬，
+            // 同一行的邻卡立刻全变成「在它下面」的合法候选，↓ 被吃掉去横向跳格，
+            // searchBeyondBounds 因此永不触发，Lazy 网格不再补组合下一行，列表卡死在屏幕底部。
+            // 放大档没这毛病是因为 scale 挂在图片那一层、且绕中心涨，焦点矩形没动过。
             .graphicsLayer {
                 alpha = entrance
                 translationY = -lift.value + (1f - entrance) * risePx
             }
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
     ) {
         // 圆角、白环、放大都只作用在图片这一层。片名要是跟着一起放大，同一行的字号就齐不了，
         // 涨出来的高度还会往下压到下一行的片名上 —— 图外字幕这版排版要的就是文字层稳定。
@@ -769,8 +788,9 @@ private fun NfSubChip(
 
 /**
  * 竖版海报网格（分类页 / 我的页 / 搜索结果共用）。
- * 格子间的纵向间距必须容得下焦点抬起的 [CardLift]，所以 [NfRowVerticalPadding] 同时用作
- * contentPadding 和行间距；入场只在「这一屏第一次拿到数据」那一段时间里逐格播（[nfFirstFillStagger]）。
+ * 行间距取 [NfRowVerticalPadding]，容得下焦点抬起的 [PosterLift]；首行上方另给 [NfGridTopPadding]，
+ * 因为纵向滚动容器贴着容器上下边缘裁剪，首行上面没有下一行兜着。
+ * 入场只在「这一屏第一次拿到数据」那一段时间里逐格播（[nfFirstFillStagger]）。
  *
  * 滚动位置与落点按 [pageKey] 记账：进详情把这页子树销毁重建，返回时要站在原来那一屏、原来那张卡。
  */
@@ -820,7 +840,7 @@ fun NfPosterGrid(
         modifier = modifier.fillMaxWidth(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfRowVerticalPadding, bottom = 24.dp
+            top = NfGridTopPadding, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)

@@ -112,6 +112,9 @@ dependencies {
     // 网络 / JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // 手机扫码维护：电视端把局域网地址编码成二维码（纯 Java，只用到 core）
+    implementation("com.google.zxing:core:3.5.3")
+
     // 汉字 → 拼音（联icode 区间估想用的首字母必须准确：Un算会把「兰」算成 b）
     implementation("com.github.stuxuhai:jpinyin:1.1.8")
 

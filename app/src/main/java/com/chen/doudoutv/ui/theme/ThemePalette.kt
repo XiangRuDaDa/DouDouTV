@@ -26,9 +26,15 @@ data class ThemePalette(
  *
  * 挑选标准是「能压住白字」：品牌色会直接当按钮底色用（contentColor 是纯白），
  * 所以每一套都按 WCAG 相对亮度算过，白字对比度不低于 3.2:1。
- * 青瓷、赤铜、竹青这三套原本分别是 2.46 / 2.81 / 2.88，橙绿这类看着高级、
+ * 青瓷、赤铜这两套原本分别是 2.46 / 2.81，橙绿这类看着高级、
  * 放上白字就糊的颜色统一往暗里压过一档；brandSoft 只当深色底上的强调色用
  * （对底色仍有 8:1 以上），跟着同色相压暗是为了两层明度差保持不变。
+ *
+ * 汝窑这套压得最狠，也错过一次：上一版 #64907F 色相 157°，落在绿色那一挂，
+ * 看着就是竹青换了个名字。天青的釉色相在 185°–200°，是青里泛蓝、不是泛绿，
+ * 所以这版取 193°；饱和度只留 21%（汝窑以釉面失透、不开艳色著称，一饱和就撞回青瓷）。
+ * 真釉取样约 #A2C0C4，那种近乎发白的淡青直接当按钮底，白字对比不到 2:1，
+ * 字等于浮在一片雾上，故明度往下压到 3.77:1。
  */
 val ThemePalettes: List<ThemePalette> = listOf(
     ThemePalette("graphite", "石墨蓝", Color(0xFF4F8CFF), Color(0xFF6BA1FF)),
@@ -36,7 +42,9 @@ val ThemePalettes: List<ThemePalette> = listOf(
     ThemePalette("iris", "鸢尾", Color(0xFF8A74E8), Color(0xFFA99BF5)),
     ThemePalette("copper", "赤铜", Color(0xFFBE8049), Color(0xFFD9A471)),
     ThemePalette("rouge", "胭脂", Color(0xFFD0597F), Color(0xFFE67EA0)),
-    ThemePalette("bamboo", "竹青", Color(0xFF4A9A66), Color(0xFF6FB98A)),
+    // id 仍是 bamboo：存储键一改，已经选中这套的设备就被 paletteFor 判成旧版本残留、
+    // 回落默认色板 —— 用户看到的结果是「我选的色自己没了」。改名字不动键。
+    ThemePalette("bamboo", "汝窑", Color(0xFF5F8A96), Color(0xFF93B4BE)),
     ThemePalette("steel", "霜青", Color(0xFF7E93B8), Color(0xFF9FB2D4))
 )
 

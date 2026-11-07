@@ -261,7 +261,7 @@ private fun NfGridFooter(loading: Boolean, ended: Boolean, error: String?) {
 private fun NfSkeletonGrid() {
     LazyVerticalGrid(
         columns = GridCells.Fixed(tvGridColumns()),
-        contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = NfRowVerticalPadding),
+        contentPadding = PaddingValues(start = TvPagePadding, end = TvPagePadding, top = NfGridTopPadding),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding),
         modifier = Modifier.fillMaxSize()

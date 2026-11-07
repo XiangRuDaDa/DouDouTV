@@ -95,6 +95,7 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
     val sources by vm.sources.collectAsStateWithLifecycle()
 
     var showAdd by remember { mutableStateOf(false) }
+    var showPair by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<SourceEntity?>(null) }
     var deleting by remember { mutableStateOf<SourceEntity?>(null) }
     // 卡片 OK 键打开的功能菜单（启停/刷新/编辑/删除）
@@ -111,7 +112,11 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
         val cardGap = 16.dp
         val usableWidth = screenWidth - 72.dp // 左右各 36dp
         val cardWidth = (usableWidth - cardGap * (columns - 1)) / columns
-        val cardHeight = (cardWidth * 0.72f).coerceIn(210.dp, 280.dp)
+        // 卡片高度按内容实测反推：56dp 图标去掉后，正文只剩「名称行 28 / 徽章行 24 / URL 24」
+        // 加间距 22，底下是「分割线 1 + 间距 12 + 统计行 ~20」，连同上下各 14dp 内边距约 159dp。
+        // 原来的 0.72 比例 + 210dp 下限是带图标那一版留下的，多出来的 51dp 全被 SpaceBetween
+        // 撑成 URL 和分割线之间的空洞。这里留 17dp 余量，既不再空，也不至于把统计行挤出去。
+        val cardHeight = (cardWidth * 0.58f).coerceIn(176.dp, 210.dp)
 
         Box(Modifier.fillMaxSize().themeBackdrop()) {
 
@@ -158,10 +163,16 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                         )
                     }
                     TvPillButton(
-                        text = "＋ 添加来源",
+                        text = "添加来源",
                         primary = true,
                         size = TvButtonSize.Sm,
                         onClick = { showAdd = true }
+                    )
+                    TvPillButton(
+                        text = "扫码维护",
+                        primary = false,
+                        size = TvButtonSize.Sm,
+                        onClick = { showPair = true }
                     )
                 }
             }
@@ -242,6 +253,11 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                 editing = null
             }
         )
+    }
+
+    // ========== 手机扫码维护（服务只在这一层存活） ==========
+    if (showPair) {
+        TvPairPanel(vm = vm, onDismiss = { showPair = false })
     }
 
     // ========== 删除二次确认 ==========
@@ -391,15 +407,25 @@ private fun TvSourceCard(
             Modifier.fillMaxSize().padding(14.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // 上半部分：图标 + 名称 + 徽章 + URL
+            // 上半部分：名称 + 状态圆点 + 徽章 + URL
             Column(modifier = Modifier.fillMaxWidth()) {
-                // 第一行：图标 + 状态圆点
+                // 第一行：来源名称与启用状态圆点同一水平线。
+                // 原来这里是「图标 + 圆点」独占一行、名称另起一行，56dp 的图标把卡片撑到
+                // 比 cardHeight 下限（210dp）还高，底部那行统计被裁掉一截。
                 Row(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TvSourceIcon(kind = source.kind)
+                    Text(
+                        text = source.name,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = TvText.Title,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
                     Box(
                         Modifier
                             .size(12.dp)
@@ -408,19 +434,7 @@ private fun TvSourceCard(
                     )
                 }
 
-                Spacer(Modifier.height(14.dp))
-
-                // 名称
-                Text(
-                    text = source.name,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = TvText.Title,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(10.dp))
 
                 // 徽章行
                 Row(
@@ -505,49 +519,35 @@ private fun TvSourceCard(
                             }
                         }
                     }
-                    Text(
-                        text = tvRelativeTime(lastSync),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TvText.Meta
-                    )
+                    // 同步中：进度环挪到统计行右端，替掉「多久没同步」这一项。
+                    // 原先挂在卡片右上角，而名称去掉了图标、状态圆点提到同一行占住右上角，
+                    // 26dp 的环正好压住圆点（x/w-44..w-18 与 y/18..44 都重叠），看着像圆点坏了。
+                    if (busy) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = AppColors.Brand
+                            )
+                            Text(
+                                text = "同步中",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TvText.Meta
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = tvRelativeTime(lastSync),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TvText.Meta
+                        )
+                    }
                 }
             }
         }
-
-        // 同步中：右上角显示一个不可聚焦的进度环，仅作状态提示
-        if (busy) {
-            CircularProgressIndicator(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 18.dp, end = 18.dp)
-                    .size(26.dp),
-                strokeWidth = 2.dp,
-                color = AppColors.Brand
-            )
-        }
-    }
-}
-
-/* ========================================================
-   TvSourceIcon
-   ======================================================== */
-@Composable
-private fun TvSourceIcon(kind: SourceKind) {
-    val bg = if (kind == SourceKind.EMBY) AppColors.Brand.copy(alpha = 0.2f) else AppColors.Rating.copy(alpha = 0.14f)
-    val fg = if (kind == SourceKind.EMBY) AppColors.Brand else AppColors.Rating
-    Box(
-        Modifier
-            .size(56.dp)
-            .clip(Radius.Md)
-            .background(bg),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = if (kind == SourceKind.EMBY) "E" else "📺",
-            color = fg,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold
-        )
     }
 }
 

@@ -224,7 +224,7 @@ private fun NfFavoriteGrid(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            top = NfRowVerticalPadding, bottom = 24.dp
+            top = NfGridTopPadding, bottom = 24.dp
         ),
         horizontalArrangement = Arrangement.spacedBy(NfCardGap),
         verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)
