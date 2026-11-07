@@ -22,11 +22,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,9 +37,16 @@ import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
@@ -47,6 +55,7 @@ import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.Radius
 import com.chen.doudoutv.ui.theme.TvText
 import com.chen.doudoutv.ui.theme.themeBackdrop
+import com.chen.doudoutv.ui.tv.tvMoveFocus
 
 /** 顶栏收色带的高度：导航条本身透明，文字要有一层由页面底色淡出的衬底才读得清 */
 private val NfNavScrimHeight = 116.dp
@@ -67,17 +76,85 @@ class NfShellState {
     /** 导航条实测高度：流内装配的页面用它给内容让位。初值取常态量得的高度，首帧不跳 */
     var navHeight by mutableStateOf(56.dp)
 
-    internal val configs = mutableStateMapOf<NfTab, NfNavConfig>()
+    /**
+     * 每个 tab 一份顶栏装配参数。
+     *
+     * 用普通 map 而不是状态 map：这份 map 只负责「找到当前 tab 那份参数」，
+     * 真正会变的字段在 [NfNavConfig] 里各自是状态。页面写、顶栏读，两边都不该因为
+     * map 的内容换了就整页重组 —— 原来每重组一次就 new 一个 NfNavConfig 塞进去，
+     * 顶栏被拖进重组，tab 的下划线弹簧和缩放从头再跑一遍，切页时顶栏就抖一下。
+     */
+    private val configs = mutableMapOf<NfTab, NfNavConfig>()
+
+    /** 槽位新建时自增：顶栏靠它发现「这一页刚把参数交上来」 */
+    var configEpoch by mutableStateOf(0)
+        private set
+
+    /** 页面侧：拿到（或建出）这一 tab 的参数槽位 */
+    internal fun configSlot(tab: NfTab): NfNavConfig {
+        configs[tab]?.let { return it }
+        val slot = NfNavConfig()
+        configs[tab] = slot
+        configEpoch++
+        return slot
+    }
+
+    /** 顶栏侧：当前这一 tab 的参数槽位（页面还没交上来就是 null） */
+    internal fun configOf(tab: NfTab): NfNavConfig? {
+        // 读一次 epoch：槽位新建的那一刻它自增，这里读到新值才会被叫醒重画
+        val epoch = configEpoch
+        return if (epoch == 0) null else configs[tab]
+    }
 }
 
-/** 一页交给常驻顶栏的装配参数 */
-internal class NfNavConfig(
-    val below: FocusRequester?,
-    val visible: Boolean,
-    val alpha: (() -> Float)?,
-    val onFocus: (() -> Unit)?,
-    val inFlow: Boolean
-)
+/**
+ * 一页交给常驻顶栏的装配参数。
+ *
+ * 这些参数页面每次重组都会重新交一遍。只有真正变了的槽位才写回：
+ * 写状态就是叫醒读它的顶栏，顶栏一重组，tab 的下划线弹簧和缩放就从头再跑一遍。
+ */
+internal class NfNavConfig {
+    /** 导航条按 ↓ 的落点 */
+    var below: FocusRequester? by mutableStateOf(null)
+        private set
+
+    /** 顶栏（含其后面的收色带）是否出现在组合里 */
+    var visible: Boolean by mutableStateOf(true)
+        private set
+
+    /** 顶栏是不是流内装配（内容区要给它让出高度） */
+    var inFlow: Boolean by mutableStateOf(false)
+        private set
+
+    /** 顶栏有没有透明度曲线：有 / 没有之间切换时顶栏要重组一次换掉这层 graphicsLayer */
+    var hasAlpha: Boolean by mutableStateOf(false)
+        private set
+
+    /** 顶栏不透明度来源：连续量，只能在 draw phase 读，所以是普通字段而不是状态 */
+    var alpha: (() -> Float)? = null
+        private set
+
+    /** 焦点落到顶栏时的补偿动作（把内容滚回顶部） */
+    var onFocus: (() -> Unit)? = null
+        private set
+
+    fun update(
+        below: FocusRequester?,
+        visible: Boolean,
+        alpha: (() -> Float)?,
+        onFocus: (() -> Unit)?,
+        inFlow: Boolean
+    ) {
+        if (this.below !== below) this.below = below
+        if (this.visible != visible) this.visible = visible
+        if (this.inFlow != inFlow) this.inFlow = inFlow
+        if (this.hasAlpha != (alpha != null)) this.hasAlpha = alpha != null
+        // 这两个每次重组都是新对象，但都在 draw / 事件回调里现读现用，
+        // 不需要为了换一个 lambda 把顶栏叫醒
+        this.alpha = alpha
+        this.onFocus = onFocus
+    }
+}
 
 val LocalNfShell = staticCompositionLocalOf<NfShellState?> { null }
 
@@ -200,10 +277,9 @@ fun NfShellNav(
 ) {
     val scope = rememberNfScope(vm)
     val chrome = shell.chrome
-    val config = shell.configs[current]
+    val config = shell.configOf(current)
     val density = LocalDensity.current
     val visible = config?.visible ?: true
-    val alpha = config?.alpha
 
     LaunchedEffect(visible) {
         if (!visible) chrome.navFocused = false
@@ -215,7 +291,12 @@ fun NfShellNav(
                 Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .then(if (alpha != null) Modifier.graphicsLayer { this.alpha = alpha() } else Modifier)
+                    // 透明度在 draw phase 现读现用：曲线每帧都变，进组合读会把整条顶栏拖进重组
+                    .then(
+                        if (config?.hasAlpha == true)
+                            Modifier.graphicsLayer { this.alpha = config?.alpha?.invoke() ?: 1f }
+                        else Modifier
+                    )
             ) {
                 // 收色带只在悬浮装配（首页）时有意义：流内那三页顶栏下面就是内容，
                 // 压一层渐变反而把分类条压暗
@@ -305,7 +386,7 @@ fun NfScaffold(
     val shell = LocalNfShell.current
     if (shell != null) {
         SideEffect {
-            shell.configs[current] = NfNavConfig(
+            shell.configSlot(current).update(
                 below = belowFocusRequester,
                 visible = navVisible,
                 alpha = navAlpha,
@@ -316,14 +397,19 @@ fun NfScaffold(
         LaunchedEffect(navVisible) {
             if (!navVisible) chrome.navFocused = false
         }
-        if (navInFlow) {
-            Column(Modifier.fillMaxSize()) {
-                // 顶栏常驻在转场之外，这里只给它让出高度；4dp 是它和内容之间那条窄缝
-                Spacer(Modifier.height(shell.navHeight + 4.dp))
-                Box(Modifier.fillMaxWidth().weight(1f)) { content() }
+        // 底色画在这一页里面，而不是画在转场之外：转场时新旧两页各自不透明，
+        // 滑动是「一层擦掉一层」；底色画在外面时新页自己透明，
+        // 新页的海报压着旧页的海报糊成一片，看上去就是转场卡顿。
+        Box(Modifier.fillMaxSize().themeBackdrop()) {
+            if (navInFlow) {
+                Column(Modifier.fillMaxSize()) {
+                    // 顶栏常驻在转场之外，这里只给它让出高度；4dp 是它和内容之间那条窄缝
+                    Spacer(Modifier.height(shell.navHeight + 4.dp))
+                    Box(Modifier.fillMaxWidth().weight(1f)) { content() }
+                }
+            } else {
+                Box(Modifier.fillMaxSize()) { content() }
             }
-        } else {
-            Box(Modifier.fillMaxSize()) { content() }
         }
         return
     }
@@ -445,6 +531,42 @@ fun NfInlineEmpty(
             )
         }
     }
+}
+
+/** 页面内「这一层的返回键」：把按键事件接到 onBack，onBack 返回 true 就吃掉这次返回 */
+fun Modifier.nfBackKey(onBack: () -> Boolean): Modifier = onPreviewKeyEvent { event ->
+    event.type == KeyEventType.KeyDown && event.key == Key.Back && onBack()
+}
+
+/**
+ * 返回键的层级交棒。
+ *
+ * 用户要的层级是：内容（卡片）→ 分类栏 → tab 栏 → 首页。
+ * 每一层按返回先把焦点交回上一层，只有「已经在最外层」才轮到退页 / 切 tab，
+ * 而不是不管焦点站在哪都一下退回首页。
+ *
+ * 时序沿用方向键交棒那一套（等一帧再跳、跳不动 180ms 补一次）：刚从别的页切回来那一帧
+ * 锚点可能还没挂载，直接 requestFocus 会静默失败。
+ */
+@Composable
+fun rememberNfLayerJump(): NfLayerJump {
+    val scope = rememberCoroutineScope()
+    return NfLayerJump { targets ->
+        scope.launch {
+            withFrameNanos { }
+            val array = targets.toTypedArray()
+            if (!tvMoveFocus(*array)) {
+                delay(180)
+                tvMoveFocus(*array)
+            }
+        }
+        true
+    }
+}
+
+/** 返回键交回上一层这个动作本身；调用时按顺序给落点，第一个挂得上的就是落点 */
+class NfLayerJump internal constructor(private val launchJump: (List<FocusRequester>) -> Boolean) {
+    operator fun invoke(vararg targets: FocusRequester): Boolean = launchJump(targets.toList())
 }
 
 /** 页面里的一颗普通操作（空态重试、切换来源确认等），沿用导航条按钮的层级语言 */

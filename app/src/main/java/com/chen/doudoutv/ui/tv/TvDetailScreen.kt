@@ -1,5 +1,6 @@
 package com.chen.doudoutv.ui.tv
 
+import android.util.Log
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -38,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -82,7 +84,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -193,6 +194,15 @@ fun TvDetailScreen(
     var epPage by remember(mediaId) { mutableStateOf(0) }
     /** 整页重建后要把焦点交回的那一集（0 = 没有），由 [LaunchedEffect] 的接址逻辑填 */
     var recallEpisodeId by remember(mediaId) { mutableStateOf(0L) }
+    /**
+     * 这一页是不是「播放器把宿主 Activity 打断后重建」进来的（true 才需要接回原来那一集）。
+     *
+     * 只有上面那条接址分支会把它翻真。[recallEpisodeId] 单独不够：换播放源（rebindSource）
+     * 也写它，进程级记下的分集 id 还可能是上一次看别的片子留下的 —— 于是第一次正常进这一页
+     * 也会被「接回老落点」带走，焦点落在选集格里，bring-into-view 顺势把简介摊出来，
+     * 首屏那张大图构图就没有了。
+     */
+    var restoredStand by remember(mediaId) { mutableStateOf(false) }
 
     /**
      * 焦点锚点。
@@ -216,9 +226,29 @@ fun TvDetailScreen(
      * 不用像首页那样按页面 key 持久化。
      */
     val stand = remember { StandTarget() }
+    /**
+     * 播放键是不是真的拿到过焦点（首屏那一次落点是不是站上了）。
+     * 只由播放键自己的焦点上报翻真，见 [publishStand]。
+     */
+    var playLanded by remember(mediaId) { mutableStateOf(false) }
+    /** 日志用：stand 里那条落点记录是谁 */
+    fun standLabel(): String = when (stand.requester) {
+        null -> "none"
+        playFocusRequester -> "play"
+        favoriteFocusRequester -> "favorite"
+        controlsFocusRequester -> "controls"
+        firstEpFocusRequester -> "ep-first"
+        else -> "cell"
+    }
     /** 谁拿到焦点谁就把自己交给 [stand]；一个节点只交它自己已经挂着的那个 requester */
-    fun publishStand(target: FocusRequester): Modifier =
-        Modifier.onFocusChanged { if (it.hasFocus) stand.requester = target }
+    fun publishStand(target: FocusRequester, name: String): Modifier =
+        Modifier.onFocusChanged {
+            if (it.hasFocus) {
+                stand.requester = target
+                if (target === playFocusRequester) playLanded = true
+                Log.i(FOCUS_TAG, "stand <- $name (scroll=${scrollState.value})")
+            }
+        }
 
     /** 界面每次回到前台（进出播放器）都要重新站好焦点，见 [tvResumeTick] */
     val resumeTick = tvResumeTick()
@@ -355,6 +385,7 @@ fun TvDetailScreen(
                     val pos = inSeason.indexOfFirst { it.id == playedId }
                     if (pos >= 0) epPage = pos / TV_EPS_PAGE
                     recallEpisodeId = playedId
+                    restoredStand = true
                 }
             }
 
@@ -434,21 +465,57 @@ fun TvDetailScreen(
     // 从播放器回来（子树重建）时 recallEpisodeId 会在组合期把那一格交给 stand，于是还站在那一集。
     // 不再另立 entered 标记：LaunchedEffect(Unit) 和抢焦效果同一帧启动，抢焦还在 delay 里
     // 标记就已经翻真，读出来的永远是「已进过」，等于没有这道闸。
-    val landOnPlay = remember { booleanArrayOf(false) }
+    //
+    // tick 用「内容有没有真的组合出来」当信号，而不是「loading 结束了没有」：
+    // loading=false 那一刻内容才刚进组合，抢焦效果同一帧启动时播放键可能还没挂上，
+    // requestFocus 静默失败、之后再没有第二次机会（于是焦点干脆没落点）。
+    // 内容组合出来了（骨架已撤、条目已到）才发一次 tick，抢焦必然命中。
+    val contentReady = media != null && !(loading && skeletonArmed)
+    // 第一落点 vs 之后：播放键真正拿到过焦点（[playLanded]）之前，每一轮抢焦都只认播放键。
+    // 不能只判「这一页跑过第一轮没有」：tick 每变一次，上一轮就被取消重开，
+    // 真机日志里进一次页跑了三轮，前两轮还在骨架阶段（ready=false），播放键根本没挂上，
+    // 标记却被第二轮消费掉了 —— 第三轮改按 stand 里那个先拿到焦点的元件跑，
+    // bring-into-view 一滚，简介就摊在眼前（stand 会被抢焦以外的焦点上报填上）。
+    // 这一轮的落点判据（抢焦和「压回顶部」共用一份，两边不能各算各的）
+    fun claimTarget(): FocusRequester = when {
+        // 播放器把宿主 Activity 打断后重建回来的：接回刚才那一集，stand 说了算
+        restoredStand -> stand.requester ?: playFocusRequester
+        // 首屏那一次还没站上播放键：换源重绑、进程级老记录、别人先抢到的焦点都不认
+        !playLanded -> playFocusRequester
+        else -> stand.requester ?: playFocusRequester
+    }
     tvClaimFocusOnEnter(
-        tick = listOf(resumeTick, if (loading) null else media?.id),
+        tick = listOf(resumeTick, if (contentReady) media?.id else null),
         anchorsProvider = {
-            val stood = stand.requester
-            landOnPlay[0] = stood == null
-            listOfNotNull(stood, playFocusRequester)
+            val target = claimTarget()
+            Log.i(
+                FOCUS_TAG,
+                "claim: ready=$contentReady loading=$loading stand=${standLabel()} " +
+                    "restored=$restoredStand landed=$playLanded target=" +
+                    (if (target === playFocusRequester) "play" else "stand") +
+                    " scroll=${scrollState.value}"
+            )
+            listOf(target)
         },
         settleMillis = 120,
         // 播放键排在首屏 55% 占位之下，1.9 的 requestFocus 会把它「滚到可见」，顺势把简介摊出来。
-        // 只有这一次确实落在播放键上才把页面压回顶部；从播放器回来落在某一集上时不能滚，
+        // 只有这一轮确实往播放键上落才把页面压回顶部；从播放器回来落在某一集上时不能滚，
         // 否则那一集又被滚出视口。
         keepTop = true,
-        scrollToTop = { if (landOnPlay[0]) scrollState.scrollTo(0) }
+        scrollToTop = {
+            val t = claimTarget()
+            if (t === playFocusRequester) scrollState.scrollTo(0)
+        }
     )
+
+    // 取证：进页头 4 秒里滚动位置每次变化都记一笔 ——
+    // 「第一次进页就摊开简介」到底是抢焦滚的、还是 bring-into-view 补滚的，看这条日志就知道。
+    LaunchedEffect(mediaId) {
+        val until = android.os.SystemClock.uptimeMillis() + 4000L
+        snapshotFlow { scrollState.value }.collect { v ->
+            if (android.os.SystemClock.uptimeMillis() < until) Log.i(FOCUS_TAG, "scroll=$v")
+        }
+    }
 
     val item = media
 
@@ -742,7 +809,7 @@ fun TvDetailScreen(
                                     .focusRequester(favoriteFocusRequester)
                                     // 焦点走到这一层 = 用户已经按回到顶，构图跟着回首屏（规范 R7）
                                     .onFocusChanged { if (it.hasFocus) restoreHeaderComposition() }
-                                    .then(publishStand(favoriteFocusRequester))
+                                    .then(publishStand(favoriteFocusRequester, "favorite"))
                                     .onPreviewKeyEvent { e ->
                                         if (e.type == KeyEventType.KeyDown && e.key == Key.DirectionUp) {
                                             restoreHeaderComposition()
@@ -822,7 +889,7 @@ fun TvDetailScreen(
                         val playFocusModifier = Modifier
                             .focusRequester(playFocusRequester)
                             .then(restoreHeaderOnFocus)
-                            .then(publishStand(playFocusRequester))
+                            .then(publishStand(playFocusRequester, "play"))
                             .focusProperties {
                                 up = favoriteFocusRequester
                                 down = belowPlay
@@ -943,7 +1010,7 @@ fun TvDetailScreen(
                                             up = descUpTarget
                                             down = belowDesc
                                         }
-                                        .then(publishStand(descFocusRequester)),
+                                        .then(publishStand(descFocusRequester, "desc")),
                                     onClick = {
                                         descExpanded = !descExpanded
                                         // 展开和收起都从简介第一行起读，而不是停在贴着按钮的那一屏
@@ -1018,7 +1085,7 @@ fun TvDetailScreen(
                                         up = castFocusRequesters.lastOrNull()
                                             ?: if (descTruncated) descFocusRequester else playFocusRequester
                                         down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
-                                    }.then(publishStand(controlsFocusRequester))
+                                    }.then(publishStand(controlsFocusRequester, "controls"))
                                     // 播放源 / 云盘切换：多条源时展示，默认第一条
                                     if (playSources.size > 1) {
                                         playSources.forEachIndexed { index, src ->
@@ -1129,11 +1196,14 @@ fun TvDetailScreen(
                                         if (ep.id == recallEpisodeId) {
                                             // 重建后的落点：组合期就把这一格交给 stand（同 ReturnSpot.cardStand 的交法），
                                             // 抢焦效果在本帧组合之后才跑，取到的就是它
-                                            remember(cellTarget) { stand.requester = cellTarget }
+                                            remember(cellTarget) {
+                                                stand.requester = cellTarget
+                                                Log.i(FOCUS_TAG, "stand <- recall ep${ep.id}（组合期交入）")
+                                            }
                                         }
                                         TvEpisodeCard(
                                             episode = ep,
-                                            modifier = Modifier.weight(1f).then(publishStand(cellTarget)),
+                                            modifier = Modifier.weight(1f).then(publishStand(cellTarget, "ep${ep.id}")),
                                             // 首行第一格挂焦点器，「选择剧集」与换季/翻页后直接落这里
                                             focusRequester = cellTarget,
                                             // 首行再按上：回控制条（没有就回展开按钮，再没有才回播放）
@@ -1344,17 +1414,12 @@ private fun TvCastRow(
         cast.forEachIndexed { index, person ->
             val interaction = remember { MutableInteractionSource() }
             val focused by interaction.collectIsFocusedAsState()
-            val scale = animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST), label = "cast")
             val avatarShape = remember { CircleShape }
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .width(76.dp)
                     .zIndex(if (focused) 1f else 0f)
-                    .graphicsLayer {
-                        scaleX = scale.value
-                        scaleY = scale.value
-                    }
                     .then(
                         requesters.getOrNull(index)?.let { Modifier.focusRequester(it) } ?: Modifier
                     )
@@ -1410,6 +1475,9 @@ private fun TvCastRow(
 /** 每页显示的分集数：40 集一页，超出用翻页按钮切换 */
 private const val TV_EPS_PAGE = 40
 
+/** 取证日志的 tag：进页抢焦与滚动位置都记在这里 */
+private const val FOCUS_TAG = "TvDetailFocus"
+
 /** 分集网格列数：分集名是源给的原名（如 "[5.4GB]E01.mkv【…】"），
  *  10 列时一格不到 90dp，名字全被省略号吃掉；4 列后单格够宽，集名能看清。 */
 private const val TV_GRID_COLS = 4
@@ -1435,7 +1503,6 @@ private fun TvEpisodeCard(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.05f else 1f, tween(Motion.FAST), label = "ep_card")
 
     val label = episode.episodeLabel()
     val watched = episode.positionMs > 5_000L
@@ -1462,10 +1529,9 @@ private fun TvEpisodeCard(
                 onClick = onClick
             )
             .focusable(interactionSource = interaction)
-            // 缩放挂在焦点目标内层：挂外面会把 1.05 倍算进焦点矩形，
-            // 获焦卡上下各涨一截，verticalScroll 的 bring-into-view 每次都补一点滚动，
-            // 左右切集时整屏就跟着上下抖。
-            .graphicsLayer { scaleX = scale; scaleY = scale }
+            // 详情页不放大获焦的卡片：放大一改焦点矩形，verticalScroll 的
+            // bring-into-view 每次都补一点滚动，左右切集时整屏跟着上下抖。
+            // 焦点只用边框表示（品牌色 2dp），尺寸一动都不动。
             .clip(Radius.Md)
             .background(if (watched) AppColors.Brand.copy(alpha = 0.18f) else AppColors.Surface)
             .border(

@@ -868,13 +868,19 @@ fun NfSubNav(
     /** ↑ 的落点（本页在导航条上那颗 tab） */
     upFocusRequester: FocusRequester? = null,
     /** 第一颗 chip 的锚点：内容网格首行按 ↑ 要落到它，而不是靠几何搜索猜 */
-    firstChipFocus: FocusRequester? = null
+    firstChipFocus: FocusRequester? = null,
+    /**
+     * 逐颗 chip 的锚点，由调用方持有：返回键那一层要落回「当前选中的那颗」分类，
+     * 光有第一颗的锚点不够。不传就用内建那一份（只能落到第一颗）。
+     */
+    chipFocuses: List<FocusRequester>? = null
 ) {
     val state = rememberLazyListState()
     // 每颗 chip 一个锚点：左右移动逐颗交棒，不靠几何搜索。
     // 分类条正上方就是一级 tab 栏，几何搜索一旦在 LazyRow 里找不到邻项
     // （滚动中邻项被回收那一帧）就会把焦点甩到 tab 上去。
-    val anchors = remember(labels.size) { List(labels.size) { FocusRequester() } }
+    val builtInAnchors = remember(labels.size) { List(labels.size) { FocusRequester() } }
+    val anchors = chipFocuses ?: builtInAnchors
     LaunchedEffect(selectedIndex) {
         // 选中项被程序改掉（切来源后分类重置）时把它带进视野，否则高亮停在屏幕外
         if (selectedIndex in labels.indices) {

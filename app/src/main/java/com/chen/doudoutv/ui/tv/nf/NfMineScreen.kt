@@ -104,6 +104,9 @@ fun NfMineScreen(
         }
     )
 
+    // 返回键的层级：收藏卡片 → tab 栏（本页没有分类栏这一层；tab 栏那一层由 TvApp 根部接）
+    val jumpTo = rememberNfLayerJump()
+
     NfScaffold(
         vm = vm,
         current = NfTab.Mine,
@@ -115,7 +118,7 @@ fun NfMineScreen(
         onSettings = onSettings,
         onManageSources = onSources
     ) {
-        Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().nfBackKey { jumpTo(chrome.tabOf(NfTab.Mine)) }) {
             if (favorites.isEmpty()) {
                 NfInlineEmpty(
                     text = "还没有收藏任何内容",

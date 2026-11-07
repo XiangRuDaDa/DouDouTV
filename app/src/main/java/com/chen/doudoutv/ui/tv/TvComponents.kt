@@ -258,6 +258,10 @@ fun tvClaimFocusOnEnter(
         if (keepTop) {
             withFrameNanos { }
             runCatching { scrollToTop() }
+            // 再等一帧压第二次：1.9 的 requestFocus 自带的 bring-into-view 是排在这一帧之后
+            // 才落地的，只压一次会被它顶回去 —— 用户看到的就是「进页就摊开了下面那几行」。
+            withFrameNanos { }
+            runCatching { scrollToTop() }
         }
     }
 }

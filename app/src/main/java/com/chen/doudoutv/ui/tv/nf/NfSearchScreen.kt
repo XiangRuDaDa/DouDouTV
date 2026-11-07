@@ -194,6 +194,10 @@ fun NfSearchScreen(
         }
     )
 
+    // 返回键分层的依据：焦点此刻在不在「输入框 + 两颗按钮」这一行
+    val jumpTo = rememberNfLayerJump()
+    var fieldRowFocused by remember { mutableStateOf(false) }
+
     NfScaffold(
         vm = vm,
         current = NfTab.Search,
@@ -205,11 +209,19 @@ fun NfSearchScreen(
         onSettings = onSettings,
         onManageSources = onSources
     ) {
-        Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                // 返回键的层级：联想 / 结果 / 历史 → 输入框 → tab 栏（tab 栏那一级由 TvApp 根部接）
+                .nfBackKey {
+                    if (fieldRowFocused) jumpTo(chrome.tabOf(NfTab.Search)) else jumpTo(fieldFocus)
+                }
+        ) {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = TvPagePadding, end = TvPagePadding, bottom = 14.dp),
+                    .padding(start = TvPagePadding, end = TvPagePadding, bottom = 14.dp)
+                    .onFocusEvent { fieldRowFocused = it.hasFocus },
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 NfSearchField(

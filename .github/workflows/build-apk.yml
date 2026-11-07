@@ -44,12 +44,13 @@ jobs:
           echo "--- build-tools ---"
           ls "$SDK_ROOT/build-tools"
 
-      - name: Build debug APK
+      # 出正式包（release）：和 debug 同一颗 keystore、同一包名，覆盖安装不丢数据
+      - name: Build release APK
         run: |
           chmod +x ./gradlew
           ok=0
           for i in 1 2; do
-            if ./gradlew assembleDebug --stacktrace --no-daemon; then
+            if ./gradlew assembleRelease --stacktrace --no-daemon; then
               ok=1
               break
             fi
@@ -62,7 +63,7 @@ jobs:
           fi
 
       - name: List output
-        run: ls -lh app/build/outputs/apk/debug/
+        run: ls -lh app/build/outputs/apk/release/
 
       # 不做任何压缩，直接拿到 .apk 原始文件
       - name: Prepare raw APK
@@ -76,7 +77,7 @@ jobs:
             VERSION=$(grep -m1 'versionName' app/build.gradle.kts | sed 's/.*versionName *= *"\(.*\)".*/\1/')
             APK_NAME="${APP_NAME}-v${VERSION}-${GITHUB_REF_NAME}.apk"
           fi
-          cp app/build/outputs/apk/debug/app-debug.apk "dist/${APK_NAME}"
+          cp app/build/outputs/apk/release/app-release.apk "dist/${APK_NAME}"
           ls -lh "dist/${APK_NAME}"
           echo "APK_NAME=${APK_NAME}" >> "$GITHUB_ENV"
 

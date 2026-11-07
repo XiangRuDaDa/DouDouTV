@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -33,6 +34,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -46,6 +52,10 @@ import com.chen.doudoutv.ui.tv.nf.NfBrowseScreen
 import com.chen.doudoutv.ui.tv.nf.NfHomeScreen
 import com.chen.doudoutv.ui.tv.nf.NfMineScreen
 import com.chen.doudoutv.ui.tv.nf.NfSearchScreen
+import com.chen.doudoutv.ui.tv.nf.NfShellNav
+import com.chen.doudoutv.ui.tv.nf.NfTabSwitch
+import com.chen.doudoutv.ui.tv.nf.LocalNfShell
+import com.chen.doudoutv.ui.tv.nf.rememberNfShell
 import com.chen.doudoutv.ui.tv.nf.NfTab
 import com.chen.doudoutv.ui.theme.TvText
 import com.chen.doudoutv.ui.theme.Radius
@@ -78,13 +88,32 @@ internal sealed interface TvRoute {
 /**
  * 一级 tab 之间互切的栈规则（Netflix 版布局的导航条用）。
  *
- * 栈底永远是首页，tab 页最多一颗压在它上面：
- * 首页 → 分类 → 我的 只留 [Home, Mine]，返回键一下回首页、两下走「双返回」退出，
- * 不会像逐个 push 那样要按四次才出去。旧布局不用这条，仍然是 push/出栈。
+ * 首页是根，tab 之间有层级：首页 → 分类 → 我的 走了一趟，返回键就该一级一级退回来
+ * （我的 → 分类 → 首页），而不是不管从哪来都直接回首页 —— 直接回首页等于把
+ * 「从哪来」这一层信息丢了，用户按返回时看到的却是另一颗 tab。
+ *
+ * 规则：
+ *   · 按「首页」tab = 回根，历史清空（首页是根，不是历史里的一环）；
+ *   · 切到历史里已有的 tab = 截断到那一层（浏览器的前进/后退语义）；
+ *   · 历史最多 [TAB_HISTORY_MAX] 层：tab 只有四颗，再多也退不出去，
+ *     退到首页就该走「双返回」退出了。
+ * 旧布局不用这条，仍然是 push/出栈。
  */
+private const val TAB_HISTORY_MAX = 4
+
+/** 这条路由是不是一级 tab（详情 / 分类 / 来源 / 设置都不是） */
+private fun TvRoute.isTabRoute(): Boolean = when (this) {
+    is TvRoute.Home, is TvRoute.Browse, is TvRoute.Mine, is TvRoute.Search -> true
+    else -> false
+}
+
 private fun tabStack(current: List<TvRoute>, route: TvRoute): List<TvRoute> {
-    val root = if (current.firstOrNull() is TvRoute.Home) current.take(1) else listOf(TvRoute.Home)
-    return if (route is TvRoute.Home) root else root + route
+    if (route is TvRoute.Home) return listOf(TvRoute.Home)
+    // 历史段：栈里出现过的那些 tab 页（首页本身不算，它永远是根）
+    val history = current.filter { it.isTabRoute() && it !is TvRoute.Home }
+    val at = history.indexOf(route)
+    val next = if (at >= 0) history.take(at + 1) else history + route
+    return listOf(TvRoute.Home) + next.takeLast(TAB_HISTORY_MAX - 1)
 }
 
 /**
@@ -152,6 +181,9 @@ fun TvApp(vm: LibraryViewModel) {
     }
     // Netflix 版导航条：四颗 tab 互切走 tabStack 规则，并带上当前布局风格（切风格要重建栈底）
     val switchTab: (TvRoute) -> Unit = { route ->
+        // 从详情页切走（导航条常驻时不会发生，抽屉/其他入口会）就把「刚才播的那一集」清掉：
+        // 留着它，下次正常进同一部剧的详情页会照着老记录跳季 / 跳页，首屏大图构图就没了
+        if (navStack.last() is TvRoute.Detail) TvNavHistory.forgetEpisode()
         navForward = tabOrderOf(route) >= tabOrderOf(navStack.last())
         navStack = tabStack(navStack, route)
     }
@@ -213,9 +245,28 @@ fun TvApp(vm: LibraryViewModel) {
 
     MaterialTheme(typography = typography) {
     CompositionLocalProvider(LocalNfShell provides (if (nfLayout) nfShell else null)) {
-    Box(Modifier.fillMaxSize()) {
-        // 主题底色铺在转场之外：切页时两页之间不会露出窗口底，顶栏也有稳定的衬底
-        if (nfLayout) Box(Modifier.fillMaxSize().themeBackdrop())
+    Box(
+        Modifier
+            .fillMaxSize()
+            // 返回键层级的最高一级：焦点在常驻导航条上时按返回，退回「首页」这一 tab，
+            // 焦点留在首页那颗标签上（NfTabSwitch 让新页面不把焦点抢进轮播播放键）。
+            // 导航条画在转场之外，各页自己的按键链收不到它这一层，只能在根上接。
+            // 已经在首页时原样交回：由下面的 BackHandler 走退栈 / 双返回退出。
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown || event.key != Key.Back) {
+                    return@onPreviewKeyEvent false
+                }
+                val tab = if (nfLayout) nfTab else null
+                if (tab == null || tab == NfTab.Home || !nfShell.chrome.navFocused) {
+                    return@onPreviewKeyEvent false
+                }
+                NfTabSwitch.arm(NfTab.Home)
+                switchTab(TvRoute.Home)
+                true
+            }
+    ) {
+        // 底色由各页自己铺（NF 页在 NfScaffold 里，经典页本来就自带）：
+        // 底色画在转场之外的话，切页时新旧两页都是半透明的，叠在一起糊成一片。
         AnimatedContent(
             targetState = navStack.last(),
             // 切页不能再走淡入淡出：旧页淡出 120ms 比新页淡入 200ms 先结束，
@@ -225,7 +276,7 @@ fun TvApp(vm: LibraryViewModel) {
             // 新页盖在旧页上推进，全程满屏有内容，数学上不可能漏底；位移小到不会甩动整屏海报。
             transitionSpec = {
                 val sign = if (navForward) 1 else -1
-                val spec = tween<IntOffset>(Motion.BASE, easing = Motion.Ease)
+                val spec = tween<IntOffset>(TV_ROUTE_MILLIS, easing = Motion.Ease)
                 (slideInHorizontally(spec) { sign * it / 8 } togetherWith
                     slideOutHorizontally(spec) { -sign * it / 8 })
                     .apply { targetContentZIndex = 1f }
@@ -316,7 +367,20 @@ fun TvApp(vm: LibraryViewModel) {
                     is TvRoute.Settings -> TvSettingsScreen(vm = vm)
                 }
             }
-        }
+
+            // 常驻导航条挂在转场之外：切 tab 只让下面的内容滑动，顶栏不动、不重建、不闪。
+            // 每颗 tab 页把自己的顶栏配置交进 shell 的槽位，这里按当前路由取一份来画。
+            if (nfLayout && nfTab != null) {
+                NfShellNav(
+                    vm = vm,
+                    shell = nfShell,
+                    current = nfTab,
+                    onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                    onSettings = { push(TvRoute.Settings) },
+                    onManageSources = { push(TvRoute.Sources) },
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
+            }
 
         // 退出提示压在页面上层：不可聚焦、不拦按键，纯绘制，所以不会影响下面任何页面的焦点走位。
         AnimatedVisibility(
@@ -342,10 +406,21 @@ fun TvApp(vm: LibraryViewModel) {
             }
         }
     }
+    }
+    }
 }
 
 /** 双返回退出的确认窗口：比 Android 惯例的 2 秒稍长一点，电视上按键到屏幕回显有延迟 */
 private const val EXIT_CONFIRM_WINDOW_MS = 2500L
+
+/**
+ * 切页转场的时长。
+ *
+ * 转场期间新旧两页同时在组合里、同时绘制，两套海报网格一起跑布局。
+ * 时长越长，双绘制的帧数越多，弱 GPU 上掉帧的机会也越多 —— 用户说的「转场卡顿」
+ * 有一部分就是这段时间白丢的帧。所以比通用时长短一档：位移小、时长短，手感更干脆。
+ */
+private const val TV_ROUTE_MILLIS = 160
 
 /** 导航条的四颗 tab → 路由 */
 private fun nfRouteOf(tab: NfTab): TvRoute = when (tab) {
@@ -353,6 +428,15 @@ private fun nfRouteOf(tab: NfTab): TvRoute = when (tab) {
     NfTab.Browse -> TvRoute.Browse
     NfTab.Mine -> TvRoute.Mine
     NfTab.Search -> TvRoute.Search
+}
+
+/** 路由 → 导航条 tab；非 tab 页（详情 / 分类 / 来源 / 设置）没有 tab，常驻顶栏不画 */
+private fun nfTabOf(route: TvRoute): NfTab? = when (route) {
+    is TvRoute.Home -> NfTab.Home
+    is TvRoute.Browse -> NfTab.Browse
+    is TvRoute.Mine -> NfTab.Mine
+    is TvRoute.Search -> NfTab.Search
+    else -> null
 }
 
 /**

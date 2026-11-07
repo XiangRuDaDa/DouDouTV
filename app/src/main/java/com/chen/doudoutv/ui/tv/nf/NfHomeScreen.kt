@@ -247,7 +247,8 @@ fun NfHomeScreen(
     ) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            // 返回键的层级：轮播按钮 / 卡片 → tab 栏（tab 栏那一层的返回由 TvApp 根部接）
+            modifier = Modifier.fillMaxSize().nfBackKey { goNavBar(); true },
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
             item(key = "hero") {

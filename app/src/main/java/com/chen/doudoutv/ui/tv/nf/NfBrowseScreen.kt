@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.data.model.MediaEntity
@@ -87,7 +88,12 @@ fun NfBrowseScreen(
     val labels = if (isTvBox) onlineCats.map { it.typeName } else localCats.map { it.name }
     val selIndex = if (isTvBox) safeOnlineIdx else safeLocalIdx
     val showSubNav = labels.size > 1
-    val firstChipFocus = remember(labels.size) { FocusRequester() }
+    // 逐颗 chip 各一个锚点、由本页持有：返回键那一层要落回「当前选中的那颗」分类，
+    // 只留第一颗的锚点不够。一个实例只挂一颗 chip，不跨节点共用（共用会让 requestFocus 空转）。
+    val chipFocuses = remember(labels.size) { List(labels.size) { FocusRequester() } }
+    val firstChipFocus = chipFocuses.firstOrNull() ?: FocusRequester()
+    /** 分类栏这一层当前的落点：选中的那颗 chip（选中项本来就会被滚进视野，锚点必然挂得上） */
+    val currentChipFocus = chipFocuses.getOrElse(selIndex) { firstChipFocus }
     // 网格首行按 ↑ 的落点：有分类条交回第一颗 chip，只有一个分类时交回本页那颗「分类」tab（规范 R1）
     val gridUpFocus = if (showSubNav) firstChipFocus else chrome.tabOf(NfTab.Browse)
 
@@ -129,6 +135,10 @@ fun NfBrowseScreen(
         if (isTvBox && sitePicked) currentTypeId?.let { vm.ensureBrowsePage(it) }
     }
 
+    // 返回键的层级：卡片 → 分类栏 → tab 栏（tab 栏那一层由 TvApp 根部接，它不在这页的子树里）
+    val jumpTo = rememberNfLayerJump()
+    var subNavFocused by remember { mutableStateOf(false) }
+
     NfScaffold(
         vm = vm,
         current = NfTab.Browse,
@@ -140,7 +150,17 @@ fun NfBrowseScreen(
         onSettings = onSettings,
         onManageSources = onSources
     ) {
-        Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .nfBackKey {
+                    when {
+                        subNavFocused -> jumpTo(chrome.tabOf(NfTab.Browse))
+                        showSubNav -> jumpTo(currentChipFocus, firstChipFocus)
+                        else -> jumpTo(chrome.tabOf(NfTab.Browse))
+                    }
+                }
+        ) {
             if (showSubNav) {
                 NfSubNav(
                     labels = labels,
@@ -148,7 +168,9 @@ fun NfBrowseScreen(
                     onSelect = { i -> if (isTvBox) onlineIdx = i else localIdx = i },
                     downFocusRequester = contentAnchor,
                     upFocusRequester = chrome.tabOf(NfTab.Browse),
-                    firstChipFocus = firstChipFocus
+                    firstChipFocus = firstChipFocus,
+                    chipFocuses = chipFocuses,
+                    modifier = Modifier.onFocusEvent { subNavFocused = it.hasFocus }
                 )
             }
 
