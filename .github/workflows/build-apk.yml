@@ -50,14 +50,41 @@ jobs:
           chmod +x ./gradlew
           ok=0
           for i in 1 2; do
-            if ./gradlew assembleRelease --stacktrace --no-daemon; then
+            if ./gradlew assembleRelease --stacktrace --no-daemon > "/tmp/build-$i.log" 2>&1; then
               ok=1
+              tail -n 5 "/tmp/build-$i.log"
               break
             fi
             echo "::warning::构建失败（第 $i 次），15 秒后重试..."
             sleep 15
           done
           if [ "$ok" != "1" ]; then
+            # Actions 的日志正文要仓库管理员权限才能下载，annotation 是公开可读的。
+            # 失败时把根因原样吐成 annotation，不登录仓库也能看出挂在哪一步。
+            log=$(ls -1 /tmp/build-*.log | tail -1)
+            SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+            # 多条日志并成一条 annotation：% 先转义，换行换成 %0A，命令才不会被打断
+            ann() {
+              awk -v tag="$1" '
+                { gsub(/%/, "%25"); msg = msg (NR > 1 ? "%0A" : "") substr($0, 1, 170) }
+                END { if (length(msg)) msg = "%0A" msg; printf "::error::%s%s\n", tag, msg }
+              ' "$2"
+            }
+            head -n 2 "$log" > /tmp/d1                              # 第一行就能看出 Gradle 包是从哪取的
+            grep -E '^e: |error: |Caused by: |Could not ' "$log" | head -n 8 > /tmp/d2 || true
+            grep -A 8 'What went wrong' "$log" | head -n 10 > /tmp/d3 || true
+            tail -n 8 "$log" > /tmp/d4
+            {
+              echo "platforms: $(ls "$SDK_ROOT/platforms" 2>&1 | tr '\n' ' ')"
+              echo "build-tools: $(ls "$SDK_ROOT/build-tools" 2>&1 | tr '\n' ' ')"
+              echo "mem(MB): $(free -m | awk 'NR==2 { print $3 "/" $2 }')"
+              echo "disk: $(df -h "$PWD" | awk 'NR==2 { print $4 " free of " $2 }')"
+            } > /tmp/d5
+            ann "DIAG-1-取包" /tmp/d1
+            ann "DIAG-2-报错行" /tmp/d2
+            ann "DIAG-3-WentWrong" /tmp/d3
+            ann "DIAG-4-末尾" /tmp/d4
+            ann "DIAG-5-环境" /tmp/d5
             echo "::error::重试后构建仍然失败"
             exit 1
           fi
