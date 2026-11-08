@@ -1,7 +1,5 @@
 package com.chen.doudoutv.data.tmdb
 
-import android.util.Log
-
 // TMDB 检索用的片名清洗。
 //
 // TVBox 源站把运营信息直接拼进了片名：「嫁金钗（臻彩）」「无可替代（真彩）」
@@ -17,8 +15,6 @@ import android.util.Log
 // 年份 > 体积（1.1GB/39G）> 分辨率（4K/1080P/2160p）> 字幕配音 > 站点话术 > 评分 > 类型标签。
 // 反过来「第二季」「动画版」「特别篇」、括号里的英文原名要留着 —— 那些是片名本身的成分。
 object ScrapeTitle {
-
-    private const val TAG = "ScrapeDiag"
 
     /** 括号对：全角圆括号、方头括号，半角圆括号、方括号 */
     private val BRACKET_PAIRS = listOf('（' to '）', '【' to '】', '(' to ')', '[' to ']')
@@ -138,9 +134,6 @@ object ScrapeTitle {
         s = s.replace(Regex("""\s{2,}"""), " ").trim().trimEnd('-', '，', ',', '、', '：', ':', '·', '.', '_', '|', '丨')
 
         val clean = s.trim()
-        if (clean != raw.trim() && clean.isNotBlank()) {
-            Log.i(TAG, "片名清洗 \"${raw.trim()}\" → \"$clean\"")
-        }
         return if (clean.isBlank()) raw.trim() else clean
     }
 }

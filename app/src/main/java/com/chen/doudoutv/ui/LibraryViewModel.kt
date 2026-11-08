@@ -36,9 +36,25 @@ import kotlinx.coroutines.withContext
 
 class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
-    private companion object {
+    companion object {
         /** 首页分类行首批展示条数（够铺满电视一行），滚到尾部再追加 */
         const val CATEGORY_PREVIEW_BATCH = 10
+
+        /**
+         * 进程级唯一实例，不再随 Activity 一起换。
+         *
+         * 真机日志（同 pid、没有任何 finish() 堆栈、onCreate 的 savedInstanceState 非空）显示
+         * MainActivity 每次进出播放器都被系统整只重建一次：挂在 Activity 上的 ViewModel 于是每回换一个，
+         * 线路绑定（[activeSite] / [homeCategories]）和分类分页缓存全丢 ——
+         * 表现就是「从详情页返回分类页，每次都要重新加载」；
+         * 而且新实例的第一趟分页正好撞在线路还没绑回来的窗口里，被 [loadBrowsePage] 收口成
+         * 「这条线路没有内容」固化进缓存，整个分类页灰到底，只有换分类才恢复。
+         */
+        fun shared(app: Application): LibraryViewModel = synchronized(this) {
+            instance ?: LibraryViewModel(app).also { instance = it }
+        }
+
+        private var instance: LibraryViewModel? = null
     }
 
     private val repo = MediaRepository(app)

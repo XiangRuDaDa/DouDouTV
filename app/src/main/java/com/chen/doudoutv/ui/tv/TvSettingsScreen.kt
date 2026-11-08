@@ -105,8 +105,6 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
     // 缩略图档位单独留一份状态：Prefs 背后是 SharedPreferences，读它不会触发重组，
     // 只写不读状态的话选中圆点永远停在按下前那一格（手机端设置页同样是这么处理的）
     var posterSize by remember { mutableStateOf(Prefs.posterSize) }
-    // 同上：布局风格也要留一份可重组的状态，否则选中态停在切换前那一格
-    var tvLayout by remember { mutableStateOf(Prefs.tvLayout) }
     // 焦点移动效果同理
     var cardMotion by remember { mutableStateOf(Prefs.tvCardMotion) }
     var tmdbOn by remember { mutableStateOf(Prefs.tmdbEnabled) }
@@ -126,7 +124,6 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
 
     // 档位收进弹窗：记住开的是哪一组，以及是哪一行叫出来的（关掉后焦点要还给那一行）
     var choice by remember { mutableStateOf<Pair<SettingChoice, FocusRequester>?>(null) }
-    val layoutFocus = remember { FocusRequester() }
     val posterFocus = remember { FocusRequester() }
     val motionFocus = remember { FocusRequester() }
     val themeFocus = remember { FocusRequester() }
@@ -199,13 +196,6 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
 
                     // 档位收进弹窗：这一页只留「当前值」，OK 键才展开对应的那一组
                     TvSettingRow(
-                        title = "TV 布局风格",
-                        hint = null,
-                        focusRequester = layoutFocus,
-                        value = tvLayout.label(),
-                        onClick = { choice = SettingChoice.TvLayout to layoutFocus }
-                    )
-                    TvSettingRow(
                         title = "缩略图大小",
                         hint = null,
                         focusRequester = posterFocus,
@@ -214,7 +204,7 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                     )
                     TvSettingRow(
                         title = "移动效果",
-                        hint = "焦点卡怎么动。只有 Netflix 风格布局读这一档，经典版不跟着变",
+                        hint = "焦点卡怎么动：只有图片放大，或整卡上抬",
                         focusRequester = motionFocus,
                         value = cardMotion.label(),
                         onClick = { choice = SettingChoice.CardMotion to motionFocus }
@@ -225,6 +215,43 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                         focusRequester = themeFocus,
                         value = AppPalette.current.label,
                         onClick = { choice = SettingChoice.Theme to themeFocus }
+                    )
+                }
+
+                TvSettingsGroup("缓存") {
+                    TvSettingRow(
+                        title = "视频缓存容量上限",
+                        hint = null,
+                        focusRequester = tierFocus,
+                        value = videoTier.label,
+                        onClick = { choice = SettingChoice.VideoTier to tierFocus }
+                    )
+                    TvSettingAction(
+                        title = "视频缓存占用：${PlayerFactory.formatBytes(videoCache)}",
+                        hint = "看过的内容在本机留一份：往回拖进度、重看同一集不再重复下载；看完的自动删",
+                        actionLabel = "清空",
+                        onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    VideoCache.clearAll()
+                                    videoCache = VideoCache.usedBytes()
+                                }
+                            }
+                        }
+                    )
+                    TvSettingAction(
+                        title = "图片缓存占用：${PlayerFactory.formatBytes(imageCache)}",
+                        hint = "封面与海报的本地副本，清除后浏览时重新下载",
+                        actionLabel = "清除",
+                        onClick = {
+                            // 清缓存与读体积都是磁盘操作，都不该压在按钮点击里跑主线程
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    AppCache.clear(ctx)
+                                    imageCache = AppCache.sizeBytes(ctx)
+                                }
+                            }
+                        }
                     )
                 }
 
@@ -273,65 +300,30 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                             style = MaterialTheme.typography.labelMedium,
                             color = if (tmdbActive) AppColors.Brand else TvText.Body
                         )
-
-                        TvSettingAction(
-                            title = "刮削缓存",
-                            hint = "已记住 $cacheCount 部影片，同名同年不再联网重刮",
-                            actionLabel = if (clearing) "清除中…" else "清除缓存",
-                            onClick = {
-                                if (clearing) return@TvSettingAction
-                                clearing = true
-                                scope.launch {
-                                    vm.clearScrapeCache()
-                                    cacheCount = vm.scrapeCacheSize()
-                                    clearing = false
-                                }
-                            }
-                        )
                     }
+
+                    // 清除刮削缓存不依赖 tmdbOn 状态：关掉开关后 scraped_meta 表里的旧条目还在，
+                    // 用户照样可能想清掉；没开过 TMDB 也可能有残留条目需要清。
+                    TvSettingAction(
+                        title = "刮削缓存",
+                        hint = "已记住 $cacheCount 部影片，同名同年不再联网重刮",
+                        actionLabel = if (clearing) "清除中…" else "清除缓存",
+                        onClick = {
+                            if (clearing) return@TvSettingAction
+                            clearing = true
+                            scope.launch {
+                                vm.clearScrapeCache()
+                                cacheCount = vm.scrapeCacheSize()
+                                clearing = false
+                            }
+                        }
+                    )
                 }
 
                 if (tmdbOn) {
                     TvSettingsGroup("数据来源与声明") {
                         TmdbDisclaimer()
                     }
-                }
-
-                TvSettingsGroup("缓存") {
-                    TvSettingRow(
-                        title = "视频缓存容量上限",
-                        hint = null,
-                        focusRequester = tierFocus,
-                        value = videoTier.label,
-                        onClick = { choice = SettingChoice.VideoTier to tierFocus }
-                    )
-                    TvSettingAction(
-                        title = "视频缓存占用：${PlayerFactory.formatBytes(videoCache)}",
-                        hint = "看过的内容在本机留一份：往回拖进度、重看同一集不再重复下载；看完的自动删",
-                        actionLabel = "清空",
-                        onClick = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    VideoCache.clearAll()
-                                    videoCache = VideoCache.usedBytes()
-                                }
-                            }
-                        }
-                    )
-                    TvSettingAction(
-                        title = "图片缓存占用：${PlayerFactory.formatBytes(imageCache)}",
-                        hint = "封面与海报的本地副本，清除后浏览时重新下载",
-                        actionLabel = "清除",
-                        onClick = {
-                            // 清缓存与读体积都是磁盘操作，都不该压在按钮点击里跑主线程
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    AppCache.clear(ctx)
-                                    imageCache = AppCache.sizeBytes(ctx)
-                                }
-                            }
-                        }
-                    )
                 }
 
                 TvSettingsGroup("关于") {
@@ -370,17 +362,6 @@ fun TvSettingsScreen(vm: LibraryViewModel) {
                 }
             }
             when (which) {
-                SettingChoice.TvLayout -> TvChoiceDialog(
-                    title = "TV 布局风格",
-                    options = Prefs.TvLayout.values().toList(),
-                    label = { it.label() },
-                    selected = tvLayout,
-                    dot = null,
-                    hint = "退出本页即生效，两套布局的页面都在，只换进哪一套。",
-                    onPick = { Prefs.tvLayout = it; tvLayout = it },
-                    onDismiss = dismiss
-                )
-
                 SettingChoice.PosterSize -> TvChoiceDialog(
                     title = "缩略图大小",
                     options = Prefs.PosterSize.values().toList(),

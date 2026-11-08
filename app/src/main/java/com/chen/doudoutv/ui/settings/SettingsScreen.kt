@@ -73,17 +73,12 @@ fun Context.setForceTvMode(enabled: Boolean) {
 }
 
 /** 设置页上「点开才展开选项」的那几组，一次只开一个弹窗 */
-internal enum class SettingChoice { TvLayout, PosterSize, Theme, VideoTier, CardMotion }
+internal enum class SettingChoice { PosterSize, Theme, VideoTier, CardMotion }
 
 internal fun Prefs.PosterSize.label(): String = when (this) {
     Prefs.PosterSize.SMALL -> "小"
     Prefs.PosterSize.MEDIUM -> "中"
     Prefs.PosterSize.LARGE -> "大"
-}
-
-internal fun Prefs.TvLayout.label(): String = when (this) {
-    Prefs.TvLayout.CLASSIC -> "经典"
-    Prefs.TvLayout.NETFLIX -> "Netflix 风格"
 }
 
 /** 焦点移动效果的两档文案（只在 TV 设置页出现，只有新版布局的海报卡读这个值） */
@@ -116,7 +111,6 @@ fun SettingsScreen(vm: LibraryViewModel) {
     var choice by remember { mutableStateOf<SettingChoice?>(null) }
     // Prefs 背后是 SharedPreferences，写它不会触发重组；行上的当前值得自己留一份状态
     var posterSize by remember { mutableStateOf(Prefs.posterSize) }
-    var tvLayout by remember { mutableStateOf(Prefs.tvLayout) }
     var videoTier by remember { mutableStateOf(Prefs.videoCacheTier) }
     var videoCacheBytes by remember { mutableStateOf(0L) }
     var imageCacheBytes by remember { mutableStateOf(0L) }
@@ -266,50 +260,52 @@ fun SettingsScreen(vm: LibraryViewModel) {
                             style = MaterialTheme.typography.labelSmall,
                             color = if (tmdbActive) AppColors.Brand else AppColors.TextSecondary
                         )
+                    }
 
-                        // ---- 缓存大小 + 清除 ----
-                        // 条数来自 scraped_meta 表，要查库，不能在组合期同步读；进这一段时异步填一次
-                        var cacheCount by remember { mutableStateOf(0) }
-                        var clearing by remember { mutableStateOf(false) }
-                        LaunchedEffect(Unit) { cacheCount = vm.scrapeCacheSize() }
+                    // ---- 清除刮削缓存：始终可见 ----
+                    // 关掉 tmdbOn 后 scraped_meta 表里的旧条目还在，用户照样可能想清掉；
+                    // 没开过 TMDB 也可能有残留条目需要清。
+                    // 条数来自 scraped_meta 表，要查库，不能在组合期同步读；进这一段时异步填一次
+                    var cacheCount by remember { mutableStateOf(0) }
+                    var clearing by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) { cacheCount = vm.scrapeCacheSize() }
 
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "刮削缓存",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = AppColors.TextPrimary
+                            )
+                            Text(
+                                "已记住 $cacheCount 部影片，同名同年不再联网重刮。",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.TextTertiary
+                            )
+                        }
+                        Button(
+                            onClick = {
+                                if (clearing) return@Button
+                                clearing = true
+                                scope.launch {
+                                    vm.clearScrapeCache()
+                                    cacheCount = vm.scrapeCacheSize()
+                                    clearing = false
+                                }
+                            },
+                            shape = Radius.Md,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AppColors.SurfaceHi,
+                                contentColor = AppColors.TextPrimary
+                            )
                         ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    "刮削缓存",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = AppColors.TextPrimary
-                                )
-                                Text(
-                                    "已记住 $cacheCount 部影片，同名同年不再联网重刮。",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = AppColors.TextTertiary
-                                )
-                            }
-                            Button(
-                                onClick = {
-                                    if (clearing) return@Button
-                                    clearing = true
-                                    scope.launch {
-                                        vm.clearScrapeCache()
-                                        cacheCount = vm.scrapeCacheSize()
-                                        clearing = false
-                                    }
-                                },
-                                shape = Radius.Md,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = AppColors.SurfaceHi,
-                                    contentColor = AppColors.TextPrimary
-                                )
-                            ) {
-                                Text(
-                                    if (clearing) "清除中…" else "清除缓存",
-                                    style = MaterialTheme.typography.labelMedium
-                                )
-                            }
+                            Text(
+                                if (clearing) "清除中…" else "清除缓存",
+                                style = MaterialTheme.typography.labelMedium
+                            )
                         }
                     }
                 }
@@ -426,8 +422,8 @@ fun SettingsScreen(vm: LibraryViewModel) {
                 onDismiss = { choice = null }
             )
 
-            // 这两组只挂在 TV 设置页：手机端没有对应开关，落到这里就是空转
-            SettingChoice.TvLayout, SettingChoice.CardMotion, null -> Unit
+            // 这一组只挂在 TV 设置页：手机端没有对应开关，落到这里就是空转
+            SettingChoice.CardMotion, null -> Unit
         }
     }
 }

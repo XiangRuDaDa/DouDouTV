@@ -3,15 +3,16 @@ package com.chen.doudoutv.ui.tv
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.os.Process
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -40,7 +41,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.chen.doudoutv.core.Prefs
@@ -117,18 +117,6 @@ private fun tabStack(current: List<TvRoute>, route: TvRoute): List<TvRoute> {
 }
 
 /**
- * 一级 tab 在导航条上的左右次序，只用来判断切页动画往哪边推。
- * 非 tab 页（详情 / 分类 / 来源 / 设置）统一算「更深一层」，压在四颗 tab 右边。
- */
-private fun tabOrderOf(route: TvRoute): Int = when (route) {
-    is TvRoute.Home -> 0
-    is TvRoute.Browse -> 1
-    is TvRoute.Mine -> 2
-    is TvRoute.Search -> 3
-    else -> 4
-}
-
-/**
  * 进程级的导航栈。
  *
  * 内嵌的爬虫壳在播放期间也会顺手 finish 宿主 MainActivity，MainActivity 于是 recreate()；
@@ -165,17 +153,13 @@ fun TvApp(vm: LibraryViewModel) {
     LaunchedEffect(navStack) { TvNavHistory.stack = navStack }
     // 搜索页状态放在导航层：进详情再返回时结果不丢，真正退出搜索页才清空
     val searchState = remember { TvSearchUiState() }
-    // 切页动画的推进方向：入栈 / 往右的 tab 向前推，出栈 / 往左的 tab 往回拉
-    var navForward by remember { mutableStateOf(true) }
     val push: (TvRoute) -> Unit = {
-        navForward = true
         navStack = navStack + it
     }
     val pop: () -> Unit = {
         if (navStack.size > 1) {
             if (navStack.last() is TvRoute.Search) searchState.clear()
             if (navStack.last() is TvRoute.Detail) TvNavHistory.forgetEpisode()
-            navForward = false
             navStack = navStack.dropLast(1)
         }
     }
@@ -184,7 +168,6 @@ fun TvApp(vm: LibraryViewModel) {
         // 从详情页切走（导航条常驻时不会发生，抽屉/其他入口会）就把「刚才播的那一集」清掉：
         // 留着它，下次正常进同一部剧的详情页会照着老记录跳季 / 跳页，首屏大图构图就没了
         if (navStack.last() is TvRoute.Detail) TvNavHistory.forgetEpisode()
-        navForward = tabOrderOf(route) >= tabOrderOf(navStack.last())
         navStack = tabStack(navStack, route)
     }
 
@@ -198,7 +181,10 @@ fun TvApp(vm: LibraryViewModel) {
         val now = SystemClock.elapsedRealtime()
         if (exitHintAt >= 0 && now - exitHintAt <= EXIT_CONFIRM_WINDOW_MS) {
             exitHintAt = -1L
-            context.findActivity()?.finish()
+            // 真退出：只 finish() 在电视盒子上常常是「回到桌面、进程还在」，爬虫壳和代理线程
+            // 仍挂在后台；这里结束整个任务并杀掉进程，下一次启动是干净的冷启动
+            context.findActivity()?.finishAffinity()
+            Process.killProcess(Process.myPid())
         } else {
             exitHintAt = now
         }
@@ -265,21 +251,11 @@ fun TvApp(vm: LibraryViewModel) {
                 true
             }
     ) {
-        // 底色由各页自己铺（NF 页在 NfScaffold 里，经典页本来就自带）：
-        // 底色画在转场之外的话，切页时新旧两页都是半透明的，叠在一起糊成一片。
+        // 切页直切无过渡（选型台组合 D 拍板）：任何时长/淡化在电视上都嫌拖，0ms 换内容最干净。
         AnimatedContent(
             targetState = navStack.last(),
-            // 切页不能再走淡入淡出：旧页淡出 120ms 比新页淡入 200ms 先结束，
-            // 中间那 80ms 屏幕上只剩一张半透明的新页压在近黑底上，亮度骤降一下 —— 用户看到的「闪」就是这个。
-            // 而且任何交叉淡化在中点都会漏底：in*t + out*(1-t)² + B*t(1-t)，两页都不满 alpha 时底色透上来约 25%。
-            // 改成等时长的纯位移（alpha 恒为 1），两页各自不透明、行进距离只有 1/8 屏宽，
-            // 新页盖在旧页上推进，全程满屏有内容，数学上不可能漏底；位移小到不会甩动整屏海报。
             transitionSpec = {
-                val sign = if (navForward) 1 else -1
-                val spec = tween<IntOffset>(TV_ROUTE_MILLIS, easing = Motion.Ease)
-                (slideInHorizontally(spec) { sign * it / 8 } togetherWith
-                    slideOutHorizontally(spec) { -sign * it / 8 })
-                    .apply { targetContentZIndex = 1f }
+                (EnterTransition.None togetherWith ExitTransition.None) using null
             },
             label = "tv_route",
             modifier = Modifier.fillMaxSize().clipToBounds()
@@ -412,15 +388,6 @@ fun TvApp(vm: LibraryViewModel) {
 
 /** 双返回退出的确认窗口：比 Android 惯例的 2 秒稍长一点，电视上按键到屏幕回显有延迟 */
 private const val EXIT_CONFIRM_WINDOW_MS = 2500L
-
-/**
- * 切页转场的时长。
- *
- * 转场期间新旧两页同时在组合里、同时绘制，两套海报网格一起跑布局。
- * 时长越长，双绘制的帧数越多，弱 GPU 上掉帧的机会也越多 —— 用户说的「转场卡顿」
- * 有一部分就是这段时间白丢的帧。所以比通用时长短一档：位移小、时长短，手感更干脆。
- */
-private const val TV_ROUTE_MILLIS = 160
 
 /** 导航条的四颗 tab → 路由 */
 private fun nfRouteOf(tab: NfTab): TvRoute = when (tab) {

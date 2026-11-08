@@ -448,10 +448,8 @@ fun TvPlayButton(
 }
 
 /**
- * 共用于两套布局的按钮圆角档：NF 版一律圆角矩形，经典版保持原来的胶囊 / 圆形。
- *
- * 详情页、来源页、设置页这些元件两套布局共用同一份，形状靠当前布局风格分流，
- * 不复制第二份元件 —— 改 NF 的观感时经典版一行不动。
+ * 按钮圆角档：NF 版一律圆角矩形。经典版分支只作代码保留，入口已下线、恒走 NF。
+ * 详情页、来源页、设置页这些元件两套布局共用同一份，不复制第二份元件。
  */
 @Composable
 fun tvButtonShape(): Shape =
@@ -692,17 +690,31 @@ private val TvGenreSplit = Regex("[,，、/\\s]+")
  *
  * 详情页两套布局都走这里，和 NF 首页轮播同为一档 80dp：原来详情页只让 Logo 长到 48dp，
  * 贴在元信息上面小得像水印，同一部片在首页和详情页是两种量级的标题。
- * 图挂不上就回落 44sp 文字标题，不留一格空白。
+ * 图挂不上就回落文字标题，不留一格空白。
  */
 @Composable
 fun TvMediaTitle(
     title: String,
     logoUrl: String,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * 紧凑档：首页轮播用。轮播是一整块画面，片名再按详情页那档 44sp 压上去会盖掉半个海报，
+     * 这里用 displayMedium（34sp）、logo 64dp，字号与画面比例更配。
+     * 详情页仍走默认档，两处的槽宽都由内容决定（不再是固定宽度）。
+     */
+    compact: Boolean = false
 ) {
     var logoFailed by remember(logoUrl) { mutableStateOf(false) }
+    val titleStyle = if (compact) {
+        // compact 档文字再收一档：displayMedium (34sp) 在 80% 屏高的 Hero 上中文片名容易换行，
+        // headlineLarge 视觉密度更配；logo 保持 64dp 不动
+        MaterialTheme.typography.headlineLarge
+    } else {
+        MaterialTheme.typography.displayLarge
+    }
+    val logoHeight = if (compact) 64.dp else 80.dp
     Box(
-        modifier.widthIn(max = 520.dp).heightIn(min = 80.dp),
+        modifier.widthIn(max = if (compact) 360.dp else 520.dp).heightIn(min = logoHeight),
         contentAlignment = Alignment.CenterStart
     ) {
         if (logoUrl.isNotBlank() && !logoFailed) {
@@ -712,12 +724,12 @@ fun TvMediaTitle(
                 contentScale = ContentScale.Fit,
                 alignment = Alignment.CenterStart,
                 onError = { logoFailed = true },
-                modifier = Modifier.height(80.dp).widthIn(max = 420.dp)
+                modifier = Modifier.height(logoHeight).widthIn(max = if (compact) 360.dp else 420.dp)
             )
         } else {
             Text(
                 text = title,
-                style = MaterialTheme.typography.displayLarge,
+                style = titleStyle,
                 color = TvText.Title,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis

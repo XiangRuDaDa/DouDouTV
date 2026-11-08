@@ -746,7 +746,9 @@ internal fun TvHeroSeamFade(ambient: Color, modifier: Modifier = Modifier) {
     Box(
         modifier
             .fillMaxWidth()
-            .height(10.dp)
+            // 只有一条很薄的落色带就够了：Hero 底部自己有纵向渐隐叠上去，
+            // 再给 10dp 条带显得 Hero 和下面的「继续观看」之间空一大片
+            .height(4.dp)
             .drawBehind {
                 val seam = heroLandingColor(blended())
                 drawRect(
@@ -784,7 +786,7 @@ internal fun TvHeroSeamFade(ambient: Color, modifier: Modifier = Modifier) {
 @Composable
 internal fun tvHeroHeight(): Dp {
     val screenH = LocalConfiguration.current.screenHeightDp.dp
-    return (screenH * 0.70f).coerceIn(360.dp, 620.dp)
+    return (screenH * 0.80f).coerceIn(432.dp, 864.dp)
 }
 
 /** 主视觉：满宽横版图，左下压标题与操作，底部渐隐接入页面底色；轮播指示器在右下。
@@ -818,9 +820,15 @@ internal fun TvHero(
      * 各自独立取样的话换页那一瞬接缝会错开，就又看得见一条线。
      */
     ambient: Color,
+    /**
+     * 底图 URL 覆盖：刮削横板海报优先。
+     * Emby 行里的 backdropUrl 是源站直接给的（可能只是一张小竖板），
+     * TMDB 刮削来的真·横板存在 scraped_meta 表，展示层要用那一份。
+     */
+    backdropUrlOverride: String? = null,
     titleContent: (@Composable (MediaEntity) -> Unit)? = null
 ) {
-    val imageUrl = item.backdropUrl.ifBlank { item.posterUrl }
+    val imageUrl = (backdropUrlOverride?.takeIf { it.isNotBlank() } ?: item.backdropUrl).ifBlank { item.posterUrl }
 
     // 背景换页：旧图留在底层不动，新图在上层淡入盖过去。
     // 没有直接用 Crossfade —— 它会把两张图同时压到半透明，中间那一瞬露出黑色页面底色，

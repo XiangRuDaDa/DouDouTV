@@ -81,6 +81,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.model.MediaEntity
+import com.chen.doudoutv.data.model.SourceEntity
+import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
 import com.chen.doudoutv.ui.PrecomposeWindow
@@ -101,7 +103,7 @@ import com.chen.doudoutv.ui.theme.Radius
 import com.chen.doudoutv.ui.theme.TvText
 
 /**
- * Netflix 基准布局（TV 第二套界面）的共用件，与 `ui/tv` 经典版完全并行，由 `Prefs.tvLayoutStyle` 选用。
+ * Netflix 基准布局（TV 端唯一在用的一套）的共用件，经典版 `ui/tv` 的页面仍在但入口已下线。
  *
  * 焦点机制直接复用经典版那套纯机制 helper（tvMoveFocus / tvClaimFocusOnEnter），不写第二份。
  * 相对旧件新增两件事：
@@ -385,6 +387,12 @@ private fun NfNavTab(
 }
 
 /**
+ * 导航条右簇的统一选框高度：来源胶囊与刷新/设置两颗图标按钮都锁在这个高度上，
+ * 焦点白框才不会一颗高一颗矮（来源胶囊原本是 6dp 内边距撑出来的，图标按钮是 9dp）。
+ */
+private val NfNavControlHeight = 34.dp
+
+/**
  * 作用域按钮：`来源 › 线路`，点它开双列抽屉。圆角矩形 + 细描边（Radius.Md），
  * 末尾不再挂下拉箭头 —— 整颗按钮本身就是入口，箭头只是重复一遍「这里能点」。
  * Emby 来源没有线路概念，只显示左半段。
@@ -406,6 +414,7 @@ private fun NfScopeChip(
     Row(
         modifier
             .zIndex(if (focused) 1f else 0f)
+            .height(NfNavControlHeight)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
@@ -415,7 +424,7 @@ private fun NfScopeChip(
                 if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
                 else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md)
             )
-            .padding(horizontal = 14.dp, vertical = 6.dp),
+            .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
@@ -470,13 +479,14 @@ private fun NfNavIconButton(
     Box(
         modifier
             .zIndex(if (focused) 1f else 0f)
+            .size(NfNavControlHeight)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(Radius.Md)
             .background(bg.value)
             .then(if (focused) Modifier.border(1.5.dp, Color.White, Radius.Md) else Modifier)
-            .padding(9.dp),
+            .padding(6.dp),
         contentAlignment = Alignment.Center
     ) {
         if (loading) {
@@ -625,7 +635,7 @@ fun NfRowTitle(
  * 焦点态看 [Prefs.tvCardMotion] 两档：
  * · 放大（默认）—— 只有图片那一层涨 5%，片名的位置和字号一动不动；
  * · 上抬 —— 整卡不涨，往上走 [PosterLift]。
- * 焦点不描白环，落点完全由这一档位移表达。入场时淡入并自下 [EnterRise] 归位。
+ * 两档都叠一圈 1.5dp 细白描边标落点。入场时淡入并自下 [EnterRise] 归位。
  * 放在 LazyRow / LazyVerticalGrid 里时，行的纵向 contentPadding 至少给 [NfRowVerticalPadding]，
  * 否则抬起/涨出来的那几像素会被 Lazy 容器的边界裁掉。
  */
@@ -669,7 +679,6 @@ fun NfPosterCard(
     ) {
         // 圆角和放大只作用在图片这一层。片名要是跟着一起放大，同一行的字号就齐不了，
         // 涨出来的高度还会往下压到下一行的片名上 —— 图外字幕这版排版要的就是文字层稳定。
-        // 焦点不再描白环：落点由「放大 / 上抬」这一档位移表达，海报边缘保持干净。
         Box(
             Modifier
                 .fillMaxWidth()
@@ -683,6 +692,7 @@ fun NfPosterCard(
                     }
                 )
                 .clip(cardShape)
+                .then(if (focused) Modifier.border(1.5.dp, Color.White, cardShape) else Modifier)
         ) {
             // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组外壳（层级 / 位移都跟着变），
             // 参数没变时内容体整块被跳过，图片不跟着重排。一屏几十张卡，这块不切开就白吃一遍布局。
@@ -810,8 +820,7 @@ fun NfContinueCard(
                 clip = true
             }
             .background(AppColors.SurfaceHi)
-            // 焦点不描白环（落点由放大 + 上抬表达），只留常态那圈细边勾出卡片轮廓
-            .border(1.dp, Edge.Hairline, cardShape)
+            .border(if (focused) 1.5.dp else 1.dp, if (focused) Color.White else Edge.Hairline, cardShape)
     ) {
         PosterArt(model = item.backdropUrl.ifBlank { item.posterUrl }, contentDescription = item.title) {
             PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
@@ -882,10 +891,25 @@ fun NfSubNav(
     val builtInAnchors = remember(labels.size) { List(labels.size) { FocusRequester() } }
     val anchors = chipFocuses ?: builtInAnchors
     LaunchedEffect(selectedIndex) {
-        // 选中项被程序改掉（切来源后分类重置）时把它带进视野，否则高亮停在屏幕外
-        if (selectedIndex in labels.indices) {
-            state.animateScrollToItem((selectedIndex / 2).coerceAtLeast(0))
+        // 选中项被程序改掉（切来源后分类重置）或被点选时要把它带进视野，否则高亮停在屏幕外。
+        // 只滚到「可见」不够：选中的那颗贴在最左/最右边缘时，左右邻项还没组合，
+        // 按一下左右交棒就落空；所以要么不滚（已经在视野中间），要么留出邻项的位置。
+        if (selectedIndex !in labels.indices) return@LaunchedEffect
+        val visible = state.layoutInfo.visibleItemsInfo
+        if (visible.isEmpty()) {
+            // 首帧还没布局：先把它摆到偏左两格的位置，左右都留出邻项
+            state.scrollToItem((selectedIndex - 2).coerceAtLeast(0))
+            return@LaunchedEffect
         }
+        val first = visible.first().index
+        val last = visible.last().index
+        val count = last - first + 1
+        val target = when {
+            selectedIndex <= first -> (selectedIndex - 1).coerceAtLeast(0)
+            selectedIndex >= last -> (selectedIndex - count + 2).coerceAtLeast(0)
+            else -> null
+        }
+        if (target != null) state.animateScrollToItem(target)
     }
     LazyRow(
         modifier
@@ -1064,3 +1088,56 @@ fun NfPosterGrid(
         }
     }
 }
+
+/**
+ * 来源分组：一个来源一组。
+ *
+ * TVBox 一份配置（含它下面所有站点、所有线路）是一组 —— 首页「继续观看」要的就是
+ * 「这个 TVBox 来源追过的剧」整份摆在一行，不按线路再拆；Emby 一台服务器一组，
+ * 同名也不会被并到一起。
+ *
+ * 分组键用来源 id：落库的条目 sourceId 就是它；远程搜索结果不落库、sourceId 是 0，
+ * 只能从 remoteId（`remote:来源id:站点:vodId`）里取，取不到才退回来源名，
+ * 免得一批脏数据全挤进「来源0」。
+ */
+internal class NfSourceGroup(
+    val key: String,
+    val label: String,
+    /** 这组是不是 TVBox 来源：只有它才在下面按线路（playSource）再铺一层 */
+    val isTvBox: Boolean,
+    val items: List<MediaEntity>,
+)
+
+internal fun nfGroupBySource(items: List<MediaEntity>, sources: List<SourceEntity>): List<NfSourceGroup> {
+    val kindsById = sources.associate { it.id to it.kind }
+    val grouped = LinkedHashMap<String, Pair<String, MutableList<MediaEntity>>>()
+    // 分组键 → 是不是 TVBox 来源
+    val kinds = LinkedHashMap<String, Boolean>()
+    for (item in items) {
+        val sourceId = item.nfSourceGroupId
+        val key = if (sourceId != 0L) "src:$sourceId" else "name:${item.sourceName.ifBlank { "未知来源" }}"
+        val isTvBox = when (val kind = if (sourceId != 0L) kindsById[sourceId] else null) {
+            // 来源被删或禁用后 kindsById 查不到，只能靠 remoteId 的前缀认
+            null -> item.remoteId.startsWith("tvbox:") || item.remoteId.startsWith("remote:")
+            else -> kind == SourceKind.TVBOX
+        }
+        kinds[key] = kinds[key] ?: isTvBox
+        grouped.getOrPut(key) { item.sourceName.ifBlank { "未知来源" } to mutableListOf() }.second.add(item)
+    }
+    // 来源名可以重名（挂两台同名 Emby），重名时补来源 id，否则表头看不出这是两组
+    val labelCounts = grouped.values.groupingBy { it.first }.eachCount()
+    return grouped.entries.map { (key, labelAndItems) ->
+        val duplicated = (labelCounts[labelAndItems.first] ?: 1) > 1 && key.startsWith("src:")
+        val label = if (duplicated) "${labelAndItems.first} #${key.substringAfter(":")}" else labelAndItems.first
+        NfSourceGroup(key, label, kinds[key] == true, labelAndItems.second.toList())
+    }
+}
+
+/** 条目所属来源 id：见 [nfGroupBySource] */
+private val MediaEntity.nfSourceGroupId: Long
+    get() {
+        if (sourceId != 0L) return sourceId
+        val parts = remoteId.split(":")
+        if (parts.size >= 2 && parts[0] == "remote") return parts[1].toLongOrNull() ?: 0L
+        return 0L
+    }

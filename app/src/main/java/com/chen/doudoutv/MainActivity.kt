@@ -52,7 +52,9 @@ class MainActivity : ComponentActivity() {
             // 字号表也依赖它：电视端要换整套放大过的 typography，所以判定必须在主题外层。
             val isTv = remember { isTelevision() || forceTvMode() }
             DouDouTvTheme(isTv = isTv) {
-                val vm: LibraryViewModel = viewModel()
+                // 进程级唯一实例：本 Activity 会被系统反复重建（进出播放器各一次），
+                // 用 viewModel() 挂在 Activity 上时每重建换一个，线路绑定与分页缓存全丢，详见 LibraryViewModel.shared
+                val vm = remember { LibraryViewModel.shared(application) }
 
                 if (isTv) {
                     TvApp(vm = vm)

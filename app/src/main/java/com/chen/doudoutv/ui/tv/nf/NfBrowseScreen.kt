@@ -94,8 +94,8 @@ fun NfBrowseScreen(
     val firstChipFocus = chipFocuses.firstOrNull() ?: FocusRequester()
     /** 分类栏这一层当前的落点：选中的那颗 chip（选中项本来就会被滚进视野，锚点必然挂得上） */
     val currentChipFocus = chipFocuses.getOrElse(selIndex) { firstChipFocus }
-    // 网格首行按 ↑ 的落点：有分类条交回第一颗 chip，只有一个分类时交回本页那颗「分类」tab（规范 R1）
-    val gridUpFocus = if (showSubNav) firstChipFocus else chrome.tabOf(NfTab.Browse)
+    // 网格首行按 ↑ 的落点：有分类条交回「当前选中」那颗 chip，只有一个分类时交回本页那颗「分类」tab（规范 R1）
+    val gridUpFocus = if (showSubNav) currentChipFocus else chrome.tabOf(NfTab.Browse)
 
     // 记忆的是「修正后」的下标：分类集合变短时被 clamp 过，下次进来不该再跳一格
     LaunchedEffect(scopeKey, selIndex) {
@@ -120,14 +120,27 @@ fun NfBrowseScreen(
     /** 这一屏真正能接住 ↓ 的元件：有内容是网格首卡，没内容是空态那颗按钮 */
     val contentAnchor = if (contentReady) gridFirstFocus else emptyFocus
 
-    // 从别的 tab 点「分类」切过来：焦点留在标签上，不交给网格/分类条（NfTabSwitch）
-    val viaTab = remember { NfTabSwitch.consume(NfTab.Browse) }
-    // 首屏数据到位后把焦点交给卡片，遥控器立刻可用；离开时站在哪张卡就还给哪张（规范 R6/R7）
+    // 从别的 tab 点「分类」切过来：焦点留在标签上，不交给网格/分类条（NfTabSwitch）。
+    // 这个标记只在「刚切过来」那一次有效：入口抢焦是多次触发的（contentReady / scopeKey 都会换 tick），
+    // 一直认 viaTab 的话，用户已经下到分类条、点 OK 换了分类，数据一到位抢焦又把焦点送回 tab 栏 ——
+    // 这就是「选完分类左右移动直接回到 tab 栏」。离开导航条后改用当前焦点判断。
+    var entryFocusOnNav by remember { mutableStateOf(NfTabSwitch.consume(NfTab.Browse)) }
+    LaunchedEffect(chrome.navFocused) {
+        if (!chrome.navFocused) entryFocusOnNav = false
+    }
+    // 分类条这一层当前是否持焦：点 chip 会换分类、内容跟着重载，这一页的「入口抢焦」必须能分辨这件事
+    var subNavFocused by remember { mutableStateOf(false) }
+    // 首屏数据到位后把焦点交给卡片，遥控器立刻可用；离开时站在哪张卡就还给哪张（规范 R6/R7）。
+    // 焦点还在分类条上时不抢内容：换分类那一趟 contentReady 会翻转两次，抢焦会把焦点从
+    // 刚选中的 chip 拽走（随后左右移动被读成「回到 tab 栏」）。
     tvClaimFocusOnEnter(
         tick = listOf(contentReady, scopeKey),
         anchorsProvider = {
-            if (viaTab) listOf(chrome.tabOf(NfTab.Browse))
-            else listOfNotNull(stand.requester, contentAnchor)
+            when {
+                entryFocusOnNav -> listOf(chrome.tabOf(NfTab.Browse))
+                subNavFocused -> listOf(currentChipFocus)
+                else -> listOfNotNull(stand.requester, contentAnchor)
+            }
         }
     )
 
@@ -137,15 +150,14 @@ fun NfBrowseScreen(
 
     // 返回键的层级：卡片 → 分类栏 → tab 栏（tab 栏那一层由 TvApp 根部接，它不在这页的子树里）
     val jumpTo = rememberNfLayerJump()
-    var subNavFocused by remember { mutableStateOf(false) }
 
     NfScaffold(
         vm = vm,
         current = NfTab.Browse,
         chrome = chrome,
-        // 每一向都显式给落点（规范 R1）：有分类条 → 第一颗 chip，没有 → 这一屏的接焦元件
+        // 每一向都显式给落点（规范 R1）：有分类条 → 当前选中的那颗 chip，没有 → 这一屏的接焦元件
         navInFlow = true,
-        belowFocusRequester = if (showSubNav) firstChipFocus else contentAnchor,
+        belowFocusRequester = if (showSubNav) currentChipFocus else contentAnchor,
         onTab = onTab,
         onSettings = onSettings,
         onManageSources = onSources

@@ -41,22 +41,19 @@ object Prefs {
         }
 
     /**
-     * 电视端布局风格。
+     * 电视端布局风格：已收敛成 NF 一套，经典版入口下线。
      *
-     * [TvLayout.CLASSIC] 走 ui/tv 里那套（首页顶栏 + 分类行全部铺开），
-     * [TvLayout.NETFLIX] 走 ui/tv/nf 里另拉的一套（常驻导航条 + 首页只留轮播和继续观看）。
-     * 两套页面并存，切换只改这一个值，不动任何一边的代码。
+     * [TvLayout.CLASSIC]（ui/tv）与 [TvLayout.NETFLIX]（ui/tv/nf）两套页面都还在，
+     * 存储键和枚举也原样保留 —— 老用户存的 CLASSIC 不删不改，只是读出来一律按 NF 走，
+     * 于是圆角档、导航条、首页形态不会再出现「存的是经典、界面是 NF」的混装。
      */
     var tvLayout: TvLayout
-        get() {
-            val name = sp.getString(KEY_TV_LAYOUT, TvLayout.NETFLIX.name)
-            return runCatching { TvLayout.valueOf(name.orEmpty()) }.getOrDefault(TvLayout.NETFLIX)
-        }
+        get() = TvLayout.NETFLIX
         set(value) {
             sp.edit().putString(KEY_TV_LAYOUT, value.name).apply()
         }
 
-    /** TV 端布局风格的两个取值；默认 NETFLIX，让新那套在真机上先被看到 */
+    /** 布局风格的历史取值；界面入口已下线，只留作存储兼容 */
     enum class TvLayout { CLASSIC, NETFLIX }
 
     /**

@@ -202,6 +202,8 @@ class MediaRepository(private val context: Context) {
                     genres = vod.typeName,
                     overview = vod.content,
                     sourceName = source.name,
+                    // 线路（站点）名：搜索页在来源下面按线路再分一层，全靠它
+                    playSource = vod.siteName.ifBlank { vod.siteKey },
                     // 远程结果也计算拼音（方便再搜）
                     pinyinInitials = vod.name.toPinyinInitials()
                 )
@@ -287,6 +289,8 @@ class MediaRepository(private val context: Context) {
                 actors = vod.actors,
                 directors = vod.directors,
                 remarks = vod.remarks,
+                // 线路（站点）名：搜索页在来源下面按线路再分一层，全靠它
+                playSource = vod.siteName.ifBlank { vod.siteKey },
                 // 远程结果也计算拼音（方便再搜）
                 pinyinInitials = vod.name.toPinyinInitials()
             )
@@ -1064,6 +1068,7 @@ class MediaRepository(private val context: Context) {
             genres = vod.typeName,
             actors = vod.actors,
             directors = vod.directors,
+            playSource = vod.siteName.ifBlank { vod.siteKey },
             remarks = vod.remarks
         )
     }
@@ -1113,6 +1118,9 @@ class MediaRepository(private val context: Context) {
             genres = vod.typeName,
             actors = vod.actors,
             directors = vod.directors,
+            // 壳行（MOVIE/SERIES）的 playSource 存的是「线路（站点）名」，搜索页按线路分组要用它；
+            // 分集行（EPISODE）仍存云盘/播放源名，详情页切线路的三处查询都带 kind='EPISODE'，两者互不影响。
+            playSource = vod.siteName.ifBlank { vod.siteKey },
             remarks = vod.remarks
         )
     }

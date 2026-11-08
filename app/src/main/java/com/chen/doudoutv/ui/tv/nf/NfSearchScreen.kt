@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -38,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,20 +51,25 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.model.MediaEntity
+import com.chen.doudoutv.data.model.SourceEntity
+import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
 import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
-import com.chen.doudoutv.ui.gridState
+import com.chen.doudoutv.ui.listState
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.TvSearchUiState
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
@@ -160,15 +167,34 @@ fun NfSearchScreen(
     // 历史只在「还没提交、也还没打字」的空态铺开：一开始打字就让位给联想
     val showHistory =
         state.submittedKeyword.isEmpty() && state.keyword.isBlank() && history.isNotEmpty()
-    val grouped = remember(state.results) {
-        state.results.groupBy { it.sourceName.ifBlank { "未知来源" } }
-    }
+    // 双层分组：先按来源（一个来源一组：TVBox 一整份配置、Emby 一台服务器），
+    // 组内再按线路（站点）。Emby 没有线路概念，那一组就只有来源这一层。
+    val sources by vm.enabledSources.collectAsStateWithLifecycle()
+    val sourceGroups = remember(state.results, sources) { nfSearchGroups(state.results, sources) }
+    val sourceCount = sourceGroups.size
+    // 真的按线路铺开成多组的来源数
+    val routeGroupCount = sourceGroups.count { it.isTvBox && it.routes.size > 1 }
 
-    // 输入框 ↓ / 导航条 ↓ 的落点：联想列表 > 结果首卡 > 历史首行 > 输入框自身
+    // 每个来源的折叠状态 —— 默认第一个来源展开，其余折叠
+    val expandedSources = remember(sourceGroups.size) {
+        mutableStateMapOf<String, Boolean>().apply {
+            sourceGroups.firstOrNull()?.let { this[it.key] = true }
+        }
+    }
+    // 线路（站点）默认全部折叠：状态表初始为空即「没展开过」，OK 一次才铺那一行海报
+    val expandedRoutes = remember(sourceGroups.size) { mutableStateMapOf<String, Boolean>() }
+    // 全折叠时结果区没有任何卡片可聚焦，↑↓ 与进页抢焦改落到第一颗来源表头（规范 R6 不留焦点死区）
+    val firstHeaderFocus = remember(sourceGroups.firstOrNull()?.key) { FocusRequester() }
+    val resultsCardsVisible = sourceGroups.any { group ->
+        (expandedSources[group.key] ?: false) &&
+            group.routes.any { (routeName, _) -> routeName.isBlank() || (expandedRoutes["${group.key}/$routeName"] ?: false) }
+    }
+    val resultsAnchor = if (resultsCardsVisible) gridFirstFocus else firstHeaderFocus
+    // 输入框 ↓ / 导航条 ↓ 的落点：联想列表 > 结果首卡（全折叠时是第一颗来源表头）> 历史首行 > 输入框自身
     // （空态且没有历史时页面只有输入框可聚焦，不能留焦点死区 —— 规范 R6）。
     val belowField = when {
         showSuggestions -> sugFirstFocus
-        state.results.isNotEmpty() -> gridFirstFocus
+        state.results.isNotEmpty() -> resultsAnchor
         showHistory -> histFirstFocus
         else -> fieldFocus
     }
@@ -298,14 +324,18 @@ fun NfSearchScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "搜索结果 ${state.results.size} 条 · ${grouped.size} 个来源" +
+                                "搜索结果 ${state.results.size} 条 · ${sourceCount} 个来源" +
+                                    (if (routeGroupCount > 0) " · $routeGroupCount 个来源按线路分组" else "") +
                                     if (state.remoteSearching) "，远程站点搜索中…" else "",
                                 color = TvText.Meta,
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         }
-                        NfSearchGrid(
-                            groups = grouped,
+                        NfSearchGroupedGrid(
+                            groups = sourceGroups,
+                            expandedSources = expandedSources,
+                            expandedRoutes = expandedRoutes,
+                            firstHeaderFocus = firstHeaderFocus,
                             stand = stand,
                             firstFocus = gridFirstFocus,
                             upFocusRequester = fieldFocus,
@@ -554,85 +584,201 @@ private fun NfSearchBusy(text: String, hint: String? = null) {
 }
 
 /**
- * 结果网格：按来源分组，组标题横跨整行，组内是竖版海报。
- * `groupBy` 保留插入顺序，所以本地库的组在前、远程陆续命中的组往后追加（与旧页一致）。
+ * 搜索结果的分组：来源 → 线路（站点）。
+ *
+ * Emby 没有线路概念，[routes] 只有一项且线路名为空 —— 界面上就只有来源那一层。
+ */
+private class NfSearchGroup(
+    val key: String,
+    val label: String,
+    val isTvBox: Boolean,
+    val routes: List<Pair<String, List<MediaEntity>>>,
+)
+
+private fun nfSearchGroups(results: List<MediaEntity>, sources: List<SourceEntity>): List<NfSearchGroup> =
+    nfGroupBySource(results, sources).map { group ->
+        if (!group.isTvBox) return@map NfSearchGroup(group.key, group.label, false, listOf("" to group.items))
+        // 线路名来自入库/远程命中时带的站点名；老库里还没记站点名的条目汇到最后一组，
+        // 不然会给它们铺出一堆空标题行
+        val byRoute = group.items.groupBy { it.playSource }
+        val named = byRoute.filterKeys { it.isNotBlank() }
+        val unlabeled = byRoute[""] ?: emptyList()
+        val routes = named.toList() + if (unlabeled.isEmpty()) emptyList() else listOf("未标注线路" to unlabeled)
+        NfSearchGroup(group.key, group.label, true, routes)
+    }
+
+/**
+ * 搜索结果分组：一个来源一组（TVBox 一整份配置、Emby 一台服务器），组内按线路（站点）铺开。
+ * 外层 [LazyColumn]，每个来源组一个 section header（可聚焦，OK 键切换展开/折叠）。
+ * 展开后：TVBox 每条线路一个小标题（同样可聚焦切换），OK 才铺那一行竖版海报；Emby 没有线路这一层，来源展开即出海报。
+ * 默认第一个来源展开、其下线路全部折叠 —— 一次搜索几十个站点全铺开，滚到哪儿都找不到片名。
  */
 @Composable
-private fun NfSearchGrid(
-    groups: Map<String, List<MediaEntity>>,
+private fun NfSearchGroupedGrid(
+    groups: List<NfSearchGroup>,
+    expandedSources: MutableMap<String, Boolean>,
+    expandedRoutes: MutableMap<String, Boolean>,
+    firstHeaderFocus: FocusRequester,
     stand: StandTarget,
     firstFocus: FocusRequester,
     upFocusRequester: FocusRequester,
     onDetail: (Long) -> Unit
 ) {
-    val gridState = ReturnSpot.gridState("$NfSearchKey/results", precompose = PrecomposeWindow.Tv)
-    val columns = tvPosterColumns()
-    val total = groups.values.sumOf { it.size }
-    val stagger = nfFirstFillStagger(total, NfSearchKey)
-    val firstId = groups.values.firstOrNull()?.firstOrNull()?.id
-    val firstGroup = groups.keys.firstOrNull()
+    val listState = ReturnSpot.listState("$NfSearchKey/results", precompose = PrecomposeWindow.Tv)
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
+    // 竖版海报：一屏约 6-7 列，按 5:7 比例算卡片宽
+    val posterWidth: Dp = (screenWidth / 7f).coerceAtLeast(110.dp).coerceAtMost(160.dp)
+    val firstId = groups.firstOrNull()?.routes?.firstOrNull()?.second?.firstOrNull()?.id
 
-    LazyVerticalGrid(
-        state = gridState,
-        columns = GridCells.Fixed(columns),
+    LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = TvPagePadding, end = TvPagePadding,
-            // 首项是分组表头（纯文字、不聚焦），不需要给焦点外扩留 [NfGridTopPadding] 那一段
-            top = 8.dp, bottom = 24.dp
+            top = 4.dp, bottom = 24.dp
         ),
-        horizontalArrangement = Arrangement.spacedBy(NfCardGap),
-        verticalArrangement = Arrangement.spacedBy(NfRowVerticalPadding)
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        groups.forEach { (sourceName, itemsOfSource) ->
-            item(key = "nf_s_grp_$sourceName", span = { GridItemSpan(maxLineSpan) }) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(top = if (sourceName == firstGroup) 4.dp else 16.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        sourceName,
-                        color = TvText.Title,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        "${itemsOfSource.size} 条",
-                        color = TvText.Meta,
-                        style = MaterialTheme.typography.labelMedium
-                    )
-                }
-            }
-            gridItemsIndexed(itemsOfSource, key = { _, it -> "nf_s_${it.id}" }) { index, item ->
-                val cardFocus = remember(item.id) { FocusRequester() }
-                NfPosterCard(
-                    item = item,
-                    onClick = { onDetail(item.id) },
-                    fillCell = true,
-                    anchorStart = index % columns == 0,
-                    entrance = nfEntrance(index, stagger),
-                    modifier = Modifier
-                        .then(
-                            if (sourceName == firstGroup && index < columns)
-                                Modifier.nfFocusRoute(up = upFocusRequester)
-                            else Modifier
-                        )
-                        .then(
-                            ReturnSpot.cardStand(
-                                pageKey = NfSearchKey,
-                                rowKey = "results",
-                                mediaId = item.id,
-                                target = stand,
-                                requester = if (item.id == firstId) firstFocus else cardFocus
-                            )
-                        )
+        groups.forEachIndexed { sourceIdx, group ->
+            val isFirstSource = sourceIdx == 0
+            val isExpanded = expandedSources[group.key] ?: false
+            val total = group.routes.sumOf { it.second.size }
+
+            // 来源组标题：可聚焦，OK 键切换展开/折叠
+            item(key = "nf_src_header_${group.key}") {
+                NfSourceHeader(
+                    label = group.label,
+                    meta = if (group.isTvBox) "$total 条 · ${group.routes.size} 条线路" else "$total 条",
+                    expanded = isExpanded,
+                    // 第一颗来源表头交回页面持有的那颗锚点：全折叠时结果区只有表头可聚焦，
+                    // 输入框的 ↓ 和进页抢焦都落在这儿，不能留焦点死区（规范 R6）
+                    focusRequester = if (isFirstSource) firstHeaderFocus else remember(group.key) { FocusRequester() },
+                    upFocusRequester = if (isFirstSource) upFocusRequester else null,
+                    onToggle = {
+                        expandedSources[group.key] = !(expandedSources[group.key] ?: false)
+                    }
                 )
             }
+
+            // 展开后渲染各线路
+            if (isExpanded) {
+                group.routes.forEachIndexed { routeIdx, (routeName, routeItems) ->
+                    val isFirstCardEver = isFirstSource && routeIdx == 0
+                    val siteRowKey = "${group.key}/$routeName"
+                    // Emby 那一组只有一个空线路名的桶：没有线路这一层，来源展开就直接铺海报
+                    val routeExpanded = routeName.isBlank() || (expandedRoutes[siteRowKey] ?: false)
+
+                    if (routeName.isNotBlank()) {
+                        item(key = "nf_site_header_$siteRowKey") {
+                            NfSourceHeader(
+                                label = routeName,
+                                meta = "${routeItems.size} 条",
+                                expanded = routeExpanded,
+                                focusRequester = remember(siteRowKey) { FocusRequester() },
+                                upFocusRequester = null,
+                                indent = true,
+                                onToggle = {
+                                    expandedRoutes[siteRowKey] = !(expandedRoutes[siteRowKey] ?: false)
+                                }
+                            )
+                        }
+                    }
+
+                    // 该线路的海报横排
+                    if (routeExpanded) {
+                        item(key = "nf_site_row_$siteRowKey") {
+                            val rowState = ReturnSpot.listState("$NfSearchKey/$siteRowKey", precompose = PrecomposeWindow.Tv)
+                            LazyRow(
+                                state = rowState,
+                                modifier = Modifier.fillMaxWidth(),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(NfCardGap)
+                            ) {
+                                items(routeItems, key = { "nf_s_${it.id}" }) { mediaItem ->
+                                    val cardFocus = remember(mediaItem.id) { FocusRequester() }
+                                    NfPosterCard(
+                                        item = mediaItem,
+                                        onClick = { onDetail(mediaItem.id) },
+                                        width = posterWidth,
+                                        modifier = Modifier
+                                            .then(
+                                                if (isFirstCardEver && mediaItem.id == firstId)
+                                                    Modifier.nfFocusRoute(up = upFocusRequester)
+                                                else Modifier
+                                            )
+                                            .then(
+                                                ReturnSpot.cardStand(
+                                                    pageKey = NfSearchKey,
+                                                    rowKey = siteRowKey,
+                                                    mediaId = mediaItem.id,
+                                                    target = stand,
+                                                    requester = if (mediaItem.id == firstId) firstFocus else cardFocus
+                                                )
+                                            )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+/**
+ * 分组表头行：可聚焦 + OK 键切换展开/折叠，来源层和线路层共用。
+ * 来源层是「来源名 · 条数（TVBox 再带线路数）」，线路层是「站点名 · 条数」且整体右移一档表示层级。
+ */
+@Composable
+private fun NfSourceHeader(
+    label: String,
+    meta: String,
+    expanded: Boolean,
+    focusRequester: FocusRequester,
+    upFocusRequester: FocusRequester?,
+    indent: Boolean = false,
+    onToggle: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(Radius.Md)
+            .background(if (focused) AppColors.SurfaceHi else Color.Transparent)
+            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .then(upFocusRequester?.let { Modifier.nfFocusRoute(up = it) } ?: Modifier)
+            .focusRequester(focusRequester)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onToggle
+            )
+            .focusable(interactionSource = interaction)
+            .padding(start = if (indent) 28.dp else 12.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            if (expanded) "▾" else "▸",
+            color = if (focused) Color.White else TvText.Meta,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(end = 8.dp)
+        )
+        Text(
+            label,
+            color = if (focused) Color.White else if (indent) TvText.Section else TvText.Title,
+            style = if (indent) MaterialTheme.typography.titleMedium else MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            meta,
+            color = if (focused) Color.White.copy(alpha = 0.7f) else TvText.Meta,
+            style = MaterialTheme.typography.labelMedium
+        )
     }
 }

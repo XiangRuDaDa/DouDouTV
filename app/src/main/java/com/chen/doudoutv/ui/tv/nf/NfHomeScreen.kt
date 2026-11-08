@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -19,6 +20,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -43,6 +45,10 @@ import com.chen.doudoutv.ui.tv.TvContinueActionDialog
 import com.chen.doudoutv.ui.tv.TvHero
 import com.chen.doudoutv.ui.tv.TvHeroEmpty
 import com.chen.doudoutv.ui.tv.TvHeroSeamFade
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withContext
 import com.chen.doudoutv.ui.tv.TvMediaTitle
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
 import com.chen.doudoutv.ui.tv.tvMoveFocus
@@ -92,17 +98,44 @@ fun NfHomeScreen(
     val heroItems = remember(filteredLibrary, vm.siteHomeItems) {
         nfHeroCandidates(filteredLibrary, vm.siteHomeItems)
     }
-    // 继续观看：记录取全库，但只展示当前来源/线路那一份 —— 换来源就看到另一份追看记录
-    val continueItems = remember(continueWatching, vm.homeSourceId, vm.homeSiteKey) {
-        val cutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
-        vm.filterForHome(continueWatching).filter { it.lastPlayedAt > cutoff }.take(8)
+    // 刮削横板海报覆盖：Emby 行里的 backdropUrl 可能只是源站的小图，
+    // TMDB 刮削来的真·横板存在 scraped_meta 表里；首页 hero 要优先用刮削那份。
+    val heroBackdropOverrides = remember { mutableStateMapOf<Long, String>() }
+    LaunchedEffect(heroItems) {
+        heroBackdropOverrides.clear()
+        val overrides: List<Pair<Long, String>?> = heroItems.map { item ->
+            async(Dispatchers.IO) {
+                val meta = vm.tmdbCached(item.title, item.year, item.kind)
+                val bd = meta?.backdropUrl
+                if (!bd.isNullOrBlank() && bd != item.backdropUrl) item.id to bd else null
+            }
+        }.awaitAll()
+        overrides.forEach { pair ->
+            pair?.let { (id, url) -> heroBackdropOverrides[id] = url }
+        }
     }
+    // 继续观看：只列当前首页来源那一份记录 —— 顶栏已经跟着来源换了，这里再把别的来源铺进来就是重复信息。
+    // TVBox 一份配置（它下面所有线路/站点）算同一个来源，各线路的追看记录汇在这一行；
+    // Emby 一台服务器算一个来源，所以过滤键是来源 id，不是来源名。
+    val sources by vm.enabledSources.collectAsStateWithLifecycle()
+    val continueBySource = remember(continueWatching, sources, vm.homeSourceId) {
+        val homeId = sources.firstOrNull { it.id == vm.homeSourceId }?.id ?: sources.firstOrNull()?.id
+        val cutoff = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000L
+        nfGroupBySource(
+            continueWatching.filter { it.lastPlayedAt > cutoff && homeId != null && it.sourceId == homeId },
+            sources
+        )
+            .map { group -> group.label to group.items.sortedByDescending { it.lastPlayedAt } }
+    }
+    val continueTotalCount = continueBySource.sumOf { it.second.size }
 
     var heroIndex by remember { NfHomeHeroIndex }
     val heroProgress = remember { mutableFloatStateOf(0f) }
     val hero = heroItems.getOrNull(heroIndex.coerceIn(0, (heroItems.size - 1).coerceAtLeast(0)))
+    // 底图 URL：有刮削横板优先用刮削的，否则源站给的 backdrop，再否则 poster
+    val heroBackdropUrl = hero?.let { (heroBackdropOverrides[it.id]?.takeIf { u -> u.isNotBlank() } ?: it.backdropUrl).ifBlank { it.posterUrl } }.orEmpty()
     // 底图下缘取样色：渐隐遮罩和下面的收色带共用一个值，见旧首页 TvHomeScreen 的同名变量
-    val heroAmbient = rememberHeroAmbient(hero?.let { it.backdropUrl.ifBlank { it.posterUrl } }.orEmpty())
+    val heroAmbient = rememberHeroAmbient(heroBackdropUrl)
 
     val listState = ReturnSpot.listState(NfHomeKey, precompose = PrecomposeWindow.Tv)
     val scope = rememberCoroutineScope()
@@ -136,8 +169,8 @@ fun NfHomeScreen(
     // 空态那颗 CTA 单独一个 requester：和首卡共用会在「数据到达」那一刻
     // 留下一个指向已销毁节点的旧 attach，requestFocus 不报错却什么都不做
     val continueEmptyFocus = remember { FocusRequester() }
-    /** 「继续观看」这一屏真正能接住焦点的那个元件 */
-    val continueAnchor = if (continueItems.isNotEmpty()) continueFirstFocus else continueEmptyFocus
+    /** 「继续观看」这一屏真正能接住焦点的那个元件 —— 第一组第一张卡 */
+    val continueAnchor = if (continueTotalCount > 0) continueFirstFocus else continueEmptyFocus
 
     // 顶栏按滚动距离连续淡出，淡到位才摘出组合。
     // 不能只看 firstVisibleItemIndex > 0：电视 dp 视口约 540、轮播按 70% 有 378 高，
@@ -254,7 +287,7 @@ fun NfHomeScreen(
             item(key = "hero") {
                 Box(
                     Modifier.nfKeyDown(
-                        enabled = continueItems.isNotEmpty() || !vm.scanning
+                        enabled = continueTotalCount > 0 || !vm.scanning
                     ) { goToContinueRow() }
                 ) {
                     if (hero != null) {
@@ -270,6 +303,7 @@ fun NfHomeScreen(
                             onNavigateUp = goNavBar,
                             onButtonFocus = forgetCardStand,
                             ambient = heroAmbient,
+                            backdropUrlOverride = hero?.let { heroBackdropOverrides[it.id] },
                             titleContent = { current -> TvMediaTitle(current.title, current.logoUrl) }
                         )
                     } else {
@@ -295,9 +329,9 @@ fun NfHomeScreen(
                 NfRowTitle(
                     text = "继续观看",
                     trailing = {
-                        if (continueItems.isNotEmpty()) {
+                        if (continueTotalCount > 0) {
                             Text(
-                                "${continueItems.size} 部",
+                                "${continueTotalCount} 部",
                                 color = TvText.Muted,
                                 style = MaterialTheme.typography.labelMedium
                             )
@@ -305,19 +339,28 @@ fun NfHomeScreen(
                     }
                 )
             }
-            item(key = "continue_row") {
-                when {
-                    continueItems.isNotEmpty() -> NfContinueRow(
-                        items = continueItems,
-                        stand = standTarget,
-                        firstFocus = continueFirstFocus,
-                        upFocus = if (hero != null) heroPlayFocus else heroEmptyFocus,
-                        onDetail = onDetail,
-                        onPlay = onPlay,
-                        onMenu = { media, cardFocus -> continueMenu = media to cardFocus }
-                    )
-                    vm.scanning -> NfContinueSkeleton()
-                    else -> NfInlineEmpty(
+            when {
+                continueTotalCount > 0 -> {
+                    continueBySource.forEachIndexed { groupIndex, (sourceName, items) ->
+                        val isFirstGroup = groupIndex == 0
+                        // 一个来源一行；行不再铺来源名小标题 —— 这一行本来就只列当前来源的记录，顶栏已经写了
+                        item(key = "continue_row_$sourceName") {
+                            NfContinueRow(
+                                items = items,
+                                rowKey = "continue_$sourceName",
+                                stand = standTarget,
+                                firstFocus = if (isFirstGroup) continueFirstFocus else FocusRequester(),
+                                upFocus = if (isFirstGroup && hero != null) heroPlayFocus else null,
+                                onDetail = onDetail,
+                                onPlay = onPlay,
+                                onMenu = { media, cardFocus -> continueMenu = media to cardFocus }
+                            )
+                        }
+                    }
+                }
+                vm.scanning -> item(key = "continue_skeleton") { NfContinueSkeleton() }
+                else -> item(key = "continue_empty") {
+                    NfInlineEmpty(
                         text = "还没有看到一半的内容",
                         hint = "从轮播或「分类」里挑一部开始播放，这里就会接上进度",
                         actionLabel = "去分类",
@@ -372,21 +415,24 @@ private fun nfHeroCandidates(library: List<MediaEntity>, siteHomeItems: List<Med
 /**
  * 继续观看一行：16:9 横版卡，图按 Crop 裁满 —— TVBox 只有竖版海报时取中间一条带，
  * Emby/TMDB 有真横图时正好铺满。卡片宽度按屏幕宽度的三成算，一屏可见 3 张半。
+ *
+ * @param rowKey 唯一标识这一行（含来源名），避免多组共用同一个 ReturnSpot key
+ * @param firstFocus 页面级首卡 requester（只给第一组第一张卡复用）
+ * @param upFocus 第一组专用：↑ 交 Hero 播放键；后面的组传 null，让 LazyColumn 自动处理纵向焦点
  */
 @Composable
 private fun NfContinueRow(
     items: List<MediaEntity>,
+    rowKey: String,
     stand: StandTarget,
     firstFocus: FocusRequester,
-    /** 卡片按 ↑ 的落点：Hero 的播放键。不显式给的话，默认几何搜索会因为播放键偏在画面左下、
-     *  卡片在右侧而把它判成「不在正上方」，直接跳过它落到顶栏 */
-    upFocus: FocusRequester,
+    upFocus: FocusRequester?,
     onDetail: (Long) -> Unit,
     onPlay: (MediaEntity) -> Unit,
     onMenu: (MediaEntity, FocusRequester) -> Unit
 ) {
-    val rowState = ReturnSpot.listState("$NfHomeKey/continue", precompose = PrecomposeWindow.Tv)
-    val stagger = nfFirstFillStagger(items.size, "$NfHomeKey/continue")
+    val rowState = ReturnSpot.listState("$NfHomeKey/$rowKey", precompose = PrecomposeWindow.Tv)
+    val stagger = nfFirstFillStagger(items.size, "$NfHomeKey/$rowKey")
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val cardWidth = (screenWidth * 0.30f).coerceIn(240.dp, 380.dp)
     LazyRow(
@@ -401,12 +447,13 @@ private fun NfContinueRow(
             // 首卡不再另外挂第二个 requester：同一焦点节点挂两个在 1.6.8 上不可靠
             // （见 ReturnSpot.cardStand 的注释），首卡的记账直接用页面级那一个
             val cardFocus = if (index == 0) firstFocus else ownFocus
+            val upModifier = if (upFocus != null) Modifier.nfFocusRoute(up = upFocus) else Modifier
             NfContinueCard(
                 item = item,
                 cardWidth = cardWidth,
-                modifier = Modifier
-                    .nfFocusRoute(up = upFocus)
-                    .then(ReturnSpot.cardStand(NfHomeKey, "continue", item.id, stand, cardFocus)),
+                modifier = upModifier.then(
+                    ReturnSpot.cardStand(NfHomeKey, rowKey, item.id, stand, cardFocus)
+                ),
                 anchorStart = index == 0,
                 entrance = nfEntrance(index, stagger),
                 onClick = { if (item.positionMs > 5_000L) onPlay(item) else onDetail(item.id) },
