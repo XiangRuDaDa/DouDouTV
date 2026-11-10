@@ -801,7 +801,19 @@ class MediaRepository(private val context: Context) {
      * 调用方传入的条目需已补齐 pinyinInitials / sourceName。
      * @return 库里现在的这些条目（新行带上了自增 id）
      */
-    private suspend fun upsertMediaBatch(incoming: List<MediaEntity>): List<MediaEntity> {
+    /**
+     * 批量入库（分批是为了绕开 SQLite 的 IN 占位符上限）。
+     *
+     * [mergeUserState] 打开时按「手机端为准」合并用户状态：
+     * 本地已经有进度或收藏，就以本地为准（服务端的旧数据不许覆盖手机上的）；
+     * 本地空白时采用服务端那份，这样网页端看过的、收藏过的才能读回手机。
+     * 两边不一致且以本地为准的，通过 [onUserStateConflict] 回调出去，由上层回写服务端。
+     */
+    private suspend fun upsertMediaBatch(
+        incoming: List<MediaEntity>,
+        mergeUserState: Boolean = false,
+        onUserStateConflict: ((old: MediaEntity, incoming: MediaEntity) -> Unit)? = null
+    ): List<MediaEntity> {
         if (incoming.isEmpty()) return emptyList()
         val existing = mediaDao.byRemoteIds(incoming.map { it.remoteId }).associateBy { it.remoteId }
         val toInsert = ArrayList<MediaEntity>(incoming.size)
@@ -811,12 +823,16 @@ class MediaRepository(private val context: Context) {
             if (old == null) {
                 toInsert += entity
             } else {
-                toUpdate += entity.copy(
+                // 本地是否已经对这条有过「态度」：有进度或收藏就算
+                val localHasProgress = old.positionMs > 0L || old.lastPlayedAt > 0L
+                val merged = entity.copy(
                     id = old.id,
-                    // ---- 播放相关：始终保留已有进度，源同步不会覆盖 ----
-                    positionMs = old.positionMs,
-                    lastPlayedAt = old.lastPlayedAt,
-                    favorite = old.favorite,
+                    // ---- 播放相关：默认始终保留已有进度，源同步不会覆盖 ----
+                    // 合并用户状态时改成「手机端为准」：本地有态度就听本地的，
+                    // 本地空白才用服务端那份（把网页端的记录读回来）
+                    positionMs = if (mergeUserState && !localHasProgress) entity.positionMs else old.positionMs,
+                    lastPlayedAt = if (mergeUserState && !localHasProgress) entity.lastPlayedAt else old.lastPlayedAt,
+                    favorite = if (mergeUserState && !old.favorite) entity.favorite else old.favorite,
                     addedAt = old.addedAt,
                     durationMs = if (entity.durationMs > 0) entity.durationMs else old.durationMs,
                     // ---- 媒体元数据：源有值就用它，源给空就保留 DB 已有（可能是 TMDB 补的） ----
@@ -835,6 +851,13 @@ class MediaRepository(private val context: Context) {
                     libraryId = entity.libraryId.ifBlank { old.libraryId },
                     libraryName = entity.libraryName.ifBlank { old.libraryName }
                 )
+                toUpdate += merged
+                if (mergeUserState && onUserStateConflict != null) {
+                    // 两边不一致、且这次以本地为准的，交给上层回写服务端
+                    val favoriteDiffers = old.favorite && !entity.favorite
+                    val progressDiffers = localHasProgress && entity.positionMs != old.positionMs
+                    if (favoriteDiffers || progressDiffers) onUserStateConflict(old, entity)
+                }
             }
         }
         if (toInsert.isNotEmpty()) mediaDao.insertAll(toInsert)
@@ -851,11 +874,13 @@ class MediaRepository(private val context: Context) {
      */
     private suspend fun upsertMediaAll(
         incoming: List<MediaEntity>,
+        mergeUserState: Boolean = false,
+        onUserStateConflict: ((old: MediaEntity, incoming: MediaEntity) -> Unit)? = null,
         onProgress: (Int) -> Unit = {}
     ): List<MediaEntity> {
         var done = 0
         return incoming.chunked(MEDIA_UPSERT_BATCH_SIZE).flatMap { batch ->
-            val saved = upsertMediaBatch(batch)
+            val saved = upsertMediaBatch(batch, mergeUserState, onUserStateConflict)
             done += batch.size
             onProgress(done)
             saved
@@ -933,46 +958,217 @@ class MediaRepository(private val context: Context) {
         sinceMs: Long?,
         onProgress: (Int, Int) -> Unit
     ): Int {
+        val pushes = EmbyStatePushes()
         val views = client.fetchViews()
         if (views.isEmpty()) {
             val items = if (sinceMs != null) client.fetchUpdated(sinceMs) { f, t -> onProgress(f, t) }
             else client.fetchLibrary { f, t -> onProgress(f, t) }
-            if (items.isEmpty()) return 0
-            val incoming = items.map { embyItemToEntity(source, it) }
-            upsertMediaAll(incoming)
-            return incoming.size
+            if (items.isNotEmpty()) {
+                val incoming = items.map { embyItemToEntity(source, it) }
+                upsertMediaAll(incoming, mergeUserState = true, onUserStateConflict = pushes::onConflict)
+            }
+            syncEmbyUserState(client, source, pushes)
+            pushes.flush(client)
+            return items.size
         }
         val libs = views.filter { it.collectionType != "playlists" }
         var done = 0
         for ((index, lib) in libs.withIndex()) {
             val items = client.fetchLibraryItems(lib.id, sinceMs) { f, _ -> onProgress(done + f, 0) }
             if (items.isNotEmpty()) {
-                upsertMediaAll(items.map { embyItemToEntity(source, it, lib.id, lib.name) })
+                upsertMediaAll(
+                    items.map { embyItemToEntity(source, it, lib.id, lib.name) },
+                    mergeUserState = true,
+                    onUserStateConflict = pushes::onConflict
+                )
                 done += items.size
             }
             if (index < libs.size - 1) kotlinx.coroutines.delay(200)
         }
         onProgress(done, 0)
+        syncEmbyUserState(client, source, pushes)
+        pushes.flush(client)
         return done
     }
 
-    /** Emby Item → 本地 MediaEntity：全量与增量共用，remoteId 统一带 sourceId 防多台互覆盖 */
-    private fun embyItemToEntity(
+    /**
+     * 读回服务端的观看历史与收藏（口径：手机端为准）。
+     *
+     * 媒体库同步只搬元数据，服务端那边的「看过」「收藏」在 UserData 里，
+     * 不专门问一次就永远读不回来。这里多问三次：
+     *   · IsPlayed    —— 网页端看完的
+     *   · IsResumable —— 网页端看过没看完的
+     *   · IsFavorite  —— 网页端收藏的
+     *
+     * 服务端不认这个 Filter 时会忽略它、退回普通列表，所以每批都要按 UserData 过滤一遍，
+     * 只留真带观看/收藏状态的条目，别把整库当观看历史灌进本地。
+     *
+     * 合并口径是「手机端说了算」：本地已有进度或收藏就以本地为准（并回写服务端），
+     * 本地空白才采用服务端那份 —— 既不会把手机上的进度冲掉，又能把别的设备上的记录读回来。
+     */
+    private suspend fun syncEmbyUserState(
+        client: EmbyClient,
+        source: SourceEntity,
+        pushes: EmbyStatePushes
+    ) {
+        val played = runCatching {
+            client.fetchUserItems("IsPlayed", "Movie,Episode", "DatePlayed", 60)
+        }.getOrDefault(emptyList())
+        val resumable = runCatching {
+            client.fetchUserItems("IsResumable", "Movie,Episode", "DatePlayed", 60)
+        }.getOrDefault(emptyList())
+        val favItems = runCatching {
+            client.fetchUserItems("IsFavorite", "Movie,Series,Episode", "SortName", 100)
+        }.getOrDefault(emptyList())
+
+        val watched = (played + resumable)
+            .filter { it.userData.played || it.userData.positionTicks > 0L }
+            .distinctBy { it.id }
+        val favorites = favItems.filter { it.userData.isFavorite }
+        if (watched.isEmpty() && favorites.isEmpty()) return
+
+        // 分集条目在本地要有剧集壳：「继续观看」卡片靠壳行显示剧名，详情页也以壳行为入口
+        ensureSeriesShells(client, source, watched + favorites)
+
+        // 看过的：本地有进度以本地为准，本地空白才采用服务端的
+        if (watched.isNotEmpty()) {
+            upsertMediaAll(
+                watched.map { embyToEntity(source, it) },
+                mergeUserState = true,
+                onUserStateConflict = pushes::onConflict
+            )
+        }
+
+        // 收藏的：电影/剧集壳落到自己身上
+        val favoritesOnSelf = favorites.filter {
+            it.isSeries || it.seriesId.isBlank() || it.seriesId == it.id
+        }
+        if (favoritesOnSelf.isNotEmpty()) {
+            upsertMediaAll(
+                favoritesOnSelf.map { embyToEntity(source, it).copy(favorite = true) },
+                mergeUserState = true,
+                onUserStateConflict = pushes::onConflict
+            )
+        }
+
+        // 分集被收藏 = 它那部剧被收藏（本地收藏只展示电影/剧集，分集落到壳上）
+        for (item in favorites) {
+            if (item.isSeries) continue
+            if (item.seriesId.isBlank() || item.seriesId == item.id) continue
+            val shell = mediaDao.byRemoteId("emby:${source.id}:${item.seriesId}") ?: continue
+            if (!shell.favorite) {
+                mediaDao.setFavorite(shell.id, true)
+                pushes.addFavorite(item.seriesId)
+            }
+        }
+
+        // 本地收藏、服务端没有的：手机端说了算，回写服务端
+        val serverFavIds = HashSet<String>()
+        for (item in favorites) {
+            serverFavIds += item.id
+            if (item.seriesId.isNotBlank() && item.seriesId != item.id) serverFavIds += item.seriesId
+        }
+        for (row in mediaDao.favoritesOf(source.id)) {
+            val itemId = embyItemIdOf(row) ?: continue
+            if (itemId !in serverFavIds) pushes.addFavorite(itemId)
+        }
+    }
+
+    /**
+     * 分集条目在本地要有剧集壳行：
+     * 「继续观看」卡片靠壳行显示剧名，详情页也以壳行为入口（loadEmbyDetail）。
+     * 壳不在本地时从服务端补一个；补不上的就跳过 —— 壳只是壳，缺了不影响别的条目。
+     * 一次同步最多补 [SHELL_FETCH_LIMIT] 个，别为了几个壳把服务端打爆。
+     */
+    private suspend fun ensureSeriesShells(
+        client: EmbyClient,
+        source: SourceEntity,
+        items: List<EmbyClient.Item>
+    ) {
+        val missing = LinkedHashSet<String>()
+        for (item in items) {
+            if (missing.size >= SHELL_FETCH_LIMIT) break
+            if (item.isSeries) continue
+            if (item.seriesId.isBlank() || item.seriesId == item.id) continue
+            val key = "emby:${source.id}:${item.seriesId}"
+            if (mediaDao.byRemoteId(key) == null) missing += item.seriesId
+        }
+        for (seriesId in missing) {
+            val series = runCatching { client.fetchItemById(seriesId) }.getOrNull() ?: continue
+            if (!series.isSeries) continue
+            upsertMediaAll(listOf(embyToEntity(source, series)))
+        }
+    }
+
+    /**
+     * 「手机端为准」要回写服务端的那几笔。
+     * 攒到同步末尾一次性发出去：回写是零散的，边合并边发会把请求打散。
+     */
+    private inner class EmbyStatePushes {
+        private val favoriteIds = LinkedHashSet<String>()
+        private val progressMs = LinkedHashMap<String, Long>()
+
+        /** 本地有态度、服务端没有（或不一样），且这次以本地为准 */
+        fun onConflict(old: MediaEntity, incoming: MediaEntity) {
+            val itemId = embyItemIdOf(old) ?: return
+            if (old.favorite && !incoming.favorite) favoriteIds += itemId
+            // 进度只在这条比服务端新时才回写：服务端那条更新就别覆盖，
+            // 免得把别处看到的更新进度倒灌回去
+            if (old.positionMs > 0L && incoming.positionMs != old.positionMs &&
+                old.lastPlayedAt >= incoming.lastPlayedAt
+            ) progressMs[itemId] = old.positionMs
+        }
+
+        fun addFavorite(itemId: String) {
+            favoriteIds += itemId
+        }
+
+        suspend fun flush(client: EmbyClient) {
+            for ((itemId, ms) in progressMs) {
+                runCatching { client.updatePlaybackPosition(itemId, ms * 10_000L) }
+                    .onFailure { Log.w("EmbyReport", "进度回写失败：${it.message}") }
+            }
+            for (itemId in favoriteIds) {
+                runCatching { client.setFavorite(itemId, true) }
+                    .onFailure { Log.w("EmbyReport", "收藏回写失败：${it.message}") }
+            }
+        }
+    }
+
+    /**
+     * Emby 条目 → 本地行。电影 / 剧集壳 / 分集三种形态都从这里出，
+     * kind 与 seriesKey 跟详情页入库那套保持一致，不然「继续观看」归组归不上。
+     *
+     * UserData 也一并带上（续播点 / 已看 / 收藏 / 最后播放时间）：
+     * 服务端那边的观看历史和收藏就在这个字段里，不解析就读不回来。
+     */
+    private fun embyToEntity(
         source: SourceEntity,
         item: EmbyClient.Item,
         libraryId: String = "",
         libraryName: String = ""
     ): MediaEntity {
-        val isSeries = item.isSeries
+        val isEpisode = !item.isSeries && item.seriesId.isNotBlank() && item.seriesId != item.id
+        val kind = when {
+            item.isSeries -> MediaKind.SERIES
+            isEpisode -> MediaKind.EPISODE
+            else -> MediaKind.MOVIE
+        }
         return MediaEntity(
             sourceId = source.id,
             pinyinInitials = item.name.toPinyinInitials(),
             sourceName = source.name,
-            uri = if (isSeries) "" else EmbyClient.playbackUrl(source.location, item.id, source.token),
+            uri = if (kind == MediaKind.SERIES) "" else EmbyClient.playbackUrl(source.location, item.id, source.token),
             remoteId = "emby:${source.id}:${item.id}",
-            seriesKey = if (isSeries) "emby:${source.id}:${item.id}" else "",
+            seriesKey = when {
+                kind == MediaKind.SERIES -> "emby:${source.id}:${item.id}"
+                isEpisode -> "emby:${source.id}:${item.seriesId}"
+                else -> ""
+            },
             title = item.name,
-            kind = if (isSeries) MediaKind.SERIES else MediaKind.MOVIE,
+            kind = kind,
+            season = item.parentIndexNumber,
+            episode = item.indexNumber,
             year = item.year,
             overview = item.overview,
             posterUrl = item.posterUrl,
@@ -981,10 +1177,27 @@ class MediaRepository(private val context: Context) {
             rating = item.rating,
             genres = item.genres,
             durationMs = item.runTimeMs,
+            positionMs = when {
+                item.userData.positionTicks > 0L -> item.userData.positionTicks / 10_000L
+                // 服务端标了「已看完」但没留续播点：记成看完的位置。
+                // 本地看完的片子也是留在「继续观看」里，口径一致。
+                item.userData.played && item.runTimeMs > 0L -> item.runTimeMs
+                else -> 0L
+            },
+            lastPlayedAt = item.userData.lastPlayedMs,
+            favorite = item.userData.isFavorite,
             libraryId = libraryId,
             libraryName = libraryName
         )
     }
+
+    /** 全量与增量共用的映射（带库归属标签） */
+    private fun embyItemToEntity(
+        source: SourceEntity,
+        item: EmbyClient.Item,
+        libraryId: String = "",
+        libraryName: String = ""
+    ): MediaEntity = embyToEntity(source, item, libraryId, libraryName)
 
     /**
      * 详情页按需拉取 Emby 分集并入库。
@@ -1001,6 +1214,8 @@ class MediaRepository(private val context: Context) {
             val client = EmbyClient(source.location, source.token, source.userId)
             val episodes = client.fetchEpisodes(itemId)
             // 分集一次批量写：一部 100 集的剧之前要 300 次 DAO 往返，详情页就在这几秒里等
+            // mergeUserState = true：手机端说了算 —— 本地已有的进度/收藏不被服务端覆盖，
+            // 本地没有的（网页端看过的）才把服务端的填进来
             upsertMediaAll(
                 episodes.mapIndexed { index, ep ->
                     MediaEntity(
@@ -1019,10 +1234,18 @@ class MediaRepository(private val context: Context) {
                         posterUrl = ep.posterUrl,
                         backdropUrl = shell.backdropUrl,
                         logoUrl = shell.logoUrl,
+                        positionMs = when {
+                            ep.userData.positionTicks > 0L -> ep.userData.positionTicks / 10_000L
+                            ep.userData.played && ep.runTimeMs > 0L -> ep.runTimeMs
+                            else -> 0L
+                        },
+                        lastPlayedAt = ep.userData.lastPlayedMs,
+                        favorite = ep.userData.isFavorite,
                         libraryId = shell.libraryId,
                         libraryName = shell.libraryName
                     )
-                }
+                },
+                mergeUserState = true
             )
             episodes.isNotEmpty()
         }
@@ -1173,7 +1396,7 @@ class MediaRepository(private val context: Context) {
                 sourceName = source.name
             )
         }
-        val saved = upsertMediaAll(incoming, onProgress)
+        val saved = upsertMediaAll(incoming, onProgress = onProgress)
         return saved
     }
 
@@ -1435,6 +1658,13 @@ class MediaRepository(private val context: Context) {
     private companion object {
         /** 云盘分享令牌的保守有效期：入库超过这个时长就重新拉一次详情换新令牌 */
         const val CLOUD_URI_TTL_MS = 5 * 60 * 1000L
+
+        /**
+         * 一次同步最多补多少个剧集壳。
+         * 壳是从服务端单条拉的（fetchItemById），补 200 个就是 200 次请求 ——
+         * 公益服那边请求量看得见，别为了几个壳把额度打满。
+         */
+        const val SHELL_FETCH_LIMIT = 60
 
         /**
          * 预热直链的复用窗口。

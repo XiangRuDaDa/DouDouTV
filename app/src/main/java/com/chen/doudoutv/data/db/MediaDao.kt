@@ -74,6 +74,13 @@ interface MediaDao {
     )
     fun observeFavorites(): Flow<List<MediaEntity>>
 
+    /**
+     * 某个来源下的本地收藏：跟服务端的收藏清单逐条比对。
+     * 手机端说了算 —— 本地收藏、服务端没有的，要回写回服务端。
+     */
+    @Query("SELECT * FROM media WHERE sourceId = :sourceId AND favorite = 1")
+    suspend fun favoritesOf(sourceId: Long): List<MediaEntity>
+
     @Query(
         "SELECT m.* FROM media m JOIN sources s ON m.sourceId = s.id " +
             "WHERE s.enabled = 1 AND (m.title LIKE '%' || :keyword || '%' " +

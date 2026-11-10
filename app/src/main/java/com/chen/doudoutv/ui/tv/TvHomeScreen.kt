@@ -1484,7 +1484,6 @@ internal fun TvContinueActionDialog(
                     TvMenuRow(text = "查看详情", onClick = onDetail)
                     TvMenuRow(
                         text = "清除观看记录",
-                        hint = "片子还在库里，只是不再出现在这里",
                         danger = true,
                         onClick = onClear
                     )

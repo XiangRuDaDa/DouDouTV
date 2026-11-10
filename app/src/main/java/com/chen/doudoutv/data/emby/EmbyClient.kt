@@ -62,6 +62,23 @@ class EmbyClient(
 
     data class Person(val name: String, val role: String, val imageUrl: String)
 
+    /**
+     * 条目上的用户状态：续播点 / 已看 / 收藏 / 最后播放时间。
+     *
+     * 媒体库接口的响应里本来就带 UserData，不用额外请求 —— 之前没解析，
+     * 于是「在网页端看过、收藏过」的记录一点都读不回来。
+     */
+    data class ItemUserData(
+        /** 续播点（1 tick = 100 毫秒） */
+        val positionTicks: Long = 0L,
+        /** 是否已看完 */
+        val played: Boolean = false,
+        /** 是否收藏 */
+        val isFavorite: Boolean = false,
+        /** 最后播放时间（毫秒），0 表示服务端没给 */
+        val lastPlayedMs: Long = 0L
+    )
+
     data class Item(
         val id: String,
         val name: String,
@@ -76,7 +93,11 @@ class EmbyClient(
         val runTimeMs: Long,
         val indexNumber: Int,
         val parentIndexNumber: Int,
-        val seriesId: String
+        val seriesId: String,
+        /** 分集所属的剧名（服务端给的 SeriesName）：本地没有剧集壳时拿它当标题 */
+        val seriesName: String = "",
+        /** 该条目的用户状态 */
+        val userData: ItemUserData = ItemUserData()
     )
 
     /** 媒体库（CollectionFolder）：动态分类按库分区用。collectionType 如 movies / tvshows / playlists */
@@ -287,6 +308,50 @@ class EmbyClient(
             if (startIndex < total) delay(PAGE_THROTTLE_MS)
         }
         out
+    }
+
+    /**
+     * 按用户状态筛条目：IsPlayed（已看完）/ IsResumable（看过没看完）/ IsFavorite（收藏）。
+     *
+     * 用来把「在网页端看过、收藏过」的记录读回本地。媒体库接口只给元数据，
+     * 不专门问这一句，服务端那边的观看历史和收藏就永远进不来。
+     *
+     * 服务端不认这个 Filter 时会忽略它、退回普通列表，调用方要按返回条目的
+     * UserData 自己筛掉无关条目（这里都带 Limit，不会一次拉回整库）。
+     */
+    suspend fun fetchUserItems(
+        filter: String,
+        itemTypes: String,
+        sortBy: String,
+        limit: Int = 60
+    ): List<Item> = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext emptyList()
+        val json = runCatching {
+            getJson("/Users/$uid/Items", mapOf(
+                "Filters" to filter,
+                "IncludeItemTypes" to itemTypes,
+                "Recursive" to "true",
+                "Fields" to "Overview,Genres,CommunityRating,RunTimeTicks,ProductionYear",
+                "EnableImageTypes" to "Primary,Backdrop",
+                "ImageTypeLimit" to "1",
+                "SortBy" to sortBy,
+                "SortOrder" to "Descending",
+                "Limit" to limit.toString()
+            ))
+        }.getOrNull() ?: return@withContext emptyList()
+        parseItems(json.optJSONArray("Items"))
+    }
+
+    /** 单个条目（含 UserData）：本地缺剧集壳时用它补一个壳行 */
+    suspend fun fetchItemById(itemId: String): Item? = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext null
+        val json = runCatching {
+            getJson(
+                "/Users/$uid/Items/$itemId",
+                mapOf("Fields" to "Overview,Genres,CommunityRating,RunTimeTicks,ProductionYear")
+            )
+        }.getOrNull() ?: return@withContext null
+        parseItem(json)
     }
 
     /**
@@ -582,44 +647,71 @@ class EmbyClient(
         if (arr == null) return emptyList()
         val out = ArrayList<Item>(arr.length())
         for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("Id")
-            if (id.isBlank()) continue
-            val type = o.optString("Type")
-            val imageTags = o.optJSONObject("ImageTags")
-            val backdropTags = o.optJSONObject("BackdropImageTags")
-
-            val primaryTag = imageTags?.optString("Primary").orEmpty()
-            val logoTag = imageTags?.optString("Logo").orEmpty()
-            val backdropTag = backdropTags?.let {
-                if (it.length() > 0) it.optString(it.keys().next()) else ""
-            }.orEmpty()
-
-            out += Item(
-                id = id,
-                name = o.optString("Name"),
-                isSeries = type == "Series",
-                year = o.optInt("ProductionYear"),
-                overview = o.optString("Overview"),
-                posterUrl = if (primaryTag.isNotBlank())
-                    imageUrl("/Items/$id/Images/Primary", primaryTag, "maxHeight=600&quality=90") else "",
-                backdropUrl = if (backdropTag.isNotBlank())
-                    imageUrl("/Items/$id/Images/Backdrop", backdropTag, "maxWidth=1280&quality=90") else "",
-                // 透明 PNG，maxHeight 给足以保证电视端大屏下不糊
-                logoUrl = if (logoTag.isNotBlank())
-                    imageUrl("/Items/$id/Images/Logo", logoTag, "maxHeight=400&quality=90") else "",
-                rating = o.optDouble("CommunityRating", 0.0),
-                genres = o.optJSONArray("Genres")?.let { g ->
-                    (0 until g.length()).mapNotNull { g.optString(it).takeIf { s -> s.isNotBlank() } }
-                        .joinToString(" / ")
-                }.orEmpty(),
-                runTimeMs = (o.optLong("RunTimeTicks") / 10_000L),
-                indexNumber = o.optInt("IndexNumber"),
-                parentIndexNumber = o.optInt("ParentIndexNumber"),
-                seriesId = o.optString("SeriesId")
-            )
+            out += parseItem(arr.optJSONObject(i)) ?: continue
         }
         return out
+    }
+
+    /** 单个条目 → Item。UserData 一并解析：续播点 / 已看 / 收藏都在这里 */
+    private fun parseItem(o: JSONObject?): Item? {
+        if (o == null) return null
+        val id = o.optString("Id")
+        if (id.isBlank()) return null
+        val type = o.optString("Type")
+        val imageTags = o.optJSONObject("ImageTags")
+        val backdropTags = o.optJSONObject("BackdropImageTags")
+
+        val primaryTag = imageTags?.optString("Primary").orEmpty()
+        val logoTag = imageTags?.optString("Logo").orEmpty()
+        val backdropTag = backdropTags?.let {
+            if (it.length() > 0) it.optString(it.keys().next()) else ""
+        }.orEmpty()
+
+        val ud = o.optJSONObject("UserData")
+        val userData = ItemUserData(
+            positionTicks = ud?.optLong("PlaybackPositionTicks", 0L) ?: 0L,
+            played = ud?.optBoolean("Played", false) ?: false,
+            isFavorite = ud?.optBoolean("IsFavorite", false) ?: false,
+            lastPlayedMs = parseEmbyTime(ud?.optString("LastPlayedDate").orEmpty())
+        )
+
+        return Item(
+            id = id,
+            name = o.optString("Name"),
+            isSeries = type == "Series",
+            year = o.optInt("ProductionYear"),
+            overview = o.optString("Overview"),
+            posterUrl = if (primaryTag.isNotBlank())
+                imageUrl("/Items/$id/Images/Primary", primaryTag, "maxHeight=600&quality=90") else "",
+            backdropUrl = if (backdropTag.isNotBlank())
+                imageUrl("/Items/$id/Images/Backdrop", backdropTag, "maxWidth=1280&quality=90") else "",
+            // 透明 PNG，maxHeight 给足以保证电视端大屏下不糊
+            logoUrl = if (logoTag.isNotBlank())
+                imageUrl("/Items/$id/Images/Logo", logoTag, "maxHeight=400&quality=90") else "",
+            rating = o.optDouble("CommunityRating", 0.0),
+            genres = o.optJSONArray("Genres")?.let { g ->
+                (0 until g.length()).mapNotNull { g.optString(it).takeIf { s -> s.isNotBlank() } }
+                    .joinToString(" / ")
+            }.orEmpty(),
+            runTimeMs = (o.optLong("RunTimeTicks") / 10_000L),
+            indexNumber = o.optInt("IndexNumber"),
+            parentIndexNumber = o.optInt("ParentIndexNumber"),
+            seriesId = o.optString("SeriesId"),
+            seriesName = o.optString("SeriesName"),
+            userData = userData
+        )
+    }
+
+    /**
+     * Emby 的时间戳是 ISO8601（"2024-05-01T12:34:56.1234567Z"），只取到秒。
+     * 服务端给的是 UTC，解析不出来就当没有（0）。
+     */
+    private fun parseEmbyTime(raw: String): Long {
+        if (raw.isBlank()) return 0L
+        val head = raw.substring(0, minOf(19, raw.length))
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US)
+        sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        return runCatching { sdf.parse(head)?.time ?: 0L }.getOrDefault(0L)
     }
 
     /** Emby 图片接口默认要鉴权，必须带 api_key，否则海报是空白的 */
