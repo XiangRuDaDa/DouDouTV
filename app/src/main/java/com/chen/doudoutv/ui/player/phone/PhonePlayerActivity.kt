@@ -740,6 +740,8 @@ class PhonePlayerActivity : ComponentActivity() {
         if (episode.uri.isBlank()) return
         // 先落盘：saveProgress 按 current 写库，必须赶在切到新一集之前
         saveProgress(force = true)
+        // 上一集就此收尾：回传一次服务端，之后不再管它
+        reportToEmby()
         // 停机：不停的话解析直链那几秒上一集还在放，标题却已经换成新一集
         player?.pause()
 
@@ -1175,6 +1177,27 @@ class PhonePlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * 离开这条播放时把进度回传服务端（Emby 源）。
+     *
+     * 只在「离开」这一刻发一次：切集、退出播放器。播放期间不回传 ——
+     * 服务端只需要知道「最后看到哪」，中途心跳对续播没有任何用处。
+     */
+    private fun reportToEmby() {
+        val item = current ?: return
+        val p = player ?: return
+        // 装载期间播放器还挂着上一集（或位置还没起来），这时报出去的是错的
+        if (loading) return
+        val pos = p.currentPosition.coerceAtLeast(0L)
+        if (pos <= 0L) return
+        val dur = p.duration.takeIf { it > 0L } ?: 0L
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching {
+                MediaRepository(applicationContext).reportPlaybackToEmby(item.id, pos, dur)
+            }
+        }
+    }
+
     private fun enterImmersive() {
         // 边到边渲染：让内容延伸到状态栏 / 导航栏 / 挖孔区，
         // 否则横屏时系统会在摄像头那一侧留下一条黑带（cutout letterbox）。
@@ -1195,6 +1218,8 @@ class PhonePlayerActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         saveProgress(force = true)
+        // 离开播放器这一刻回传一次服务端；onDestroy 之前一定先走 onPause，不重复报
+        reportToEmby()
     }
 
     override fun onDestroy() {

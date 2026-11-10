@@ -598,6 +598,8 @@ class TvPlayerActivity : ComponentActivity() {
      */
     private fun switchEpisode(ep: MediaEntity) {
         saveProgress(force = true)
+        // 上一集就此收尾：回传一次服务端，之后不再管它
+        reportToEmby()
         player?.pause()
         current = ep
         play(ep, ep.positionMs)
@@ -633,6 +635,25 @@ class TvPlayerActivity : ComponentActivity() {
                 repo.saveProgress(item.id, pos)
                 if (dur > 0L) repo.fillDuration(item.id, dur)
             }
+        }
+    }
+
+    /**
+     * 离开这条播放时把进度回传服务端（Emby 源）。
+     *
+     * 只在「离开」这一刻发一次：切集、退出播放器。播放期间不回传 ——
+     * 服务端只需要知道「最后看到哪」，中途心跳对续播没有任何用处。
+     */
+    private fun reportToEmby() {
+        val item = current ?: return
+        val p = player ?: return
+        // 装载期间播放器还挂着上一集（或位置还没起来），这时报出去的是错的
+        if (loading) return
+        val pos = p.currentPosition.coerceAtLeast(0L)
+        if (pos <= 0L) return
+        val dur = p.duration.takeIf { it > 0L } ?: 0L
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { repo.reportPlaybackToEmby(item.id, pos, dur) }
         }
     }
 
@@ -885,6 +906,8 @@ class TvPlayerActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         saveProgress(force = true)
+        // 离开播放器这一刻回传一次服务端；onDestroy 之前一定先走 onPause，不重复报
+        reportToEmby()
     }
 
     override fun onDestroy() {
