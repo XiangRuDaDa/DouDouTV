@@ -238,23 +238,24 @@ private fun Header(syncing: Boolean, onSyncAll: () -> Unit) {
                 color = AppColors.TextTertiary
             )
         }
-        if (syncing) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-                color = AppColors.Brand
+        // 同步中就地禁用并显示进度态，按钮位置不跳（换成纯文字会让这一行左右抖）
+        TextButton(
+            onClick = onSyncAll,
+            enabled = !syncing,
+            colors = ButtonDefaults.textButtonColors(
+                contentColor = AppColors.BrandSoft,
+                disabledContentColor = AppColors.TextSecondary
             )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                "同步中…",
-                style = MaterialTheme.typography.labelSmall,
-                color = AppColors.TextSecondary
-            )
-        } else {
-            TextButton(
-                onClick = onSyncAll,
-                colors = ButtonDefaults.textButtonColors(contentColor = AppColors.BrandSoft)
-            ) {
+        ) {
+            if (syncing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                    color = AppColors.Brand
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("同步中…", fontSize = 13.sp)
+            } else {
                 Icon(Icons.Filled.Sync, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp))
                 Text("全部同步", fontSize = 13.sp)
@@ -462,7 +463,8 @@ private fun SourceCard(
                                     modifier = Modifier.size(18.dp)
                                 )
                             },
-                            enabled = !busy,
+                            // 任何来源正在同步时都禁用：并发两个同步会同时打服务端
+                            enabled = !busy && !vm.scanning,
                             onClick = {
                                 menuOpen = false
                                 if (source.kind == SourceKind.EMBY && source.token.isBlank()) onRelogin()
