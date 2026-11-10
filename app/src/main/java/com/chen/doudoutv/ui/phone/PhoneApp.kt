@@ -8,7 +8,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -39,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.components.SyncProgressBar
 import com.chen.doudoutv.ui.detail.DetailScreen
 import com.chen.doudoutv.ui.home.GenreScreen
 import com.chen.doudoutv.ui.home.HomeScreen
@@ -69,7 +71,7 @@ internal sealed interface PhoneRoute {
     data object Settings : PhoneRoute
     data object Search : PhoneRoute
     data class Detail(val mediaId: Long) : PhoneRoute
-    data class Genre(val kind: String?, val genre: String?) : PhoneRoute
+    data class Genre(val kind: String?, val genre: String?, val library: String? = null) : PhoneRoute
     data class Category(val typeId: String, val typeName: String) : PhoneRoute
 }
 
@@ -150,7 +152,7 @@ fun PhoneApp(vm: LibraryViewModel) {
             }
         }
     ) { padding ->
-        Row(Modifier.fillMaxSize().padding(padding)) {
+        Box(Modifier.fillMaxSize().padding(padding)) {
             AnimatedContent(
                 targetState = navStack.last(),
                 transitionSpec = {
@@ -181,7 +183,7 @@ fun PhoneApp(vm: LibraryViewModel) {
                         isTv = false,
                         onOpenSearch = { push(PhoneRoute.Search) },
                         onOpenDetail = { id -> push(PhoneRoute.Detail(id)) },
-                        onOpenGenre = { kind, genre -> push(PhoneRoute.Genre(kind, genre)) },
+                        onOpenGenre = { kind, genre, library -> push(PhoneRoute.Genre(kind, genre, library)) },
                         onOpenCategory = { tid, tname -> push(PhoneRoute.Category(tid, tname)) },
                         onPlay = { item: MediaEntity ->
                             // Netflix 口径：退出播放器一律落在详情页，而不是回到起播那张卡。
@@ -199,6 +201,7 @@ fun PhoneApp(vm: LibraryViewModel) {
                         isTv = false,
                         initialKind = target.kind,
                         initialGenre = target.genre,
+                        initialLibrary = target.library,
                         onBack = goBack,
                         onOpenDetail = { id -> push(PhoneRoute.Detail(id)) }
                     )
@@ -230,6 +233,15 @@ fun PhoneApp(vm: LibraryViewModel) {
                     is PhoneRoute.Sources -> SourcesScreen(vm = vm, isTv = false)
                     is PhoneRoute.Settings -> SettingsScreen(vm = vm)
                 }
+            }
+
+            // 同步进度线覆盖在内容区最上沿：不占布局高度，出现/消失都不推挤页面
+            if (vm.scanning) {
+                SyncProgressBar(
+                    fetched = vm.scanFetched,
+                    total = vm.scanTotal,
+                    modifier = Modifier.align(Alignment.TopStart)
+                )
             }
         }
     }

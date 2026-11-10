@@ -31,6 +31,7 @@ import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.data.model.MediaEntity
+import com.chen.doudoutv.data.model.LibraryDisplayOrder
 import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
@@ -79,7 +80,10 @@ fun NfBrowseScreen(
 
     val onlineCats = vm.homeCategories
     val localItems = remember(library, vm.homeSourceId, vm.homeSiteKey) { vm.filterForHome(library) }
-    val localCats = remember(localItems) { nfLocalCategories(localItems) }
+    // Emby 题材 chip 优先用服务端 /Genres 清单（跟库内容相关、完整）；拉到空时回退本地频次聚合
+    val serverGenres = selectedSource?.id?.let { vm.embyGenres(it) }.orEmpty()
+    LaunchedEffect(selectedSource?.id) { selectedSource?.id?.let { vm.ensureEmbyGenres(it) } }
+    val localCats = remember(localItems, serverGenres) { nfLocalCategories(localItems, serverGenres) }
 
     val safeOnlineIdx = onlineIdx.coerceIn(0, (onlineCats.size - 1).coerceAtLeast(0))
     val safeLocalIdx = localIdx.coerceIn(0, (localCats.size - 1).coerceAtLeast(0))
@@ -332,25 +336,44 @@ private val NfKindLikeGenres = setOf("电影", "剧集", "电视剧", "动漫", 
 private fun MediaEntity.genreTokens(): List<String> =
     genres.split(NfGenreSeparator).map { it.trim() }.filter { it.isNotBlank() }
 
-private fun nfLocalCategories(items: List<MediaEntity>): List<NfLocalCategory> {
+private fun nfLocalCategories(
+    items: List<MediaEntity>,
+    serverGenres: List<String> = emptyList()
+): List<NfLocalCategory> {
     val out = mutableListOf<NfLocalCategory>()
     out += NfLocalCategory("全部") { true }
+
+    // Emby 媒体库优先：条目带 libraryName 时按库分区（NSFW/国漫 等是 CollectionFolder，不是题材）。
+    // 库名本身已含「电影/电视剧」，不再另加类型 chip，免得出现两颗同名「电影」。
+    // 没有库信息（TVBox / 旧数据 / 回退整库同步）才退到类型 + 题材标签。
+    val libraries = items.filter { it.libraryName.isNotBlank() }
+        .groupBy { it.libraryName }
+        .entries.sortedWith(LibraryDisplayOrder)
+        .map { it.key }
+    if (libraries.isNotEmpty()) {
+        libraries.forEach { name -> out += NfLocalCategory(name) { it.libraryName == name } }
+        return out
+    }
+
     val movieCount = items.count { it.kind == MediaKind.MOVIE }
     val seriesCount = items.size - movieCount
     if (movieCount > 0) out += NfLocalCategory("电影") { it.kind == MediaKind.MOVIE }
     if (seriesCount > 0) out += NfLocalCategory("剧集") { it.kind != MediaKind.MOVIE }
 
-    val counts = LinkedHashMap<String, Int>()
-    items.forEach { item ->
-        item.genreTokens().distinct().forEach { tag ->
-            if (tag !in NfKindLikeGenres) counts[tag] = (counts[tag] ?: 0) + 1
+    // 服务端题材优先（完整、跟库相关）；没有时回退本地频次前 14，保证接口失败也有分类可用
+    val tags = if (serverGenres.isNotEmpty()) {
+        serverGenres.filter { it !in NfKindLikeGenres }
+    } else {
+        val counts = LinkedHashMap<String, Int>()
+        items.forEach { item ->
+            item.genreTokens().distinct().forEach { tag ->
+                if (tag !in NfKindLikeGenres) counts[tag] = (counts[tag] ?: 0) + 1
+            }
         }
+        counts.entries.sortedByDescending { it.value }.take(14).map { it.key }
     }
-    counts.entries
-        .sortedByDescending { it.value }
-        .take(14)
-        .forEach { (tag, _) ->
-            out += NfLocalCategory(tag) { it.genreTokens().contains(tag) }
-        }
+    tags.forEach { tag ->
+        out += NfLocalCategory(tag) { it.genreTokens().contains(tag) }
+    }
     return out
 }

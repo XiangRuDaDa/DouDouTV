@@ -48,7 +48,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -79,6 +78,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.model.MediaEntity
+import com.chen.doudoutv.data.model.LibraryDisplayOrder
 import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
@@ -118,7 +118,7 @@ fun HomeScreen(
     isTv: Boolean,
     onOpenSearch: () -> Unit,
     onOpenDetail: (Long) -> Unit,
-    onOpenGenre: (kind: String?, genre: String?) -> Unit,
+    onOpenGenre: (kind: String?, genre: String?, library: String?) -> Unit,
     onOpenCategory: (typeId: String, typeName: String) -> Unit,
     onPlay: (MediaEntity) -> Unit
 ) {
@@ -170,6 +170,13 @@ fun HomeScreen(
         selectedSource?.id?.let { vm.ensureHomeSites(it) }
     }
 
+    // Emby 源的题材清单走服务端 /Genres：首页的动态分类与分类页共用这一份，
+    // 本地频次聚合只认得高频题材，用户看到的就是「还是之前那几类」。
+    val serverGenres = selectedSource?.id?.let { vm.embyGenres(it) }.orEmpty()
+    LaunchedEffect(selectedSource?.id) {
+        selectedSource?.id?.let { vm.ensureEmbyGenres(it) }
+    }
+
     // 首页纵向位置 + 每条横向行的位置都记在 ReturnSpot：进详情再返回（这一页子树被
     // AnimatedContent 整个销毁重建）时，组合的第一帧就站在离开时的位置。
     val listState = ReturnSpot.listState(PhoneHomeKey, precompose = PrecomposeWindow.Phone)
@@ -183,14 +190,7 @@ fun HomeScreen(
     // 「Brand@0.09 → Bg」的顶部渐变，往下整屏都是纯黑，换主题色在首页读不出来；
     // 而且挂在滚动节点上，光晕会跟着内容一起滚走。
     Box(Modifier.fillMaxSize().themeBackdrop()) {
-        // Material3 1.3.2 的下拉刷新：列表顶部下拉即刷新当前来源/线路，
-        // 不用再抬手去够右上角那颗刷新按钮。刷新中沿用 vm.scanning，
-        // 与顶栏那颗按钮的转圈是同一个状态，不会出现两个指示器打架。
-        PullToRefreshBox(
-            isRefreshing = vm.scanning,
-            onRefresh = { vm.refreshHome() },
-            modifier = Modifier.fillMaxSize()
-        ) {
+        // 刷新只留右上角那颗按钮：下拉手势在长列表里太容易误触发整库同步
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
@@ -332,10 +332,10 @@ fun HomeScreen(
             DynamicGallerySections(
                 library = filteredLibrary,
                 cardWidth = cardWidth,
+                serverGenres = serverGenres,
                 onMore = onOpenGenre,
                 onOpenDetail = onOpenDetail
             )
-        }
         }
 
         // ---------- 透明悬浮顶栏（左软件名滚动淡出；右工具栏 + 来源/线路按钮常驻） ----------
@@ -398,14 +398,19 @@ fun HomeScreen(
             IconButton(onClick = onOpenSearch, modifier = Modifier.size(40.dp)) {
                 Icon(Icons.Filled.Search, contentDescription = "搜索", tint = Color.White)
             }
-            if (vm.scanning) {
-                CircularProgressIndicator(
-                    modifier = Modifier.padding(5.dp).width(20.dp),
-                    strokeWidth = 2.dp,
-                    color = Color.White
-                )
-            } else {
-                IconButton(onClick = { vm.refreshHome() }, modifier = Modifier.size(40.dp)) {
+            // 刷新按钮：同步中就地禁用并转圈（不换成别的指示器，按钮位置不跳）
+            IconButton(
+                onClick = { vm.refreshHome() },
+                enabled = !vm.scanning,
+                modifier = Modifier.size(40.dp)
+            ) {
+                if (vm.scanning) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(5.dp).width(20.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White
+                    )
+                } else {
                     Icon(Icons.Filled.Refresh, contentDescription = "刷新当前来源", tint = Color.White)
                 }
             }
@@ -548,16 +553,42 @@ private const val LAZY_TAKE = 10
 private const val MIN_GENRE_ITEMS = 2
 private const val MAX_GENRE_SECTIONS = 4
 
+/** 服务端题材清单可用时首页多展示几行：题材本来就更全，只给 4 行等于白换接口 */
+private const val MAX_SERVER_GENRE_SECTIONS = 8
+
+/** 这些词本身就是类型，已经做成「电影 / 剧集 / 动漫」标签，不再当题材重复列出 */
+private val PhoneKindLikeGenres = setOf("电影", "剧集", "电视剧", "单集", "动漫", "综艺")
+
 /** 手机端首页在 [ReturnSpot] 里的页面标识，纵向位置和各行横向位置都挂在它下面 */
 private const val PhoneHomeKey = "phone_home"
 
 private fun LazyListScope.DynamicGallerySections(
     library: List<MediaEntity>,
     cardWidth: Dp,
-    onMore: (kind: String?, genre: String?) -> Unit,
+    serverGenres: List<String>,
+    onMore: (kind: String?, genre: String?, library: String?) -> Unit,
     onOpenDetail: (Long) -> Unit
 ) {
     if (library.isEmpty()) return
+
+    // Emby 媒体库优先：条目带 libraryName 时按库铺行（NSFW/国漫 等是 CollectionFolder，不是题材）。
+    // 库名已含「电影/电视剧」，不再另铺类型行免重名；无库信息（TVBox/旧数据/回退整库）才退类型+题材。
+    val libraryBlocks = library
+        .filter { it.libraryName.isNotBlank() && it.kind != MediaKind.EPISODE }
+        .groupBy { it.libraryName }
+        .entries.sortedWith(LibraryDisplayOrder)
+    if (libraryBlocks.isNotEmpty()) {
+        for ((name, items) in libraryBlocks) {
+            GallerySection(
+                title = name,
+                items = items.distinctBy { it.id }.take(LAZY_TAKE),
+                cardWidth = cardWidth,
+                onMore = { onMore(null, null, name) },
+                onOpenDetail = onOpenDetail
+            )
+        }
+        return
+    }
 
     // 1. kind 基础分区：MOVIE / SERIES / 其他
     val kindBlocks = library
@@ -572,9 +603,12 @@ private fun LazyListScope.DynamicGallerySections(
             }
         }
 
-    // 2. genre 扩展分区：从所有条目的 genres 拆分
-    val genreToItems = mutableMapOf<String, MutableList<MediaEntity>>()
+    // 2. genre 扩展分区：候选题材名优先取服务端 /Genres 清单（Emby 源），
+    //    条目仍从本地库里取（库里才有海报等可直接显示的字段）。
+    //    本地聚合只按频次取前几个，冷门题材永远挤不进 —— 分类页已经改走服务端，
+    //    首页这一层再按旧的频次口径排，用户看到的还是「还是之前那几类」。
     val genrePattern = Regex("[,，、/\\s]+")
+    val genreToItems = mutableMapOf<String, MutableList<MediaEntity>>()
     for (item in library) {
         // distinct() 防止 genres 字段有重复标签（如 "科幻,科幻,动作"）导致同一 item 被加两次
         val parts = item.genres.split(genrePattern).map { it.trim() }.filter { it.isNotBlank() }.distinct()
@@ -582,13 +616,23 @@ private fun LazyListScope.DynamicGallerySections(
             genreToItems.getOrPut(g) { mutableListOf() }.add(item)
         }
     }
-    // 过滤数量 < MIN_GENRE_ITEMS、kind 分区已覆盖的 genre（如「电影」genre 映射到 MOVIE kind），再按数量倒序取前 MAX_GENRE_SECTIONS
-    val kindAsGenre = setOf("电影", "剧集", "单集")
-    val genreBlocks = genreToItems.entries
-        .map { (g, items) -> g to items.distinctBy { it.id } }
-        .filter { (g, items) -> items.size >= MIN_GENRE_ITEMS && g !in kindAsGenre }
-        .sortedByDescending { it.second.size }
-        .take(MAX_GENRE_SECTIONS)
+    val serverCandidates = serverGenres
+        .filter { it.isNotBlank() && it !in PhoneKindLikeGenres }
+        .distinct()
+    val genreBlocks = if (serverCandidates.isNotEmpty()) {
+        serverCandidates
+            .map { g -> g to (genreToItems[g].orEmpty().distinctBy { it.id }) }
+            .filter { (_, items) -> items.size >= MIN_GENRE_ITEMS }
+            .sortedByDescending { it.second.size }
+            .take(MAX_SERVER_GENRE_SECTIONS)
+    } else {
+        // 过滤数量 < MIN_GENRE_ITEMS、kind 分区已覆盖的 genre（如「电影」genre 映射到 MOVIE kind），再按数量倒序取前 MAX_GENRE_SECTIONS
+        genreToItems.entries
+            .map { (g, items) -> g to items.distinctBy { it.id } }
+            .filter { (g, items) -> items.size >= MIN_GENRE_ITEMS && g !in PhoneKindLikeGenres }
+            .sortedByDescending { it.second.size }
+            .take(MAX_GENRE_SECTIONS)
+    }
 
     // 先 kind 后 genre
     for ((kind, items) in kindBlocks) {
@@ -601,7 +645,7 @@ private fun LazyListScope.DynamicGallerySections(
             title = title,
             items = items.take(LAZY_TAKE),
             cardWidth = cardWidth,
-            onMore = { onMore(kind, null) },
+            onMore = { onMore(kind, null, null) },
             onOpenDetail = onOpenDetail
         )
     }
@@ -610,7 +654,7 @@ private fun LazyListScope.DynamicGallerySections(
             title = genre,
             items = items.take(LAZY_TAKE),
             cardWidth = cardWidth,
-            onMore = { onMore(null, genre) },
+            onMore = { onMore(null, genre, null) },
             onOpenDetail = onOpenDetail
         )
     }
@@ -897,8 +941,8 @@ private fun LineEmptyHint(error: String? = null) {
 
 // ================= 分类浏览页 =================
 
-/** 分类标签：kind 与 genre 组合定义一类（都为 null = 全部） */
-private data class GenreTab(val label: String, val kind: String?, val genre: String?)
+/** 分类标签：kind / genre / library 组合定义一类（都为 null = 全部）；Emby 按媒体库分区时走 library */
+private data class GenreTab(val label: String, val kind: String?, val genre: String?, val library: String? = null)
 
 private const val GENRE_PAGE_SIZE = 60
 
@@ -912,6 +956,7 @@ fun GenreScreen(
     isTv: Boolean,
     initialKind: String?,
     initialGenre: String?,
+    initialLibrary: String? = null,
     onBack: () -> Unit,
     onOpenDetail: (Long) -> Unit
 ) {
@@ -920,36 +965,68 @@ fun GenreScreen(
 
     var kind by remember { mutableStateOf(initialKind) }
     var genre by remember { mutableStateOf(initialGenre) }
+    var library by remember { mutableStateOf(initialLibrary) }
     var tags by remember { mutableStateOf<List<String>>(emptyList()) }
     var items by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var loadingMore by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     // 纵向位置按「页 + 当前筛选」分键，进详情返回时从这一筛选上次的位置起滚
-    val gridState = ReturnSpot.listState("phone_genre/${kind ?: "all"}/${genre ?: "all"}", precompose = PrecomposeWindow.Phone)
+    val gridState = ReturnSpot.listState("phone_genre/${kind ?: "all"}/${genre ?: "all"}/${library ?: "all"}", precompose = PrecomposeWindow.Phone)
 
-    LaunchedEffect(Unit) {
-        tags = runCatching { vm.genreTags() }.getOrDefault(emptyList())
+    // Emby 来源的题材清单问服务端 /Genres：本地聚合只按频次取前 16 个，
+    // 冷门题材永远挤不进，换库后也是那几个高频词 —— 用户看到的就是「分类还是旧的」。
+    val genreSourceId = vm.effectiveHomeSourceId()
+    val serverGenres = genreSourceId?.let { vm.embyGenres(it) }.orEmpty()
+    LaunchedEffect(genreSourceId) {
+        genreSourceId?.let { vm.ensureEmbyGenres(it) }
     }
 
-    LaunchedEffect(kind, genre) {
+    // Emby 媒体库清单（本地、离线、随同步反应式更新）：有库信息时分类按库分区（NSFW 等），
+    // 优先于题材；TVBox / 无库信息时为空，回退下面的题材标签。
+    val fullLibrary by vm.library.collectAsStateWithLifecycle()
+    val libraries = remember(fullLibrary, genreSourceId) {
+        fullLibrary.filter { it.sourceId == genreSourceId && it.libraryName.isNotBlank() && it.kind != MediaKind.EPISODE }
+            .groupBy { it.libraryName }
+            .entries.sortedWith(LibraryDisplayOrder)
+            .map { it.key }
+    }
+
+    LaunchedEffect(serverGenres) {
+        val local = runCatching { vm.genreTags() }.getOrDefault(emptyList())
+        tags = if (serverGenres.isNotEmpty()) {
+            // 服务端清单里混着「电影/剧集」这类类型词，去重后与顶部类型标签重复
+            serverGenres.filter { it.isNotBlank() && it !in PhoneKindLikeGenres }.distinct()
+        } else {
+            local
+        }
+    }
+
+    LaunchedEffect(kind, genre, library) {
         loading = true
-        items = runCatching { vm.browseGenre(kind, genre, GENRE_PAGE_SIZE, 0) }
+        items = runCatching { vm.browseGenre(kind, genre, GENRE_PAGE_SIZE, 0, library) }
             .getOrDefault(emptyList())
         loading = false
     }
 
-    // 标签列表：预设类型 + 库内高频题材
-    val tabs = remember(tags) {
-        buildList {
-            add(GenreTab("全部", null, null))
-            add(GenreTab("电影", MediaKind.MOVIE, null))
-            add(GenreTab("剧集", MediaKind.SERIES, null))
-            add(GenreTab("动漫", null, "动漫"))
-            tags.forEach { add(GenreTab(it, null, it)) }
+    // 标签列表：Emby 有媒体库时按库分区（全部 + 各库）；否则预设类型 + 题材（Emby 走服务端清单，其余本地聚合）
+    val tabs = remember(tags, libraries) {
+        if (libraries.isNotEmpty()) {
+            buildList {
+                add(GenreTab("全部", null, null))
+                libraries.forEach { add(GenreTab(it, null, null, it)) }
+            }
+        } else {
+            buildList {
+                add(GenreTab("全部", null, null))
+                add(GenreTab("电影", MediaKind.MOVIE, null))
+                add(GenreTab("剧集", MediaKind.SERIES, null))
+                add(GenreTab("动漫", null, "动漫"))
+                tags.forEach { add(GenreTab(it, null, it)) }
+            }
         }
     }
-    val currentTab = tabs.firstOrNull { it.kind == kind && it.genre == genre }
+    val currentTab = tabs.firstOrNull { it.kind == kind && it.genre == genre && it.library == library }
 
     // 根容器不滚动（滚动的是下面的网格），所以统一背景直接挂在它上：
     // 原来这里写死了一条「Brand@0.09 → Bg」的顶部渐变，往下整屏纯黑，换主题色在这页读不出来
@@ -1004,7 +1081,7 @@ fun GenreScreen(
                     val selected = currentTab == tab
                     FilterChip(
                         selected = selected,
-                        onClick = { kind = tab.kind; genre = tab.genre },
+                        onClick = { kind = tab.kind; genre = tab.genre; library = tab.library },
                         label = { Text(tab.label, fontWeight = FontWeight.Medium) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AppColors.Brand,
@@ -1082,7 +1159,7 @@ fun GenreScreen(
                                         loadingMore = true
                                         scope.launch {
                                             val more = runCatching {
-                                                vm.browseGenre(kind, genre, GENRE_PAGE_SIZE, items.size)
+                                                vm.browseGenre(kind, genre, GENRE_PAGE_SIZE, items.size, library)
                                             }.getOrDefault(emptyList())
                                             // 追加下一页，去重防止同步间隙产生重复
                                             items = items + more.filterNot { next -> items.any { it.id == next.id } }
