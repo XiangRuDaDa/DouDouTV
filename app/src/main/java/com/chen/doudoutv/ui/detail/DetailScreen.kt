@@ -290,6 +290,26 @@ fun DetailScreen(
     }
 
     /**
+     * 手机端分集分页：一部剧几十上百集时一次性铺出来，手机上要滑很久才够到最后一集。
+     * 每页 20 集（两列 × 10 行），顶部给页码条直接跳。电视端不切分页，保持原来的整季铺开。
+     */
+    val episodePageSize = 20
+    val episodePageCount = remember(visibleEpisodes, episodePageSize) {
+        if (visibleEpisodes.isEmpty()) 0 else (visibleEpisodes.size + episodePageSize - 1) / episodePageSize
+    }
+    var episodePage by remember(mediaId) { mutableStateOf(0) }
+    // 换季 / 换播放源回到第一页：分集集合已经换了，还停在第 5 页会看到不相干的内容
+    LaunchedEffect(selectedSeason, selectedPlaySource) { episodePage = 0 }
+    // 集数变少（换了更短的季）时把越界的页码收回来
+    LaunchedEffect(episodePageCount) {
+        if (episodePage >= episodePageCount) episodePage = 0
+    }
+    val pagedEpisodes = remember(visibleEpisodes, episodePage, episodePageSize) {
+        if (isTv) visibleEpisodes
+        else visibleEpisodes.drop(episodePage * episodePageSize).take(episodePageSize)
+    }
+
+    /**
      * 从封面图提取"聚焦色"，并把整页底色压成它的深色版本。
      *
      * 之前的实现只用了 Palette 的 darkMuted 并给很低的 alpha，暗色海报基本等于纯黑；
@@ -384,6 +404,13 @@ fun DetailScreen(
             val effectiveBackdrop = tmdb?.backdropUrl.orEmpty().ifBlank { item.backdropUrl }
             val effectiveOverview = item.overview.ifBlank { tmdb?.overview.orEmpty() }
             val effectiveRating = if (item.rating > 0) item.rating else tmdb?.rating ?: 0.0
+
+            // 主演名单：Emby 刮削优先、TMDB 补齐，最后回落到源自己给的 actors；
+            // 源给的名单没有头像，走 CastCard 的首字占位样式
+            val castList = (scraped?.actors?.map { it.toCast() }
+                ?: tmdb?.actors?.map { it.toCast() }.orEmpty()
+                    .takeIf { it.isNotEmpty() }
+                ?: splitCastNames(item.actors).take(12).map { CastPerson(it, "", "") })
 
             // 简介折叠态。溢出与否读真实排版结果（hasVisualOverflow），不用字数当代理：
             // 同样长度的简介在不同字号/屏宽下行数差很多，按字数判断会漏展开入口或凭空多一个。
@@ -597,7 +624,7 @@ fun DetailScreen(
                     }
                 }
 
-                // ---------- 刮削信息（标语/分级/工作室/导演/演员）：Emby 优先，TMDB 补齐 ----------
+                // ---------- 刮削信息（标语/分级/工作室/导演）：Emby 优先，TMDB 补齐 ----------
                 run {
                     val tagline = scraped?.tagline.orEmpty().ifBlank { tmdb?.tagline.orEmpty() }
                     val chips = buildList {
@@ -610,13 +637,8 @@ fun DetailScreen(
                         ?: tmdb?.directors?.map { it.toCast() }.orEmpty()
                             .takeIf { it.isNotEmpty() }
                         ?: splitCastNames(item.directors).take(3).map { CastPerson(it, "", "") })
-                    // 源给的名单没有头像，走 CastCard 的首字占位样式；上限与 Emby 那条路一致
-                    val actors = (scraped?.actors?.map { it.toCast() }
-                        ?: tmdb?.actors?.map { it.toCast() }.orEmpty()
-                            .takeIf { it.isNotEmpty() }
-                        ?: splitCastNames(item.actors).take(12).map { CastPerson(it, "", "") })
 
-                    if (tagline.isNotBlank() || chips.isNotEmpty() || directors.isNotEmpty() || actors.isNotEmpty()) {
+                    if (tagline.isNotBlank() || chips.isNotEmpty() || directors.isNotEmpty()) {
                         item {
                             Column(
                                 Modifier
@@ -658,22 +680,6 @@ fun DetailScreen(
                                         style = MaterialTheme.typography.labelMedium,
                                         color = AppColors.TextSecondary
                                     )
-                                }
-
-                                if (actors.isNotEmpty()) {
-                                    Text(
-                                        "主演",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = AppColors.TextPrimary
-                                    )
-                                    LazyRow(
-                                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                        contentPadding = PaddingValues(top = 4.dp)
-                                    ) {
-                                        items(actors, key = { it.name + it.role }) { person ->
-                                            CastCard(person)
-                                        }
-                                    }
                                 }
                             }
                         }
@@ -789,8 +795,34 @@ fun DetailScreen(
                             )
                         }
                     } else {
+                        // ---------- 分页条（仅手机端；集数不多时不出现） ----------
+                        if (!isTv && episodePageCount > 1) {
+                            item {
+                                LazyRow(
+                                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    items(episodePageCount) { p ->
+                                        val from = p * episodePageSize + 1
+                                        val to = minOf((p + 1) * episodePageSize, visibleEpisodes.size)
+                                        FilterChip(
+                                            selected = episodePage == p,
+                                            onClick = { episodePage = p },
+                                            label = { Text("$from-$to") },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = AppColors.Brand,
+                                                selectedLabelColor = Color.White,
+                                                containerColor = AppColors.SurfaceHi,
+                                                labelColor = AppColors.TextSecondary
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
                         itemsIndexed(
-                            visibleEpisodes.chunked(if (isTv) 4 else 2),
+                            pagedEpisodes.chunked(if (isTv) 4 else 2),
                             // key 带位置 + 行首集 id：切线路/翻页时同一位置换了数据就换 key，
                             // 没换的行不重新组合，选集卡不用重画
                             key = { index, row -> "ep_row_${index}_${row.first().id}" },
@@ -812,6 +844,34 @@ fun DetailScreen(
                                 }
                                 repeat((if (isTv) 4 else 2) - row.size) {
                                     Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---------- 主演：排在剧集之后 ----------
+                // 原来夹在简介与选集之间，滚到选集前总要先路过一排头像；
+                // 挪到选集下面，进详情先看到剧情与选集，主演放在末尾。
+                if (castList.isNotEmpty()) {
+                    item {
+                        Column(
+                            Modifier
+                                .padding(horizontal = 18.dp)
+                                .padding(top = 18.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                "主演",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = AppColors.TextPrimary
+                            )
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                contentPadding = PaddingValues(top = 4.dp)
+                            ) {
+                                items(castList, key = { it.name + it.role }) { person ->
+                                    CastCard(person)
                                 }
                             }
                         }

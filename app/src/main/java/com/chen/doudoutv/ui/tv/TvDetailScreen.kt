@@ -126,10 +126,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  *   · 只读区块（简介、导演、署名）不接收焦点，下键会直接跳过它们；
  *     主演行是例外：Emby / TMDB 带演员照片，头像本身是可聚焦的一站 ——
  *     电视上没有滚轮，焦点走不到的内容就等于看不到，尤其电影没有分集可落；
- *   · 页面以选集收尾：焦点走不出选集网格，放在选集下方的内容等于看不见，
- *     所以导演排在简介之后、主演之前，TMDB 署名排在主演之后，都在同一屏里；
+ *   · 主演排在选集之后（整页最后一层）：进详情先看剧情与选集，
+ *     选集末行按下即落到主演头像行；导演与 TMDB 署名仍留在选集之前，
+ *     署名必须在焦点滚得到的区域才有效；
  *   · 首屏仍保留「大图优先」：55% 顶部占位把标题与操作区压到屏幕下半部，
- *     下键进入第一集时，简介、主演、选集首行同屏可见。
+ *     下键进入第一集时，简介与选集首行同屏可见。
  *
  * 版式与观看距离：
  *   · 左侧大海报 + 右侧文案的两栏布局，替代手机端「上下堆叠」；
@@ -141,10 +142,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  * 背景沿用「封面聚焦色填充 + 封面到填充色的长距离溶解过渡」。
  *
  * 焦点锚点链（本页只认这一条链，全部显式声明，规范 R1/R4）：
- *   收藏 ⇅ 播放/从头开始 ⇅（简介展开）⇅ 主演头像 ⇅ 选集控制条（源 · 季 · 翻页）⇅ 选集网格
+ *   收藏 ⇅ 播放/从头开始 ⇅（简介展开）⇅ 选集控制条（源 · 季 · 翻页）⇅ 选集网格 ⇅ 主演头像
  *   · 下键逐层走，一层都没有才跳过只读区块；
  *   · 有分集时仍按「控制条优先」，头像行不插进这条快捷路径，只能左右几键走到；
  *   · 在控制条上完成的切换（换源、换季、翻页）焦点留在控制条，主动按下才进网格；
+ *   · 主演在选集网格之后，是整页最后一层，末行按下才落得到；
  *   · ↑ 走到收藏即停，并把滚动位置送回首屏构图（海报 + 标题大图态），
  *     不能只靠 bring-into-view 的最小滚动 —— 那样标题会顶在屏幕顶上回不去。
  */
@@ -675,7 +677,7 @@ fun TvDetailScreen(
          *
          * 只依赖焦点的自动 brings-into-view，视口会「最小滚动」，落点虽然露出来了，
          * 简介顶部却常常被切掉；先把内容锚点滚到顶部再聚焦，才能稳定做到
-         * 「一屏看到简介 + 主演 + 选集首行」，这也是「一次下键看全」的关键。
+         * 「一屏看到简介 + 选集首行」，这也是「一次下键看全」的关键。
          */
         fun enterEpisodeSection(target: FocusRequester) {
             scope.launch {
@@ -706,6 +708,11 @@ fun TvDetailScreen(
         // 每颗头像一个焦点站：requester 由本页先建好再交给头像行，
         // 「播放键 ↓ 落到谁」要在这里就能算出来，不能让组件自己造。
         val castFocusRequesters = remember(tvCast) { List(tvCast.size) { FocusRequester() } }
+        /**
+         * 网格末行最后一格的焦点器：主演挪到选集下面之后，它的上键要落回这一格。
+         * 用状态存，网格换季/翻页换了节点时头像行会跟着重组，不会攥着旧节点不放。
+         */
+        val lastCellRequester = remember { mutableStateOf<FocusRequester?>(null) }
 
         /**
          * 播放区按下 ↓ 的落点。展开按钮排在简介正下方，所以有长简介时它是第一站；
@@ -721,22 +728,27 @@ fun TvDetailScreen(
             hasCast -> castFocusRequesters.first()
             else -> FocusRequester.Cancel
         }
-        /** 展开按钮的下一站：往下依次是主演头像行、选集控制条、剧集网格；电影到这就是最后一站 */
+        /**
+         * 展开按钮的下一站：往下是选集链（控制条 > 网格），再往下才是主演头像行；
+         * 电影没有分集时直接落到主演，这就是整页最后一站。
+         */
         val belowDesc: FocusRequester = when {
+            hasEpisodes && hasControlAnchor -> controlsFocusRequester
+            hasEpisodes -> firstEpFocusRequester
             hasCast -> castFocusRequesters.first()
-            hasEpisodes && hasControlAnchor -> controlsFocusRequester
-            hasEpisodes -> firstEpFocusRequester
             else -> FocusRequester.Cancel
         }
-        /** 头像行的上一站：按钮已排在它上方，没有展开按钮时才直接回播放键 */
+        /**
+         * 头像行的上一站：它现在排在选集网格下面，正上方是网格末行最后一格。
+         * 网格还没组合出来时（首帧）退回控制条，不能指向没挂载的节点。
+         */
         val castUpTarget: FocusRequester =
-            if (descTruncated) descFocusRequester else playFocusRequester
-        /** 头像行的下一站：选集链 */
-        val castDownTarget: FocusRequester = when {
-            hasEpisodes && hasControlAnchor -> controlsFocusRequester
-            hasEpisodes -> firstEpFocusRequester
-            else -> FocusRequester.Cancel
-        }
+            lastCellRequester.value?.takeIf { hasEpisodes }
+                ?: if (hasControlAnchor) controlsFocusRequester
+                else if (descTruncated) descFocusRequester
+                else playFocusRequester
+        /** 头像行的下一站：主演是整页最后一层，下面没有内容了 */
+        val castDownTarget: FocusRequester = FocusRequester.Cancel
         /** 展开按钮的上一站：它紧贴简介，往上就是播放键 */
         val descUpTarget: FocusRequester = playFocusRequester
 
@@ -751,7 +763,7 @@ fun TvDetailScreen(
          * 单页滚动。所有内容一次性组合，方向键只移动焦点：
          *   · 首屏 = 大图 + 标题 / 元信息 / 操作按钮；
          *   · 下键把焦点交给第一集，滚动容器随焦点 bring-into-view 滚动，
-         *     简介、主演、选集首行因此能同屏出现；
+         *     简介与选集首行因此能同屏出现；
          *   · 没有「整页翻转」动画，也就不会出现旧页退场时内容被卸载、焦点丢失。
          */
         Column(
@@ -1030,26 +1042,6 @@ fun TvDetailScreen(
                             TvInfoLine("导演", directors)
                         }
 
-                        // ---------- 主演：Emby / TMDB 带照片时铺一排可聚焦头像，否则退回文字行 ----------
-                        if (hasCast) {
-                            Spacer(Modifier.height(12.dp))
-                            Text(
-                                "主演",
-                                color = TvText.Muted,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            TvCastRow(
-                                cast = tvCast,
-                                requesters = castFocusRequesters,
-                                focusUp = castUpTarget,
-                                focusDown = castDownTarget
-                            )
-                        } else if (actorNames.isNotEmpty()) {
-                            Spacer(Modifier.height(10.dp))
-                            TvInfoLine("主演", actorNames.joinToString(" / "))
-                        }
-
                         // ---------- 数据来源署名：只读，位置仍要在焦点滚得到的区域 ----------
                         // TMDB 条款要求署名可见：放在选集下方等于藏在焦点走不到的地方，等于没署。
                         if (tmdb != null) {
@@ -1080,10 +1072,9 @@ fun TvDetailScreen(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     val pillFocus = Modifier.focusProperties {
-                                        // ↑ 按版面顺序往回走：主演头像 > 展开按钮 > 播放键
-                                        // （展开按钮已上移到简介下方，不再是控制条的上一站）
-                                        up = castFocusRequesters.lastOrNull()
-                                            ?: if (descTruncated) descFocusRequester else playFocusRequester
+                                        // ↑ 按版面顺序往回走：展开按钮 > 播放键
+                                        // （主演已下移到选集之后，不再是控制条的上一站）
+                                        up = if (descTruncated) descFocusRequester else playFocusRequester
                                         down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
                                     }.then(publishStand(controlsFocusRequester, "controls"))
                                     // 播放源 / 云盘切换：多条源时展示，默认第一条
@@ -1193,6 +1184,10 @@ fun TvDetailScreen(
                                         val cellFocus = remember(ep.id) { FocusRequester() }
                                         val cellTarget =
                                             if (rowIdx == 0 && idx == 0) firstEpFocusRequester else cellFocus
+                                        // 末行最后一格 = 主演头像行正上方那一格，主演的上键落在它
+                                        if (rowIdx == epRows.lastIndex && idx == rowEps.lastIndex) {
+                                            lastCellRequester.value = cellTarget
+                                        }
                                         if (ep.id == recallEpisodeId) {
                                             // 重建后的落点：组合期就把这一格交给 stand（同 ReturnSpot.cardStand 的交法），
                                             // 抢焦效果在本帧组合之后才跑，取到的就是它
@@ -1212,9 +1207,9 @@ fun TvDetailScreen(
                                                 else if (descTruncated) descFocusRequester
                                                 else playFocusRequester
                                             } else null,
-                                            // 末行再按下：留在原地，不让焦点跳出选集
+                                            // 末行再按下：落到选集下面的主演头像行；没有主演就留在原地
                                             focusDown = if (rowIdx == epRows.lastIndex) {
-                                                FocusRequester.Cancel
+                                                if (hasCast) castFocusRequesters.first() else FocusRequester.Cancel
                                             } else null,
                                             onClick = {
                                                 TvNavHistory.playedEpisodeId = ep.id
@@ -1235,8 +1230,28 @@ fun TvDetailScreen(
                                 modifier = Modifier.fillMaxWidth().height(160.dp)
                             )
                         }
-                        // 页面到选集为止：选集下方的内容焦点走不到，
-                        // 导演与署名已上移到主演之后。
+
+                        // ---------- 主演：排在选集之后 ----------
+                        // 原来夹在简介与选集之间，主页选集前总要先路过一排头像；
+                        // 挪到选集下面后它是整页最后一层：选集末行按下即落到这里。
+                        if (hasCast) {
+                            Spacer(Modifier.height(12.dp))
+                            Text(
+                                "主演",
+                                color = TvText.Muted,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            TvCastRow(
+                                cast = tvCast,
+                                requesters = castFocusRequesters,
+                                focusUp = castUpTarget,
+                                focusDown = castDownTarget
+                            )
+                        } else if (actorNames.isNotEmpty()) {
+                            Spacer(Modifier.height(10.dp))
+                            TvInfoLine("主演", actorNames.joinToString(" / "))
+                        }
                     }
                 }
             }
