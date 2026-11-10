@@ -263,13 +263,26 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 val enabled = repo.enabledSources()
                 if (enabled.isNotEmpty() && !repo.hasAnyMedia()) {
-                    scanAll()
-                } else {
-                    // 已有内容：启动只对 Emby 源做增量更新（runSync 内部按 count 自动选全量/增量），
-                    // TVBox 不在启动时重拉。增量只取上次之后的变化，轻量、避免反复整库同步被限流。
-                    enabled.filter { it.kind == SourceKind.EMBY }.forEach { src ->
-                        runCatching { runSync(src) }
+                    // 界面上的「全部同步」入口已经删掉，但冷启动的首次铺库还得留着：
+                    // 新装完 App 库里是空的，没有这一下用户看到的就是一片空。
+                    // 逐个来源同步，单个失败不打断其余来源。
+                    scanning = true
+                    scanMessage = "正在同步…"
+                    try {
+                        var total = 0
+                        enabled.forEach { src ->
+                            runCatching { total += runSync(src) }
+                        }
+                        if (total > 0) message = "首次同步完成，共 $total 个条目"
+                    } finally {
+                        scanning = false
+                        scanMessage = ""
                     }
+                } else {
+                    // 已有内容：启动不再自动拉增量。
+                    // 增量由用户自己点刷新触发 —— 每次开 App 都偷偷打一次服务端，
+                    // 既容易被限流，也让「顶部那条同步进度线」在冷启动时一直亮着，
+                    // 用户看着像卡住。想更新就自己点刷新。
                 }
             }
             // 启动时汇总各来源已入库条目数（来源页「N 个条目」展示用）
@@ -802,7 +815,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun runSync(source: SourceEntity, force: Boolean = false): Int {
         var mode = "全量"
-        // 每个来源各自一份进度：全部同步时进度条按当前来源重新走一遍
+        // 每个来源各自一份进度：逐个来源同步时进度条按当前来源重新走一遍
         scanFetched = 0
         scanTotal = 0
         val count = when (source.kind) {
@@ -1005,14 +1018,14 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 扫描 ----------
 
-    /** 界面顶栏「全部同步」入口，语义等同 scanAll，命名更贴合按钮文案 */
-    fun syncAll() = scanAll()
-
     /**
      * 首页刷新按钮：只刷当前生效的首页来源，不动其他来源。
      *   · TVBox 且已选中线路 → 只拉该线路的 homeContent（并刷新它的分类）
      *   · TVBox 聚合视图 / Emby → 只同步这一个来源
-     * 全量刷新（所有来源）保留在来源页的「全部同步」。
+     *
+     * 「一键刷所有来源」这个入口已经删掉：来源一多，全量同步会把每个源的首页、
+     * 分类、详情都重拉一遍，既慢又容易撞上源的限流（公益服按客户端名/频率封）。
+     * 现在要刷哪一路，就在来源页点那张卡片自己的「刷新同步」。
      */
     fun refreshHome() {
         if (scanning) return
@@ -1052,44 +1065,6 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
                 message = "已刷新「$scopeName」：$added 个条目"
             } catch (e: Exception) {
                 message = "刷新失败：${e.message ?: "网络或接口异常"}"
-            } finally {
-                scanning = false
-                scanMessage = ""
-            }
-        }
-    }
-
-    fun scanAll() {
-        if (scanning) return
-        viewModelScope.launch {
-            scanning = true
-            scanMessage = "准备同步…"
-            var total = 0
-            val errors = mutableListOf<String>()
-            try {
-                val enabled = repo.enabledSources()
-                if (enabled.isEmpty()) {
-                    message = "还没有可用的来源，请先添加"
-                    return@launch
-                }
-                for (src in enabled) {
-                    scanMessage = "正在同步 ${src.name}…"
-                    _syncingSourceIds[src.id] = true
-                    // 单个来源失败不能中断其他来源的同步
-                    try {
-                        total += runSync(src)
-                    } catch (e: Exception) {
-                        errors += "${src.name}：${e.message ?: "网络或接口异常"}"
-                    } finally {
-                        _syncingSourceIds.remove(src.id)
-                    }
-                }
-                message = when {
-                    total > 0 && errors.isEmpty() -> "同步完成，共 $total 个条目"
-                    total > 0 -> "同步完成，共 $total 个条目；部分来源失败：${errors.joinToString("；")}"
-                    errors.isNotEmpty() -> "同步失败：${errors.joinToString("；")}"
-                    else -> "没有获取到内容"
-                }
             } finally {
                 scanning = false
                 scanMessage = ""

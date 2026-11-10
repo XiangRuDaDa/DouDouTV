@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +43,9 @@ import com.chen.doudoutv.core.AppCache
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.core.VideoCache
 import com.chen.doudoutv.player.PlayerFactory
+import com.chen.doudoutv.ui.components.AppButton
+import com.chen.doudoutv.ui.components.AppButtonVariant
+import com.chen.doudoutv.ui.components.GlassBarClearance
 import com.chen.doudoutv.ui.components.TmdbDisclaimer
 import com.chen.doudoutv.ui.components.ThemeSwatch
 import com.chen.doudoutv.ui.LibraryViewModel
@@ -129,7 +130,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp, 20.dp, 16.dp, 32.dp),
+                .padding(16.dp, 20.dp, 16.dp, 32.dp + GlassBarClearance),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
@@ -286,9 +287,10 @@ fun SettingsScreen(vm: LibraryViewModel) {
                                 color = AppColors.TextTertiary
                             )
                         }
-                        Button(
+                        AppButton(
+                            text = if (clearing) "清除中…" else "清除缓存",
                             onClick = {
-                                if (clearing) return@Button
+                                if (clearing) return@AppButton
                                 clearing = true
                                 scope.launch {
                                     vm.clearScrapeCache()
@@ -296,17 +298,10 @@ fun SettingsScreen(vm: LibraryViewModel) {
                                     clearing = false
                                 }
                             },
+                            variant = AppButtonVariant.Neutral,
                             shape = Radius.Md,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AppColors.SurfaceHi,
-                                contentColor = AppColors.TextPrimary
-                            )
-                        ) {
-                            Text(
-                                if (clearing) "清除中…" else "清除缓存",
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
+                            textStyle = MaterialTheme.typography.labelMedium
+                        )
                     }
                 }
             }
@@ -548,15 +543,14 @@ private fun ActionRow(
                 color = AppColors.TextPrimary,
                 modifier = Modifier.weight(1f)
             )
-            Button(
+            AppButton(
+                text = actionLabel,
                 onClick = onClick,
+                variant = AppButtonVariant.Neutral,
                 shape = Radius.Sm,
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = AppColors.Brand,
-                    contentColor = Color.White
-                )
-            ) { Text(actionLabel, style = MaterialTheme.typography.labelMedium) }
+                textStyle = MaterialTheme.typography.labelMedium
+            )
         }
         Text(
             hint,

@@ -30,6 +30,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -39,8 +40,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -72,6 +71,8 @@ import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.data.tvbox.TvBoxClient
 import com.chen.doudoutv.player.PlayerFactory
+import com.chen.doudoutv.ui.components.AppButton
+import com.chen.doudoutv.ui.components.AppButtonVariant
 import com.chen.doudoutv.ui.components.usesSourceEpisodeName
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.DouDouTvTheme
@@ -1514,14 +1515,15 @@ private fun SubtitleStyleDialog(
                 ) {
                     bgValues.forEach { v ->
                         val selected = kotlin.math.abs(v - bgAlpha) < 0.05f
-                        Button(
+                        AppButton(
+                            text = "${(v * 100).toInt()}%",
                             onClick = { onChange(v, textSize) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (selected) AppColors.Brand else AppColors.SurfaceHi,
-                                contentColor = if (selected) Color.White else AppColors.TextSecondary
-                            ),
+                            variant = if (selected) AppButtonVariant.Primary else AppButtonVariant.Neutral,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            textStyle = MaterialTheme.typography.labelMedium,
+                            minHeight = 0.dp,
                             modifier = Modifier.height(32.dp)
-                        ) { Text("${(v * 100).toInt()}%") }
+                        )
                     }
                 }
                 Text(
@@ -1533,14 +1535,15 @@ private fun SubtitleStyleDialog(
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     sizeValues.forEach { v ->
                         val selected = kotlin.math.abs(v - textSize) < 1f
-                        Button(
+                        AppButton(
+                            text = "${v.toInt()}sp",
                             onClick = { onChange(bgAlpha, v) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (selected) AppColors.Brand else AppColors.SurfaceHi,
-                                contentColor = if (selected) Color.White else AppColors.TextSecondary
-                            ),
+                            variant = if (selected) AppButtonVariant.Primary else AppButtonVariant.Neutral,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            textStyle = MaterialTheme.typography.labelMedium,
+                            minHeight = 0.dp,
                             modifier = Modifier.height(32.dp)
-                        ) { Text("${v.toInt()}sp") }
+                        )
                     }
                 }
             }

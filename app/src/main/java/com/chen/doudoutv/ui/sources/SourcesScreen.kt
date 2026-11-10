@@ -25,8 +25,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -39,7 +37,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -64,6 +61,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.components.AppButton
+import com.chen.doudoutv.ui.components.AppButtonVariant
+import com.chen.doudoutv.ui.components.GlassBarClearance
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.themeBackdrop
 import com.chen.doudoutv.ui.theme.Radius
@@ -89,40 +89,17 @@ fun SourcesScreen(vm: LibraryViewModel, isTv: Boolean = false) {
     val tvboxes = remember(sources) { sources.filter { it.kind == SourceKind.TVBOX } }
 
     Scaffold(
-        containerColor = AppColors.Bg,
-        bottomBar = {
-            Surface(color = AppColors.Bg) {
-                Button(
-                    onClick = { showAdd = true },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AppColors.Brand,
-                        contentColor = Color.White
-                    ),
-                    shape = Radius.Lg,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                        .height(50.dp)
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("添加来源", fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                }
-            }
-        }
+        containerColor = AppColors.Bg
     ) { padding ->
         // 光晕画在不滚动的外层：挂在 LazyColumn 上会跟内容一起滚走，滚到底就只剩纯黑
         Box(Modifier.fillMaxSize().themeBackdrop()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(padding),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp + GlassBarClearance),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 item {
-                    Header(
-                        syncing = vm.scanning,
-                        onSyncAll = { vm.syncAll() }
-                    )
+                    Header(onAdd = { showAdd = true })
                 }
 
                 if (sources.isEmpty()) {
@@ -200,16 +177,14 @@ fun SourcesScreen(vm: LibraryViewModel, isTv: Boolean = false) {
                 )
             },
             confirmButton = {
-                Button(
+                AppButton(
+                    text = "删除",
                     onClick = {
                         vm.removeSource(src)
                         deleting = null
                     },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = AppColors.Danger,
-                        contentColor = Color.White
-                    )
-                ) { Text("删除") }
+                    variant = AppButtonVariant.Danger
+                )
             },
             dismissButton = {
                 TextButton(onClick = { deleting = null }) {
@@ -221,7 +196,7 @@ fun SourcesScreen(vm: LibraryViewModel, isTv: Boolean = false) {
 }
 
 @Composable
-private fun Header(syncing: Boolean, onSyncAll: () -> Unit) {
+private fun Header(onAdd: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -238,29 +213,19 @@ private fun Header(syncing: Boolean, onSyncAll: () -> Unit) {
                 color = AppColors.TextTertiary
             )
         }
-        // 同步中就地禁用并显示进度态，按钮位置不跳（换成纯文字会让这一行左右抖）
-        TextButton(
-            onClick = onSyncAll,
-            enabled = !syncing,
-            colors = ButtonDefaults.textButtonColors(
-                contentColor = AppColors.BrandSoft,
-                disabledContentColor = AppColors.TextSecondary
-            )
-        ) {
-            if (syncing) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = AppColors.Brand
-                )
-                Spacer(Modifier.width(6.dp))
-                Text("同步中…", fontSize = 13.sp)
-            } else {
-                Icon(Icons.Filled.Sync, contentDescription = null, modifier = Modifier.size(17.dp))
-                Spacer(Modifier.width(5.dp))
-                Text("全部同步", fontSize = 13.sp)
-            }
-        }
+        // 「添加来源」放在顶栏右上角：原来它单独占一条底栏，
+        // 底栏里除了这一个按钮什么都没有，白占一整条、还把内容区切掉一块。
+        AppButton(
+            text = "添加来源",
+            onClick = onAdd,
+            variant = AppButtonVariant.Primary,
+            shape = Radius.Md,
+            icon = Icons.Filled.Add,
+            iconSize = 18.dp,
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            textStyle = MaterialTheme.typography.labelMedium,
+            minHeight = 36.dp
+        )
     }
 }
 
@@ -665,7 +630,8 @@ private fun SourceDialog(
             }
         },
         confirmButton = {
-            Button(
+            AppButton(
+                text = if (initial == null) "添加来源" else "保存",
                 onClick = {
                     if (canSubmit) {
                         onConfirm(
@@ -676,20 +642,13 @@ private fun SourceDialog(
                     }
                 },
                 enabled = canSubmit,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = AppColors.Brand,
-                    contentColor = Color.White,
-                    disabledContainerColor = AppColors.SurfaceHi,
-                    disabledContentColor = AppColors.TextTertiary
-                ),
-                shape = Radius.Md
-            ) {
-                Text(
-                    if (initial == null) "添加来源" else "保存",
+                variant = AppButtonVariant.Primary,
+                shape = Radius.Md,
+                textStyle = MaterialTheme.typography.labelLarge.copy(
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Medium
                 )
-            }
+            )
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {

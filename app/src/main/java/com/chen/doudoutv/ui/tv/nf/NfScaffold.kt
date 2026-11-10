@@ -1,5 +1,7 @@
 package com.chen.doudoutv.ui.tv.nf
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +33,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusEvent
@@ -45,13 +48,16 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.components.ButtonMaterial
 import com.chen.doudoutv.ui.theme.AppColors
+import com.chen.doudoutv.ui.theme.Motion
 import com.chen.doudoutv.ui.theme.Radius
 import com.chen.doudoutv.ui.theme.TvText
 import com.chen.doudoutv.ui.theme.themeBackdrop
@@ -569,25 +575,63 @@ class NfLayerJump internal constructor(private val launchJump: (List<FocusReques
     operator fun invoke(vararg targets: FocusRequester): Boolean = launchJump(targets.toList())
 }
 
-/** 页面里的一颗普通操作（空态重试、切换来源确认等），沿用导航条按钮的层级语言 */
+/**
+ * 页面里的一颗普通操作（空态重试、切换来源确认等），沿用导航条按钮的层级语言。
+ *
+ * 材质与全局按钮同一套：[primary] 为真走品牌渐变实底压黑字，
+ * 否则走磨砂玻璃压白字。焦点仍是白边 + 放大，不靠换填充色。
+ */
 @Composable
 fun NfActionButton(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     /** 左侧真图标；为空时只出文案 */
-    icon: androidx.compose.ui.graphics.vector.ImageVector? = null
+    icon: androidx.compose.ui.graphics.vector.ImageVector? = null,
+    /**
+     * 主操作（搜索、添加来源、只用这个来源）传 true：品牌渐变实底 + 黑字。
+     * 次操作（清空、取消、重试）保持默认：磨砂玻璃 + 白字。
+     */
+    primary: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val contentColor = if (focused) Color.Black else TvText.Title
+    val scale by animateFloatAsState(
+        if (focused) 1.06f else 1f,
+        tween(Motion.FAST, easing = Motion.Ease),
+        label = "nfAction"
+    )
+    val brand = AppColors.Brand
+    val brandSoft = AppColors.BrandSoft
+    val contentColor = if (primary) Color.Black else TvText.Title
     Box(
         modifier
-            .clip(Radius.Md)
-            .background(if (focused) Color.White else AppColors.Brand.copy(alpha = 0.24f))
+            .zIndex(if (focused) 1f else 0f)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
-                else Modifier.border(1.dp, AppColors.Brand, Radius.Md)
+                if (primary) {
+                    Modifier.shadow(
+                        ButtonMaterial.PrimaryGlow,
+                        Radius.Md,
+                        clip = false,
+                        ambientColor = brand.copy(alpha = 0.35f),
+                        spotColor = brand.copy(alpha = 0.45f)
+                    )
+                } else Modifier
+            )
+            .clip(Radius.Md)
+            .background(
+                Brush.verticalGradient(
+                    if (primary) ButtonMaterial.primaryStops(brand, brandSoft)
+                    else ButtonMaterial.glassStops()
+                )
+            )
+            .then(
+                when {
+                    focused -> Modifier.border(2.dp, Color.White, Radius.Md)
+                    primary -> Modifier.border(1.dp, ButtonMaterial.highlightEdge, Radius.Md)
+                    else -> Modifier.border(1.dp, ButtonMaterial.glassEdge, Radius.Md)
+                }
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)

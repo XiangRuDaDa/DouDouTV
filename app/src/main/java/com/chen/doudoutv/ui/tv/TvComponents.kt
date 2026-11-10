@@ -38,12 +38,15 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.layout.LocalPinnableContainer
 import androidx.compose.ui.platform.LocalConfiguration
@@ -64,6 +67,7 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.model.MediaEntity
+import com.chen.doudoutv.ui.components.ButtonMaterial
 import com.chen.doudoutv.ui.components.PosterArt
 import com.chen.doudoutv.ui.components.PosterFallback
 import com.chen.doudoutv.ui.theme.AppColors
@@ -286,7 +290,13 @@ private fun tvButtonPadding(size: TvButtonSize): PaddingValues = when (size) {
     TvButtonSize.Lg -> PaddingValues(horizontal = 26.dp, vertical = 13.dp)
 }
 
-/** 电视上的主按钮：品牌色实底（主操作）或品牌色淡底（次操作），聚焦时加粗白边并提到更亮的一档 */
+/**
+ * 电视上的主按钮：品牌渐变实底（主操作）或磨砂玻璃（次操作），聚焦时加白边并放大。
+ *
+ * 材质与手机端共用 [ButtonMaterial]：品牌色上浅下深的渐变 + 顶部内高光 + 品牌光晕，
+ * 实底压黑字、玻璃压白字。焦点信号仍是白边 + 放大，不靠换填充色——
+ * 十英尺下焦点是常态，整颗反白会把主题色在屏幕上唯一的大色块抹掉。
+ */
 @Composable
 fun TvPillButton(
     text: String,
@@ -322,20 +332,32 @@ fun TvPillButton(
             // 放大后要把绘制层级抬起来，否则同排右侧的兄弟节点会压在白边上面
             .zIndex(if (focused) 1f else 0f)
             .graphicsLayer { scaleX = scale; scaleY = scale }
+            .then(
+                // 只有实底档发光：一屏多颗光晕会互相干扰，反而显脏
+                if (primary) {
+                    Modifier.shadow(
+                        ButtonMaterial.PrimaryGlow,
+                        Radius.Md,
+                        clip = false,
+                        ambientColor = brand.copy(alpha = 0.35f),
+                        spotColor = brand.copy(alpha = 0.45f)
+                    )
+                } else Modifier
+            )
             .clip(Radius.Md)
             .background(
-                // 填充整颗跟着主题色走，聚焦态不再刷纯白：
-                // 十英尺下焦点是常态（进页第一个落点就是主按钮），
-                // 白填充等于把主题色在屏幕上唯一的大色块抹掉，看上去就是「按钮没适配主题」。
-                // 层级靠「浅色实底 → 品牌色 → 品牌色淡底」三档加白边拉开，不再靠白/黑两套色相。
+                Brush.verticalGradient(
+                    if (primary) ButtonMaterial.primaryStops(brand, brandSoft)
+                    else ButtonMaterial.glassStops()
+                )
+            )
+            .then(
                 when {
-                    primary && focused -> brandSoft
-                    primary -> brand
-                    focused -> brand.copy(alpha = 0.46f)
-                    else -> brand.copy(alpha = 0.18f)
+                    focused -> Modifier.border(2.dp, Color.White, Radius.Md)
+                    primary -> Modifier.border(1.dp, ButtonMaterial.highlightEdge, Radius.Md)
+                    else -> Modifier.border(1.dp, ButtonMaterial.glassEdge, Radius.Md)
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -345,8 +367,8 @@ fun TvPillButton(
             .padding(tvButtonPadding(size))
     ) {
         val textColor = when {
-            // 主按钮聚焦压在浅色上，黑字最稳；其余态都在深色上，用白字
-            primary && focused -> Color.Black
+            // 实底压黑字：品牌色明度在中档，黑字比白字对比度高一倍
+            primary -> Color.Black
             size == TvButtonSize.Sm -> TvText.Body
             else -> TvText.Title
         }
@@ -400,6 +422,9 @@ fun TvPillButton(
 /**
  * 播放主按钮：在 TvPillButton 基础上左侧加一个播放图标，
  * 视觉上和截图的「▶ 开始观看 S05E01」一致。
+ *
+ * 材质与焦点行为跟 TvPillButton 完全一致，直接委托过去：
+ * 以前这里是另一份手写实现，两份各自演进过一次，填充色已经对不上了。
  */
 @Composable
 fun TvPlayButton(
@@ -408,43 +433,14 @@ fun TvPlayButton(
     size: TvButtonSize = TvButtonSize.Md,
     onClick: () -> Unit
 ) {
-    val interaction = remember { MutableInteractionSource() }
-    val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(Motion.FAST), label = "play_pill")
-
-    Row(
-        modifier
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(Radius.Md)
-            .background(if (focused) AppColors.BrandSoft else AppColors.Brand)
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .focusable(interactionSource = interaction)
-            .padding(tvButtonPadding(size)),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        androidx.compose.material3.Icon(
-            imageVector = Icons.Filled.PlayArrow,
-            contentDescription = null,
-            tint = if (focused) Color.Black else Color.White,
-            // 图标跟按钮同档缩放，避免出现「小胶囊里塞个标准大的三角」
-            modifier = Modifier.size(
-                when (size) {
-                    TvButtonSize.Sm -> 18.dp
-                    TvButtonSize.Md -> 22.dp
-                    TvButtonSize.Lg -> 24.dp
-                }
-            )
-        )
-        Text(
-            text,
-            color = if (focused) Color.Black else TvText.Title,
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1
-        )
-    }
+    TvPillButton(
+        text = text,
+        modifier = modifier,
+        primary = true,
+        size = size,
+        icon = Icons.Filled.PlayArrow,
+        onClick = onClick
+    )
 }
 
 /**
@@ -487,14 +483,20 @@ fun TvIconButton(
             .clip(shape)
             .background(
                 when {
-                    focused -> Color.White
-                    active -> Color.White.copy(alpha = 0.22f)
-                    else -> Color.White.copy(alpha = 0.12f)
+                    // 焦点态整颗反白：这一档不参与材质统一。
+                    // 十英尺下焦点是常态，整颗纯白是隔着三米唯一还能一眼认出的信号。
+                    focused -> SolidColor(Color.White)
+                    // 选中态（已收藏等）走品牌渐变 + 黑字，和主按钮同一套语言
+                    active -> Brush.verticalGradient(
+                        ButtonMaterial.primaryStops(AppColors.Brand, AppColors.BrandSoft)
+                    )
+                    else -> Brush.verticalGradient(ButtonMaterial.glassStops())
                 }
             )
             .then(
                 if (focused) Modifier.border(2.dp, Color.White, shape)
-                else Modifier.border(1.dp, Color.White.copy(alpha = 0.28f), shape)
+                else if (active) Modifier.border(1.dp, ButtonMaterial.highlightEdge, shape)
+                else Modifier.border(1.dp, ButtonMaterial.glassEdge, shape)
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction),
@@ -503,7 +505,11 @@ fun TvIconButton(
         androidx.compose.material3.Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = if (focused) Color.Black else TvText.Title,
+            tint = when {
+                focused -> Color.Black
+                active -> Color.Black
+                else -> TvText.Title
+            },
             // 图标随按钮等比缩，收小后不会出现「大图标塞在小圆里」
             modifier = Modifier.size(sizeDp * 0.48f)
         )

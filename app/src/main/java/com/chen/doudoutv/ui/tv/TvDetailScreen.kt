@@ -26,6 +26,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
@@ -106,6 +109,7 @@ import androidx.compose.ui.zIndex
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.ui.StandTarget
 import com.chen.doudoutv.ui.components.episodeLabel
+import com.chen.doudoutv.ui.components.EpisodeStill
 import com.chen.doudoutv.ui.components.matchEpisodeInSource
 import com.chen.doudoutv.ui.components.usesSourceEpisodeName
 import com.chen.doudoutv.ui.components.TextBadge
@@ -160,6 +164,9 @@ fun TvDetailScreen(
 ) {
     var media by remember { mutableStateOf<MediaEntity?>(null) }
     var episodes by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+
+    /** 当前条目是否来自 Emby：只有 Emby 分集走剧照缩略图卡，TVBox 保持原文字卡 */
+    var isEmbySource by remember(mediaId) { mutableStateOf(false) }
 
     /**
      * 从「继续观看」进来、页面改绑到剧集壳之后，记住用户真正在看的那条分集。
@@ -323,6 +330,7 @@ fun TvDetailScreen(
             }
             media = m
             val src = vm.sourceOf(m.sourceId)
+            isEmbySource = src?.kind == SourceKind.EMBY
             if (src?.kind == SourceKind.EMBY) {
                 scraped = runCatching { vm.embyDetailOf(m.sourceId, m.remoteId) }.getOrNull()
                 if (m.kind == MediaKind.SERIES) {
@@ -385,7 +393,7 @@ fun TvDetailScreen(
                     val inSeason =
                         if (seasons.size <= 1) episodes else episodes.filter { it.season == played.season }
                     val pos = inSeason.indexOfFirst { it.id == playedId }
-                    if (pos >= 0) epPage = pos / TV_EPS_PAGE
+                    if (pos >= 0) epPage = pos / (if (src?.kind == SourceKind.EMBY) TV_EMBY_EPS_PAGE else TV_EPS_PAGE)
                     recallEpisodeId = playedId
                     restoredStand = true
                 }
@@ -551,15 +559,23 @@ fun TvDetailScreen(
     val seasonEpisodes = remember(episodes, selectedSeason, tvSeasons) {
         if (tvSeasons.size <= 1) episodes else episodes.filter { it.season == selectedSeason }
     }
-    val totalPages = remember(seasonEpisodes) {
-        ((seasonEpisodes.size + TV_EPS_PAGE - 1) / TV_EPS_PAGE).coerceAtLeast(1)
+    // Emby 走横向货架、每页 20；TVBox 仍是 4 列网格、每页 40
+    val epsPerPage = if (isEmbySource) TV_EMBY_EPS_PAGE else TV_EPS_PAGE
+    val totalPages = remember(seasonEpisodes, epsPerPage) {
+        ((seasonEpisodes.size + epsPerPage - 1) / epsPerPage).coerceAtLeast(1)
     }
     // 换季时页码可能越界，这里钳一下，避免出现空白页
     val pageIndex = epPage.coerceIn(0, totalPages - 1)
-    val pagedEpisodes = remember(seasonEpisodes, pageIndex) {
-        seasonEpisodes.drop(pageIndex * TV_EPS_PAGE).take(TV_EPS_PAGE)
+    val pagedEpisodes = remember(seasonEpisodes, pageIndex, epsPerPage) {
+        seasonEpisodes.drop(pageIndex * epsPerPage).take(epsPerPage)
     }
     val epRows = remember(pagedEpisodes) { pagedEpisodes.chunked(TV_GRID_COLS) }
+    // Emby 横滑货架的滚动状态：翻页 / 换季把货架收回头一格，
+    // 保证 firstEpFocusRequester（控制条下键的落点）始终挂在已组合的节点上。
+    val embyRowState = rememberLazyListState()
+    LaunchedEffect(pageIndex, selectedSeason, isEmbySource) {
+        if (isEmbySource) embyRowState.scrollToItem(0)
+    }
     val hasEpisodes = episodes.isNotEmpty()
     /** 选集控制条只有在「多源」「多季」或「多页」时才存在：
      *  它是网格首行上键的落点，所以条件必须和上面控制条的显示条件完全一致，
@@ -1168,6 +1184,50 @@ fun TvDetailScreen(
                                 }
                             }
 
+                            if (isEmbySource) {
+                                // Emby：横向剧照货架，遥控左右浏览。单行 LazyRow 宽度有界、
+                                // 卡片固定宽 + 16:9 定高，不会触发网格那种双向无限约束崩溃。
+                                // 焦点链与原网格同口径：首格挂 firstEp（换季/翻页落点），
+                                // 末格交给主演上键，recall 那一格组合期交入 stand。
+                                LazyRow(
+                                    state = embyRowState,
+                                    modifier = Modifier.fillMaxWidth().height(EMBY_CARD_HEIGHT),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    itemsIndexed(pagedEpisodes, key = { _, ep -> ep.id }) { idx, ep ->
+                                        val cellFocus = remember(ep.id) { FocusRequester() }
+                                        val cellTarget =
+                                            if (idx == 0) firstEpFocusRequester else cellFocus
+                                        // 横滑货架的卡片会随滚动回收，末格 requester 可能已脱离组合树，
+                                        // 不能交给主演上键（会指向死节点）。这里刻意不写 lastCellRequester，
+                                        // 让 castUpTarget 走它原有的稳定回退（控制条 > 展开 > 播放）。
+                                        if (ep.id == recallEpisodeId) {
+                                            remember(cellTarget) {
+                                                stand.requester = cellTarget
+                                                Log.i(FOCUS_TAG, "stand <- recall ep${ep.id}（组合期交入）")
+                                            }
+                                        }
+                                        TvEpisodeCard(
+                                            episode = ep,
+                                            isEmby = true,
+                                            modifier = Modifier.width(EMBY_CARD_WIDTH)
+                                                .then(publishStand(cellTarget, "ep${ep.id}")),
+                                            focusRequester = cellTarget,
+                                            // 单行货架：每格上键都回控制条（没有就展开按钮，再没有才播放）
+                                            focusUp = if (hasControlAnchor) controlsFocusRequester
+                                                else if (descTruncated) descFocusRequester
+                                                else playFocusRequester,
+                                            // 每格下键都落主演头像行；没有主演就留在原地
+                                            focusDown = if (hasCast) castFocusRequesters.first()
+                                                else FocusRequester.Cancel,
+                                            onClick = {
+                                                TvNavHistory.playedEpisodeId = ep.id
+                                                onPlay(ep.id)
+                                            }
+                                        )
+                                    }
+                                }
+                            } else {
                             // 网格用 chunked 手动分行：LazyVerticalGrid 嵌在滚动容器里会因为
                             // 双向无限高度约束直接崩，分行 Row 是最稳的做法
                             epRows.forEachIndexed { rowIdx, rowEps ->
@@ -1198,6 +1258,7 @@ fun TvDetailScreen(
                                         }
                                         TvEpisodeCard(
                                             episode = ep,
+                                            isEmby = isEmbySource,
                                             modifier = Modifier.weight(1f).then(publishStand(cellTarget, "ep${ep.id}")),
                                             // 首行第一格挂焦点器，「选择剧集」与换季/翻页后直接落这里
                                             focusRequester = cellTarget,
@@ -1221,6 +1282,7 @@ fun TvDetailScreen(
                                         Spacer(Modifier.weight(1f))
                                     }
                                 }
+                            }
                             }
                         } else if (!loading && item.kind == MediaKind.SERIES) {
                             // 剧集但分集为空：加载失败时给用户一个明确提示，而不是一块空白
@@ -1487,8 +1549,15 @@ private fun TvCastRow(
     }
 }
 
-/** 每页显示的分集数：40 集一页，超出用翻页按钮切换 */
+/** 每页显示的分集数：TVBox 网格 40 集一页，超出用翻页按钮切换 */
 private const val TV_EPS_PAGE = 40
+
+/** Emby 剧照货架每页 20 集：横向滚动浏览，与手机端同一口径 */
+private const val TV_EMBY_EPS_PAGE = 20
+
+/** Emby 横向货架卡宽：16:9 剧照，十英尺下标题/时长可读，一屏约 4~5 张 */
+private val EMBY_CARD_WIDTH = 240.dp
+private val EMBY_CARD_HEIGHT = 135.dp
 
 /** 取证日志的 tag：进页抢焦与滚动位置都记在这里 */
 private const val FOCUS_TAG = "TvDetailFocus"
@@ -1509,6 +1578,7 @@ private const val TV_GRID_COLS = 4
 private fun TvEpisodeCard(
     episode: MediaEntity,
     modifier: Modifier = Modifier,
+    isEmby: Boolean = false,
     focusRequester: FocusRequester? = null,
     /** 首行再按上时要去哪里；null = 交给默认焦点搜索（上一行） */
     focusUp: FocusRequester? = null,
@@ -1525,25 +1595,42 @@ private fun TvEpisodeCard(
         (episode.positionMs.toFloat() / episode.durationMs).coerceIn(0f, 1f)
     } else 0f
 
+    // 焦点链两端共用：路由必须排在焦点目标之前；clickable 必须排在 focusable 外面，
+    // 两者共用一个 interactionSource（反过来写 OK 键会冒泡到不了里层，详见原注释）。
+    val focusChain = modifier
+        .zIndex(if (focused) 1f else 0f)
+        .focusProperties {
+            if (focusUp != null) up = focusUp
+            if (focusDown != null) down = focusDown
+        }
+        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+        .clickable(
+            interactionSource = interaction,
+            indication = null,
+            onClick = onClick
+        )
+        .focusable(interactionSource = interaction)
+
+    // Emby 来源：16:9 剧照缩略图卡。尺寸一动都不动（放大改焦点矩形会让 verticalScroll
+    // 的 bring-into-view 每次补一点滚动，左右切集整屏上下抖），焦点仍只用边框表示。
+    if (isEmby) {
+        Column(
+            focusChain
+                .clip(Radius.Md)
+                .background(AppColors.Surface)
+                .border(
+                    width = if (focused) 2.dp else 1.dp,
+                    color = if (focused) AppColors.Brand else AppColors.SurfaceHi,
+                    shape = Radius.Md
+                )
+        ) {
+            EpisodeStill(episode)
+        }
+        return
+    }
+
     Column(
-        modifier
-            .zIndex(if (focused) 1f else 0f)
-            // 焦点路由必须排在焦点目标之前，才挂得到这个焦点目标上
-            .focusProperties {
-                if (focusUp != null) up = focusUp
-                if (focusDown != null) down = focusDown
-            }
-            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            // clickable 必须排在 focusable 外面，两者共用一个 interactionSource。
-            // 反过来写（focusable().clickable()）焦点会落在外面那颗裸 focusable 上，
-            // 它没有点击/按键处理，OK 键沿父链往上冒泡、永远到不了里层 clickable ——
-            // 表现就是「选中了剧集按 OK 没反应，播放器 Activity 压根没被启动」。
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                onClick = onClick
-            )
-            .focusable(interactionSource = interaction)
+        focusChain
             // 详情页不放大获焦的卡片：放大一改焦点矩形，verticalScroll 的
             // bring-into-view 每次都补一点滚动，左右切集时整屏跟着上下抖。
             // 焦点只用边框表示（品牌色 2dp），尺寸一动都不动。

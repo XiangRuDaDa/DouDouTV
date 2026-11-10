@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.chen.doudoutv.ui.theme.AppColors
 
@@ -33,12 +34,24 @@ import com.chen.doudoutv.ui.theme.AppColors
  *   · 知道总数（Emby 分页给了 TotalRecordCount）→ 定长推进，领先端带一小段高光；
  *     进度按页跳（每 500 条一次），所以用补间把台阶抹平成连续推进。
  *   · 不知道总数（TVBox 聚合、拉取前的准备阶段）→ 一段彗尾扫过轨道，不假装有百分比。
+ *
+ * 手机端贴在内容区最上沿；电视端也贴在屏幕最上沿，但线更粗、光晕更高 ——
+ * 电视是十英尺外看，2.5dp 的发丝线在那儿只是一闪，读不出「在推进」。
  */
 @Composable
 fun SyncProgressBar(
     fetched: Int,
     total: Int,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * 线本身的厚度。电视端要粗一档：十英尺外 2.5dp 的发丝线基本看不见，
+     * 细线在电视上读起来只剩「屏幕闪了一下」，看不出在推进。
+     */
+    thickness: Dp = 2.5.dp,
+    /** 线往下渗的光晕高度 */
+    glow: Dp = 10.5.dp,
+    /** 领先端高光的长度 */
+    head: Dp = 28.dp
 ) {
     val brand = AppColors.Brand
     val soft = AppColors.BrandSoft
@@ -61,10 +74,10 @@ fun SyncProgressBar(
         label = "sync_sweep_pos"
     )
 
-    val barPx = with(LocalDensity.current) { 2.5.dp.toPx() }
-    val headPx = with(LocalDensity.current) { 28.dp.toPx() }
+    val barPx = with(LocalDensity.current) { thickness.toPx() }
+    val headPx = with(LocalDensity.current) { head.toPx() }
 
-    Canvas(modifier.fillMaxWidth().height(13.dp)) {
+    Canvas(modifier.fillMaxWidth().height(thickness + glow)) {
         val w = size.width
         val glowH = size.height - barPx
 

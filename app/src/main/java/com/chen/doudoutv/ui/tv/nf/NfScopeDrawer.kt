@@ -199,6 +199,7 @@ fun NfScopeDrawer(
                     NfActionButton(
                         text = "添加来源",
                         onClick = onManage,
+                        primary = true,
                         modifier = if (sources.isEmpty()) Modifier.focusRequester(entryFocus) else Modifier
                     )
                 }
@@ -347,6 +348,7 @@ fun NfScopeDrawer(
                                             onClick = {
                                                 if (src.id == selectedSourceId) onDismiss() else pickSourceOnly(src)
                                             },
+                                            primary = src.id != selectedSourceId,
                                             modifier = Modifier.padding(top = 18.dp)
                                                 .focusRequester(onlySourceFocus)
                                         )

@@ -271,7 +271,7 @@ fun NfSearchScreen(
                     onSubmit = { state.submit() }
                 )
                 Spacer(Modifier.width(16.dp))
-                NfActionButton(text = "搜索", onClick = { state.submit() })
+                NfActionButton(text = "搜索", onClick = { state.submit() }, primary = true)
                 Spacer(Modifier.width(12.dp))
                 // 清空：词、联想、结果和各进行中标记一次全清，回到「还没输入」的初始态。
                 // 清完把焦点交回输入框 —— 接着打下一个词不用再按一次 ↑。

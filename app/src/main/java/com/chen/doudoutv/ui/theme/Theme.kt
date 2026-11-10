@@ -21,8 +21,8 @@ object AppColors {
      * 保留它是为了那些不在组合式上下文里的用法（详情页取色的兜底分支），
      * 那些地方拿不到 CompositionLocal，也不需要跟随主题。
      */
-    val BrandBase = Color(0xFF4F8CFF)
-    val BrandSoftBase = Color(0xFF6BA1FF)
+    val BrandBase = Color(0xFF8E8E93)
+    val BrandSoftBase = Color(0xFFAEAEB4)
 
     /** 品牌色：跟随设置页选的主题色板，只在组合式上下文里可读 */
     val Brand: Color
@@ -35,25 +35,28 @@ object AppColors {
     /**
      * 材质四层里的 L0 —— 页面底。
      *
-     * 从 0B0D12 压深到 06080C：原来 L0 和卡片只差了 9 的明度，在近黑底上这点落差
-     * 肉眼读不出来，于是所有元素像贴在同一张平面上。页面底压深一档，
-     * 上面的容器和卡片才有地方「抬起来」。
+     * 这一整套中性色原来带蓝调（B 通道比 R 高 6~23），铺开就是「蓝黑」：
+     * 主题色换成苹果灰之后，蓝底配灰强调像两套系统焊在一起。
+     * 2026-11-10 起四层全部换成纯中性灰，**明度一档没动** ——
+     * 对比度基线原样保留（正文在页面底上仍是 18.2:1），变的只是色相：
+     * 从「冷蓝」拉回「无色相」。
      * 引用这个常量的地方（背景层、大图渐隐、详情页 scrim）会一起跟上，不会出现两套底色。
      */
-    val Bg = Color(0xFF06080C)
+    val Bg = Color(0xFF080808)
 
     /** L1 —— 分区容器、分组面板、图片占位 */
-    val Surface = Color(0xFF0F141B)
+    val Surface = Color(0xFF131313)
 
     /** L2 —— 卡片、列表行、输入控件 */
-    val SurfaceHi = Color(0xFF18202A)
+    val SurfaceHi = Color(0xFF1F1F1F)
 
     /** L3 —— 焦点/抬起态的填充，十英尺下靠这一层区分「选中」和「没选中」 */
-    val SurfaceRaise = Color(0xFF232D3A)
+    val SurfaceRaise = Color(0xFF2C2C2C)
 
-    val TextPrimary = Color(0xFFF2F4F8)
-    val TextSecondary = Color(0xFF9BA4B4)
-    val TextTertiary = Color(0xFF6B7482)
+    /** 文字三级：白 → 灰。同样去蓝调，明度未动 */
+    val TextPrimary = Color(0xFFF4F4F4)
+    val TextSecondary = Color(0xFFA3A3A3)
+    val TextTertiary = Color(0xFF747474)
     val Rating = Color(0xFFFFC107)
 
     /**
@@ -76,7 +79,7 @@ object AppColors {
     val Ok = Color(0xFF34C759)
 
     /** 已停用这类中性弱状态（原先散落在各处的灰色字面量） */
-    val Disabled = Color(0xFF6B7482)
+    val Disabled = Color(0xFF747474)
 
     /**
      * 详情页顶栏 scrim 的底色。

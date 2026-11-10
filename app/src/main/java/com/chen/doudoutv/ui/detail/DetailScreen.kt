@@ -31,8 +31,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.FavoriteBorder
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -73,7 +71,12 @@ import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.data.model.splitCastNames
 import com.chen.doudoutv.player.PlayerFactory
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.components.AppButton
+import com.chen.doudoutv.ui.components.AppButtonVariant
+import com.chen.doudoutv.ui.components.ButtonMaterial
+import com.chen.doudoutv.ui.components.EpisodeStill
 import com.chen.doudoutv.ui.components.FormatBadgesRow
+import com.chen.doudoutv.ui.components.GlassBarClearance
 import com.chen.doudoutv.ui.components.matchEpisodeInSource
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.Radius
@@ -105,6 +108,9 @@ fun DetailScreen(
 ) {
     var media by remember { mutableStateOf<MediaEntity?>(null) }
     var episodes by remember { mutableStateOf<List<MediaEntity>>(emptyList()) }
+
+    /** 当前条目是否来自 Emby：只有 Emby 分集走剧照缩略图卡，TVBox 保持原文字行 */
+    var isEmbySource by remember(mediaId) { mutableStateOf(false) }
 
     /**
      * 从「继续观看」进来、页面改绑到剧集壳之后，记住用户真正在看的那条分集。
@@ -197,7 +203,8 @@ fun DetailScreen(
         media = m
         if (m != null) {
             // Emby 源：加载刮削信息（电影/剧集都支持）
-            if (vm.sourceOf(m.sourceId)?.kind == SourceKind.EMBY) {
+            isEmbySource = vm.sourceOf(m.sourceId)?.kind == SourceKind.EMBY
+            if (isEmbySource) {
                 scraped = vm.embyDetailOf(m.sourceId, m.remoteId)
             }
 
@@ -419,7 +426,7 @@ fun DetailScreen(
 
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 32.dp)
+                contentPadding = PaddingValues(bottom = 32.dp + GlassBarClearance)
             ) {
                 // ---------- 顶部海报：全宽沉浸头图，标题覆盖在海报下部 ----------
                 item {
@@ -531,30 +538,24 @@ fun DetailScreen(
                         // resumeEpisode 只在「继续观看」进来改绑到剧集壳之后有值：壳自己没有可播地址，
                         // 播放目标要落回用户真正在看的那一集（它可能属于另一条云盘，visibleEpisodes 未必含它）
                         val target = resumeEpisode ?: playTarget(item, visibleEpisodes)
-                        Button(
+                        // 主按钮：品牌渐变实底压黑字
+                        AppButton(
+                            text = if (item.kind == MediaKind.SERIES) {
+                                val ep = resumeEpisode
+                                    ?: visibleEpisodes.firstOrNull { it.positionMs > 0 }
+                                    ?: visibleEpisodes.firstOrNull()
+                                ep?.let { "继续观看  ${it.title}" } ?: "开始播放"
+                            } else "播放",
                             onClick = { if (target != null) onPlay(target.id) },
                             enabled = target != null,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AppColors.Brand,
-                                contentColor = Color.White
-                            ),
+                            variant = AppButtonVariant.Primary,
+                            icon = Icons.Filled.PlayArrow,
+                            iconSize = 20.dp,
+                            // 与右侧收藏按钮同高（48dp）：主按钮默认只有 40dp，
+                            // 两颗并排时一高一低，看着像没对齐
+                            minHeight = 48.dp,
                             modifier = Modifier.weight(0.72f)
-                        ) {
-                            Icon(
-                                Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                if (item.kind == MediaKind.SERIES) {
-                                    val ep = resumeEpisode
-                                        ?: visibleEpisodes.firstOrNull { it.positionMs > 0 }
-                                        ?: visibleEpisodes.firstOrNull()
-                                    ep?.let { "继续观看  ${it.title}" } ?: "开始播放"
-                                } else "播放"
-                            )
-                        }
+                        )
 
                         // 右侧：仅文件大小
                         val size = scraped?.fileSizeBytes?.takeIf { it > 0 }
@@ -578,12 +579,26 @@ fun DetailScreen(
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(Radius.Md)
-                                .background(AppColors.SurfaceHi)
+                                .background(
+                                    // 已收藏 = 品牌渐变实底压黑心；未收藏 = 磨砂玻璃压白心
+                                    if (fav) {
+                                        Brush.verticalGradient(
+                                            ButtonMaterial.primaryStops(AppColors.Brand, AppColors.BrandSoft)
+                                        )
+                                    } else {
+                                        Brush.verticalGradient(ButtonMaterial.glassStops())
+                                    }
+                                )
+                                .border(
+                                    1.dp,
+                                    if (fav) ButtonMaterial.highlightEdge else ButtonMaterial.glassEdge,
+                                    Radius.Md
+                                )
                         ) {
                             Icon(
                                 if (fav) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                                 contentDescription = if (fav) "取消收藏" else "收藏",
-                                tint = if (fav) AppColors.Brand else AppColors.TextSecondary
+                                tint = if (fav) Color.Black else Color.White
                             )
                         }
                     }
@@ -821,6 +836,25 @@ fun DetailScreen(
                             }
                         }
 
+                        if (isEmbySource) {
+                            // Emby：横向剧照货架，手指左右滑动浏览；分页条仍在上方跳页。
+                            item {
+                                LazyRow(
+                                    modifier = Modifier.fillMaxWidth().height(90.dp),
+                                    contentPadding = PaddingValues(horizontal = 18.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    itemsIndexed(pagedEpisodes, key = { _, ep -> ep.id }) { _, ep ->
+                                        EpisodeCard(
+                                            episode = ep,
+                                            isEmby = true,
+                                            modifier = Modifier.width(160.dp),
+                                            onClick = { onPlay(ep.id) }
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
                         itemsIndexed(
                             pagedEpisodes.chunked(if (isTv) 4 else 2),
                             // key 带位置 + 行首集 id：切线路/翻页时同一位置换了数据就换 key，
@@ -838,6 +872,7 @@ fun DetailScreen(
                                     Box(Modifier.weight(1f)) {
                                         EpisodeCard(
                                             episode = ep,
+                                            isEmby = isEmbySource,
                                             onClick = { onPlay(ep.id) }
                                         )
                                     }
@@ -846,6 +881,7 @@ fun DetailScreen(
                                     Spacer(Modifier.weight(1f))
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -974,12 +1010,34 @@ private fun CastCard(person: CastPerson) {
 }
 
 @Composable
-private fun EpisodeCard(episode: MediaEntity, onClick: () -> Unit) {
+private fun EpisodeCard(
+    episode: MediaEntity,
+    isEmby: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
 
     val shape = Radius.Md
     val playing = episode.positionMs > 0
+
+    // Emby 来源：16:9 剧照缩略图卡（剧照入库时已写进 posterUrl）。
+    // TVBox 没有剧照，仍走下面的文字行，样式一字不动。
+    if (isEmby) {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(AppColors.Surface)
+                .then(if (focused) Modifier.border(2.dp, AppColors.Brand, shape) else Modifier)
+                .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+                .focusable()
+        ) {
+            EpisodeStill(episode)
+        }
+        return
+    }
 
     Row(
         modifier = Modifier

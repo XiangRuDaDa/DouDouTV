@@ -34,8 +34,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Source
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -86,7 +84,10 @@ import com.chen.doudoutv.data.tvbox.TvBoxClient.TvBoxSite
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.PrecomposeWindow
+import com.chen.doudoutv.ui.components.AppButton
+import com.chen.doudoutv.ui.components.AppButtonVariant
 import com.chen.doudoutv.ui.components.ContinueCard
+import com.chen.doudoutv.ui.components.GlassBarClearance
 import com.chen.doudoutv.ui.components.HeroBanner
 import com.chen.doudoutv.ui.components.PosterCard
 import com.chen.doudoutv.ui.components.SectionTitle
@@ -194,7 +195,7 @@ fun HomeScreen(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 28.dp)
+            contentPadding = PaddingValues(bottom = 28.dp + GlassBarClearance)
         ) {
             // ---------- 精选大图（置顶，顶栏悬浮其上） ----------
             // 轮播区常驻：没有可推荐内容时用同高度占位，避免首页在「加载中 / 空库」之间跳版。
@@ -1110,7 +1111,7 @@ fun GenreScreen(
 
             else -> LazyColumn(
                 state = gridState,
-                contentPadding = PaddingValues(bottom = 28.dp)
+                contentPadding = PaddingValues(bottom = 28.dp + GlassBarClearance)
             ) {
                 item {
                     Text(
@@ -1154,7 +1155,8 @@ fun GenreScreen(
                             if (loadingMore) {
                                 CircularProgressIndicator(strokeWidth = 2.dp, color = AppColors.Brand)
                             } else {
-                                Button(
+                                AppButton(
+                                    text = "加载更多",
                                     onClick = {
                                         loadingMore = true
                                         scope.launch {
@@ -1166,13 +1168,8 @@ fun GenreScreen(
                                             loadingMore = false
                                         }
                                     },
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = AppColors.SurfaceHi,
-                                        contentColor = AppColors.TextPrimary
-                                    )
-                                ) {
-                                    Text("加载更多")
-                                }
+                                    variant = AppButtonVariant.Neutral
+                                )
                             }
                         }
                     }
@@ -1483,7 +1480,7 @@ fun SearchScreen(
             // 有结果：按来源分组展示
             else -> LazyColumn(
                 state = resultsListState,
-                contentPadding = PaddingValues(bottom = 28.dp)
+                contentPadding = PaddingValues(bottom = 28.dp + GlassBarClearance)
             ) {
                 item { SectionTitle("搜索结果 ${state.results.size} 条 · ${state.grouped.size} 个来源") }
                 state.grouped.forEach { (srcName, itemsOfSource) ->
@@ -1649,7 +1646,7 @@ fun TvBoxCategoryScreen(
 
         // ---------- 网格 ----------
         when {
-            loading -> LazyColumn(contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp)) {
+            loading -> LazyColumn(contentPadding = PaddingValues(top = 12.dp, bottom = 28.dp + GlassBarClearance)) {
                 itemsIndexed(
                     List(9) { it }.chunked(columns),
                     key = { index, row -> "vod_skeleton_${index}_${row.first()}" },
@@ -1679,19 +1676,17 @@ fun TvBoxCategoryScreen(
                 )
                 if (loadError != null) {
                     Spacer(Modifier.height(12.dp))
-                    Button(
+                    AppButton(
+                        text = "重试",
                         onClick = { vm.retryBrowsePage(currentTypeId) },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = AppColors.SurfaceHi,
-                            contentColor = AppColors.TextPrimary
-                        )
-                    ) { Text("重试") }
+                        variant = AppButtonVariant.Neutral
+                    )
                 }
             }
 
             else -> LazyColumn(
                 state = gridState,
-                contentPadding = PaddingValues(bottom = 28.dp)
+                contentPadding = PaddingValues(bottom = 28.dp + GlassBarClearance)
             ) {
                 itemsIndexed(
                     vods.chunked(columns),
@@ -1725,13 +1720,11 @@ fun TvBoxCategoryScreen(
                                 color = AppColors.Brand
                             )
 
-                            loadError != null -> Button(
+                            loadError != null -> AppButton(
+                                text = "加载失败，点击重试",
                                 onClick = { vm.retryBrowsePage(currentTypeId) },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = AppColors.SurfaceHi,
-                                    contentColor = AppColors.TextPrimary
-                                )
-                            ) { Text("加载失败，点击重试") }
+                                variant = AppButtonVariant.Neutral
+                            )
 
                             exhausted -> Text(
                                 "没有更多了 · 共 ${vods.size} 部",
@@ -1739,13 +1732,11 @@ fun TvBoxCategoryScreen(
                                 color = AppColors.TextTertiary
                             )
 
-                            else -> Button(
+                            else -> AppButton(
+                                text = "加载更多",
                                 onClick = loadMore,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = AppColors.SurfaceHi,
-                                    contentColor = AppColors.TextPrimary
-                                )
-                            ) { Text("加载更多") }
+                                variant = AppButtonVariant.Neutral
+                            )
                         }
                     }
                 }

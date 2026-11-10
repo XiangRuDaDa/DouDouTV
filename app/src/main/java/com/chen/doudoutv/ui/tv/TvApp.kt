@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.components.SyncProgressBar
 import com.chen.doudoutv.ui.player.tv.TvPlayerActivity
 import com.chen.doudoutv.ui.sources.TvSourcesScreen
 import com.chen.doudoutv.ui.tv.nf.NfBrowseScreen
@@ -354,6 +355,20 @@ fun TvApp(vm: LibraryViewModel) {
                     onTab = { tab -> switchTab(nfRouteOf(tab)) },
                     onSettings = { push(TvRoute.Settings) },
                     onManageSources = { push(TvRoute.Sources) },
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
+            }
+
+            // 同步进度线：贴在屏幕最上沿，画在常驻导航条之上。
+            // 同步可以从任何页面触发（顶栏刷新、来源页那张卡的「刷新同步」、冷启动增量），
+            // 所以这条线挂在 TV 外壳这一层，不跟页面走；线比手机粗一档，十英尺外才看得见在推进。
+            if (vm.scanning) {
+                SyncProgressBar(
+                    fetched = vm.scanFetched,
+                    total = vm.scanTotal,
+                    thickness = 4.dp,
+                    glow = 16.dp,
+                    head = 44.dp,
                     modifier = Modifier.align(Alignment.TopCenter)
                 )
             }

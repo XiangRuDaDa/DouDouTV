@@ -361,7 +361,7 @@ private fun NfSwitchSourceDialog(
                     onClick = onDismiss,
                     modifier = Modifier.focusRequester(cancelFocus)
                 )
-                NfActionButton(text = "切换并打开", onClick = onConfirm)
+                NfActionButton(text = "切换并打开", onClick = onConfirm, primary = true)
             }
         }
     }

@@ -167,13 +167,6 @@ fun TvSourcesScreen(vm: LibraryViewModel) {
                             style = MaterialTheme.typography.labelMedium,
                             color = TvText.Body
                         )
-                    } else {
-                        TvPillButton(
-                            text = "全部同步",
-                            primary = false,
-                            size = TvButtonSize.Sm,
-                            onClick = { vm.syncAll() }
-                        )
                     }
                     TvPillButton(
                         text = "添加来源",

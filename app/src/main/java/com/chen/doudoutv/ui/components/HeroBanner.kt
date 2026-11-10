@@ -13,23 +13,17 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -208,39 +202,26 @@ fun HeroBanner(
                         Modifier.padding(top = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // 主按钮：品牌色实底 + 阴影，视觉最突出
-                        Button(
+                        // 主按钮：品牌渐变实底 + 光晕，压黑字，视觉最突出
+                        AppButton(
+                            text = "播放",
                             onClick = { onPlay(item) },
-                            shape = Radius.Pill,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AppColors.Brand,
-                                contentColor = Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 26.dp, vertical = 10.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.PlayArrow,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("播放", fontWeight = FontWeight.SemiBold)
-                        }
-                        // 次按钮：半透明白底玻璃风，与主按钮形成层级
-                        OutlinedButton(
+                            variant = AppButtonVariant.Primary,
+                            shape = Radius.Md,
+                            icon = Icons.Filled.PlayArrow,
+                            iconSize = 20.dp,
+                            contentPadding = PaddingValues(horizontal = 26.dp, vertical = 10.dp),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        // 次按钮：磨砂玻璃 + 发丝描边，压白字，与主按钮拉开层级
+                        AppButton(
+                            text = "详情",
                             onClick = { onOpen(item) },
-                            shape = Radius.Pill,
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = Color.White.copy(alpha = 0.14f),
-                                contentColor = Color.White
-                            ),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp, Color.White.copy(alpha = 0.35f)
-                            ),
-                            contentPadding = PaddingValues(horizontal = 26.dp, vertical = 10.dp)
-                        ) {
-                            Text("详情", fontWeight = FontWeight.SemiBold)
-                        }
+                            variant = AppButtonVariant.Secondary,
+                            shape = Radius.Md,
+                            contentPadding = PaddingValues(horizontal = 26.dp, vertical = 10.dp),
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
             }

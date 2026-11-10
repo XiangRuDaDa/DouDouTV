@@ -22,30 +22,30 @@ data class ThemePalette(
 )
 
 /**
- * 7 套色板，第 0 个就是改造前的原色 —— 默认态下任何一个像素都不该变。
+ * 7 套色板，第 0 套是默认态。
  *
- * 挑选标准是「能压住白字」：品牌色会直接当按钮底色用（contentColor 是纯白），
- * 所以每一套都按 WCAG 相对亮度算过，白字对比度不低于 3.2:1。
- * 青瓷、赤铜这两套原本分别是 2.46 / 2.81，橙绿这类看着高级、
- * 放上白字就糊的颜色统一往暗里压过一档；brandSoft 只当深色底上的强调色用
- * （对底色仍有 8:1 以上），跟着同色相压暗是为了两层明度差保持不变。
+ * 品牌色直接当按钮底色用，按钮文字是纯黑（黑字在 7 套色上对比度 4.9:1~9.5:1，
+ * 比白字更稳），所以每套都有一个「黑字压得住」的亮度下限。
  *
- * 汝窑这套压得最狠，也错过一次：上一版 #64907F 色相 157°，落在绿色那一挂，
- * 看着就是竹青换了个名字。天青的釉色相在 185°–200°，是青里泛蓝、不是泛绿，
- * 所以这版取 193°；饱和度只留 21%（汝窑以釉面失透、不开艳色著称，一饱和就撞回青瓷）。
- * 真釉取样约 #A2C0C4，那种近乎发白的淡青直接当按钮底，白字对比不到 2:1，
- * 字等于浮在一片雾上，故明度往下压到 3.77:1。
+ * 默认态 2026-11-10 从「石墨蓝」换成「苹果灰」（#8E8E93 / #AEAEB4）：
+ * 蓝色主题配近黑底，整屏读起来是「蓝黑底 + 蓝光晕」；换成苹果灰之后，
+ * 背景层、按钮、焦点、进度条统一在一套无彩色体系里，只靠明度分层。
+ * id 仍是 graphite：存储键一改，已经存着这个 id 的设备会被 paletteFor 判成旧版本残留、
+ * 回落默认色板 —— 用户看到的结果是「我选的色自己没了」。改名字不动键。
+ *
+ * 其余六套保持原样：青瓷 193° 低饱和、鸢尾、赤铜、胭脂、汝窑、霜青。
+ * 命名色还是那个颜色：汝窑取 193°、饱和度只留 22%（釉面失透、青中泛蓝而非泛绿）。
  */
 val ThemePalettes: List<ThemePalette> = listOf(
-    ThemePalette("graphite", "石墨蓝", Color(0xFF4F8CFF), Color(0xFF6BA1FF)),
-    ThemePalette("celadon", "青瓷", Color(0xFF1B9E90), Color(0xFF3FBFB0)),
-    ThemePalette("iris", "鸢尾", Color(0xFF8A74E8), Color(0xFFA99BF5)),
-    ThemePalette("copper", "赤铜", Color(0xFFBE8049), Color(0xFFD9A471)),
-    ThemePalette("rouge", "胭脂", Color(0xFFD0597F), Color(0xFFE67EA0)),
+    ThemePalette("graphite", "苹果灰", Color(0xFF8E8E93), Color(0xFFAEAEB4)),
+    ThemePalette("celadon", "青瓷", Color(0xFF1CA193), Color(0xFF41D7C7)),
+    ThemePalette("iris", "鸢尾", Color(0xFF9480EA), Color(0xFFCDC4F3)),
+    ThemePalette("copper", "赤铜", Color(0xFFBF834D), Color(0xFFD5B293)),
+    ThemePalette("rouge", "胭脂", Color(0xFFD66F90), Color(0xFFE9B9C8)),
     // id 仍是 bamboo：存储键一改，已经选中这套的设备就被 paletteFor 判成旧版本残留、
     // 回落默认色板 —— 用户看到的结果是「我选的色自己没了」。改名字不动键。
-    ThemePalette("bamboo", "汝窑", Color(0xFF5F8A96), Color(0xFF93B4BE)),
-    ThemePalette("steel", "霜青", Color(0xFF7E93B8), Color(0xFF9FB2D4))
+    ThemePalette("bamboo", "汝窑", Color(0xFF6D97A2), Color(0xFFA6BEC4)),
+    ThemePalette("steel", "霜青", Color(0xFF7E93B8), Color(0xFFBAC5D7))
 )
 
 val DefaultPalette: ThemePalette = ThemePalettes.first()
