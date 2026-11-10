@@ -12,7 +12,7 @@ import com.chen.doudoutv.data.model.SourceEntity
 
 @Database(
     entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class, ScrapedMetaEntity::class],
-    version = 12,
+    version = 13,
     // schema 落档到 app/schemas/：以后加索引之类的改动能用 Room 的自动迁移，
     // 也能拿历史 JSON 对比出漏写的迁移
     exportSchema = true
@@ -105,6 +105,19 @@ abstract class AppDatabase : RoomDatabase() {
         private var INSTANCE: AppDatabase? = null
 
         /**
+         * v12 → v13：新增 libraryId / libraryName（Emby 媒体库归属）。
+         * 动态分类改按媒体库分区（NSFW 等是 CollectionFolder，不是题材）。
+         * ADD COLUMN 增量迁移，默认空串：老条目升级后库归属为空，
+         * runSync 检测到「有 Emby 条目无库归属」会强制全量一次补齐并打标（A①回填）。
+         */
+        private val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE media ADD COLUMN libraryId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE media ADD COLUMN libraryName TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        /**
          * v10 → v11：新增 audioType 列（音轨类型，杜比类音轨的展示位）。
          * 视频侧的 resolution/hdr/codec 三列 v6 就有，这次只补音轨，同样用 ADD COLUMN 增量迁移。
          */
@@ -161,7 +174,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                         MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12
+                        MIGRATION_11_12, MIGRATION_12_13
                     )
                     // 这里刻意不调 fallbackToDestructiveMigration()：
                     // 它会在「漏写某段迁移」时静默整库重建，观看进度和收藏全丢且没有任何迹象，

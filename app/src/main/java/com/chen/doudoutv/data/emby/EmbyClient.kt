@@ -1,7 +1,9 @@
 package com.chen.doudoutv.data.emby
 
 import android.net.Uri
+import com.chen.doudoutv.core.Prefs
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -77,6 +79,9 @@ class EmbyClient(
         val seriesId: String
     )
 
+    /** 媒体库（CollectionFolder）：动态分类按库分区用。collectionType 如 movies / tvshows / playlists */
+    data class Library(val id: String, val name: String, val collectionType: String)
+
     private val secureHttp = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
@@ -101,7 +106,7 @@ class EmbyClient(
     }
 
     private fun authHeader(): String =
-        "MediaBrowser Client=\"DouDouTV\", Device=\"Android\", DeviceId=\"doudoutv\", " +
+        "MediaBrowser Client=\"DouDouTV\", Device=\"Android\", DeviceId=\"${Prefs.embyDeviceId}\", " +
             "Version=\"1.0.0\", Token=\"$token\""
 
     private fun execute(request: Request): Response =
@@ -184,13 +189,79 @@ class EmbyClient(
         )
     }
 
-    /** 获取媒体库（电影 + 剧集）条目 */
-    suspend fun fetchLibrary(limit: Int = 600): List<Item> = withContext(Dispatchers.IO) {
-        val uid = currentUserId() ?: throw IllegalStateException("无法获取 Emby 用户信息，请重新登录")
+    /**
+     * 全量拉取媒体库（电影 + 剧集壳）：分页翻到 TotalRecordCount 见底。
+     *
+     * 之前单次请求硬上限 600 条，库里几千条也只进最近入库的 600，分类页/题材标签全部失真。
+     * 现在按 [pageSize] 顺序翻页、页间节流 [PAGE_THROTTLE_MS]，不并发轰服务器；
+     * [onPage] 每拉完一页回调（累计条数, 服务端总条数），供上层显示同步进度；总数未知时给 0。
+     * 仅首次同步（本地为空）走这里。
+     */
+    suspend fun fetchLibrary(
+        pageSize: Int = PAGE_SIZE,
+        onPage: ((Int, Int) -> Unit)? = null
+    ): List<Item> = fetchItemsPaged(emptyMap(), pageSize, onPage)
 
-        val json = getJson(
-            "/Users/$uid/Items",
-            mapOf(
+    /**
+     * 增量拉取：只返回 [sinceMs] 之后有新增/修改的条目（Emby 的 MinDateLastSaved 过滤）。
+     *
+     * 首次全量之后，每次启动/刷新走这里，避免反复整库重拉触发服务端限流。
+     * 天然盲区：服务器上被删除的条目增量拉不到，本地会残留（点播时才发现失效），按口径接受。
+     */
+    suspend fun fetchUpdated(
+        sinceMs: Long,
+        pageSize: Int = PAGE_SIZE,
+        onPage: ((Int, Int) -> Unit)? = null
+    ): List<Item> = fetchItemsPaged(mapOf("MinDateLastSaved" to isoUtc(sinceMs)), pageSize, onPage)
+
+    /**
+     * 媒体库清单：/Users/{uid}/Views 返回一组 CollectionFolder（电影库/剧集库/NSFW 等）。
+     * 动态分类按这份清单分区，而不是 /Genres 题材表（NSFW 是库不是题材，题材表里永远没有它）。
+     * 与 Yamby/openemby 等客户端同一接口。失败返回空，上层回退整库同步。
+     */
+    suspend fun fetchViews(): List<Library> = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext emptyList()
+        val json = runCatching { getJson("/Users/$uid/Views") }.getOrNull() ?: return@withContext emptyList()
+        val arr = json.optJSONArray("Items") ?: return@withContext emptyList()
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            if (o.optString("Type") != "CollectionFolder") return@mapNotNull null
+            val id = o.optString("Id").takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            Library(id, o.optString("Name"), o.optString("CollectionType"))
+        }
+    }
+
+    /**
+     * 逐库拉取某媒体库下的电影/剧集壳：ParentId={库id} 分页。
+     * 整库递归查询不返回 ParentId，无法事后打库归属，故按库逐个拉、拉时即知归属。
+     * [sinceMs] 非 null 时叠加 MinDateLastSaved 做该库的增量。
+     */
+    suspend fun fetchLibraryItems(
+        parentId: String,
+        sinceMs: Long? = null,
+        pageSize: Int = PAGE_SIZE,
+        onPage: ((Int, Int) -> Unit)? = null
+    ): List<Item> {
+        val extra = if (sinceMs != null) mapOf("MinDateLastSaved" to isoUtc(sinceMs)) else emptyMap()
+        return fetchItemsPaged(extra, pageSize, onPage, parentId)
+    }
+
+    /**
+     * 电影/剧集壳列表的分页公共逻辑：全量与增量共用，差别只在 [extra] 过滤参数。
+     * 判停三重保险：服务端 TotalRecordCount、本页返回数 < 页大小、安全上限 [MAX_LIBRARY_ITEMS]。
+     */
+    private suspend fun fetchItemsPaged(
+        extra: Map<String, String>,
+        pageSize: Int,
+        onPage: ((Int, Int) -> Unit)?,
+        parentId: String? = null
+    ): List<Item> = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: throw IllegalStateException("无法获取 Emby 用户信息，请重新登录")
+        val out = ArrayList<Item>()
+        var startIndex = 0
+        var total = Int.MAX_VALUE
+        while (startIndex < total) {
+            val params = mutableMapOf(
                 "IncludeItemTypes" to "Movie,Series",
                 "Recursive" to "true",
                 "Fields" to "Overview,Genres,CommunityRating,RunTimeTicks,ProductionYear,PrimaryImageAspectRatio",
@@ -198,11 +269,46 @@ class EmbyClient(
                 "EnableImageTypes" to "Primary,Backdrop",
                 "SortBy" to "DateCreated",
                 "SortOrder" to "Descending",
-                "Limit" to limit.toString()
+                "Limit" to pageSize.toString(),
+                "StartIndex" to startIndex.toString()
             )
-        )
+            if (parentId != null) params["ParentId"] = parentId
+            params.putAll(extra)
+            val json = getJson("/Users/$uid/Items", params)
+            val serverTotal = json.optInt("TotalRecordCount", -1)
+            if (serverTotal >= 0) total = serverTotal
+            val page = parseItems(json.optJSONArray("Items"))
+            if (page.isEmpty()) break
+            out += page
+            startIndex += page.size
+            onPage?.invoke(out.size, if (total == Int.MAX_VALUE) 0 else total)
+            if (page.size < pageSize) break
+            if (out.size >= MAX_LIBRARY_ITEMS) break
+            if (startIndex < total) delay(PAGE_THROTTLE_MS)
+        }
+        out
+    }
 
-        parseItems(json.optJSONArray("Items"))
+    /**
+     * 全库题材清单：直接问服务端 /Genres，而不是从已入库条目里按频次统计。
+     * 后者样本有限又取前 N，冷门题材永远挤不进、换库也是那几个高频词；服务端清单跟库内容相关且完整。
+     */
+    suspend fun fetchGenres(): List<String> = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext emptyList()
+        val json = runCatching {
+            getJson("/Genres", mapOf("UserId" to uid, "SortBy" to "SortName", "Limit" to "500"))
+        }.getOrNull() ?: return@withContext emptyList()
+        val arr = json.optJSONArray("Items") ?: return@withContext emptyList()
+        (0 until arr.length()).mapNotNull {
+            arr.optJSONObject(it)?.optString("Name")?.takeIf { s -> s.isNotBlank() }
+        }
+    }
+
+    /** 增量过滤要 ISO8601 UTC 时间；用 SimpleDateFormat 兼容 minSdk 21（java.time 要 26） */
+    private fun isoUtc(ms: Long): String {
+        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+        sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        return sdf.format(java.util.Date(ms))
     }
 
     /** 剧集的季与分集（单部失败不影响整库同步） */
@@ -380,7 +486,86 @@ class EmbyClient(
 
     data class PlaybackInfo(val playSessionId: String, val mediaSourceId: String)
 
-    private fun deviceId(): String = "DouDouTV"
+    // ---------------- 回传：观看进度 / 已看 / 收藏 ----------------
+
+    /**
+     * 写回「上次看到哪」（POST /Users/{uid}/Items/{id}/UserData）。
+     *
+     * 只写位置、不动「已看」标记：重看一遍还没看完的片子，
+     * 不该把之前看过的状态抹掉 —— 「已看」只由看完和清除记录两个动作决定。
+     */
+    suspend fun updatePlaybackPosition(itemId: String, positionTicks: Long) = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext
+        val payload = JSONObject().apply { put("PlaybackPositionTicks", positionTicks) }
+        sendJson("/Users/$uid/Items/$itemId/UserData", payload.toString())
+    }
+
+    /** 标记已看（POST /Users/{uid}/PlayedItems/{id}） */
+    suspend fun markPlayed(itemId: String, positionTicks: Long = 0L, datePlayed: String? = null) =
+        withContext(Dispatchers.IO) {
+            val uid = currentUserId() ?: return@withContext
+            val params = mutableMapOf("api_key" to token)
+            if (positionTicks > 0) params["PlaybackPositionTicks"] = positionTicks.toString()
+            datePlayed?.let { params["DatePlayed"] = it }
+            sendEmpty("/Users/$uid/PlayedItems/$itemId", params, "POST")
+        }
+
+    /** 取消已看（DELETE /Users/{uid}/PlayedItems/{id}）：本地清除观看记录时同步过去 */
+    suspend fun unmarkPlayed(itemId: String) = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext
+        sendEmpty("/Users/$uid/PlayedItems/$itemId", mapOf("api_key" to token), "DELETE")
+    }
+
+    /** 收藏 / 取消收藏（POST/DELETE /Users/{uid}/FavoriteItems/{id}） */
+    suspend fun setFavorite(itemId: String, favorite: Boolean) = withContext(Dispatchers.IO) {
+        val uid = currentUserId() ?: return@withContext
+        sendEmpty(
+            "/Users/$uid/FavoriteItems/$itemId",
+            mapOf("api_key" to token),
+            if (favorite) "POST" else "DELETE"
+        )
+    }
+
+    /** POST 一个 JSON 体：回传类接口都是 204/200 空体，失败只抛异常不解析 */
+    private suspend fun sendJson(path: String, payload: String) {
+        val url = (base + path).toHttpUrlOrNull()
+            ?: throw IllegalStateException("Emby 地址无效：$base")
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", authHeader())
+            .header("X-Emby-Authorization", authHeader())
+            .header("Content-Type", "application/json")
+            .post(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+        execute(request).use { response ->
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Emby 回传失败：HTTP ${response.code}")
+            }
+        }
+    }
+
+    /** 不带体的 POST / DELETE（收藏、已看标记都是这种） */
+    private suspend fun sendEmpty(path: String, params: Map<String, String>, method: String) {
+        val url = (base + path).toHttpUrlOrNull()?.newBuilder()?.apply {
+            params.forEach { (k, v) -> addQueryParameter(k, v) }
+        }?.build() ?: throw IllegalStateException("Emby 地址无效：$base")
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", authHeader())
+            .header("X-Emby-Authorization", authHeader())
+            .header("Content-Type", "application/json")
+            .apply {
+                if (method == "DELETE") delete() else post("".toRequestBody("application/json".toMediaType()))
+            }
+            .build()
+        execute(request).use { response ->
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Emby 回传失败：HTTP ${response.code}")
+            }
+        }
+    }
+
+    private fun deviceId(): String = Prefs.embyDeviceId
 
     private var cachedUserId: String? = null
 
@@ -444,6 +629,15 @@ class EmbyClient(
     }
 
     companion object {
+        /** 全量/增量分页的单页条数：太大单响应慢、太小请求多，500 是折中（用户拍板） */
+        private const val PAGE_SIZE = 500
+
+        /** 翻页之间的节流（毫秒）：顺序拉、不并发，避免短时间轰服务器触发限流 */
+        private const val PAGE_THROTTLE_MS = 250L
+
+        /** 单次同步的安全上限：服务端 TotalRecordCount 异常时也不至于无限翻页拉爆内存 */
+        private const val MAX_LIBRARY_ITEMS = 100_000
+
         /**
          * Emby 播放直链（direct stream）。
          * static=true 表示不转码直接原码流传输 —— 对局域网与性能最好的选择。
@@ -467,7 +661,7 @@ class EmbyClient(
             token: String,
             playSessionId: String,
             mediaSourceId: String,
-            deviceId: String = "DouDouTV"
+            deviceId: String = Prefs.embyDeviceId
         ): String {
             val base = serverUrl.trim().trimEnd('/')
             return "$base/Videos/$itemId/master.m3u8?api_key=$token" +

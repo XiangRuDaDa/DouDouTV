@@ -124,7 +124,15 @@ data class MediaEntity(
      * TVBox 源更新备注（vod_remarks），如「更新至第12集」「HD」「正片」。
      * 详情页徽章行用它表示片源当前的更新状态。
      */
-    val remarks: String = ""
+    val remarks: String = "",
+
+    /**
+     * Emby 媒体库归属（CollectionFolder 的 Id / Name，来自 /Users/{uid}/Views）。
+     * 动态分类按媒体库分区（如「NSFW」「国漫」）而非题材；非 Emby 源 / 旧数据为空。
+     * 整库递归查询不返回 ParentId，故同步时逐库 ParentId 拉取并在此打标。
+     */
+    val libraryId: String = "",
+    val libraryName: String = ""
 ) {
     /**
      * 所属剧集名，只在内存里填，不落库。
@@ -151,3 +159,13 @@ fun splitCastNames(raw: String): List<String> {
     val parts = if (hasPunctuation) raw.split(*punctuation) else raw.split(' ')
     return parts.map { it.trim() }.filter { it.isNotBlank() }.distinct()
 }
+
+/**
+ * 媒体库分区的显示顺序：条目数倒序，但 NSFW 库恒定排最后。
+ * NSFW 往往条目最多（如某库 435 条居首），纯按数量倒序会把它顶到第一颗分类/第一行，
+ * 用户要求把它压到最后。compareBy 升序把非 NSFW(false=0) 排前、NSFW(true=1) 排后，
+ * 同组内再按条目数倒序。首页分区 / 分类页 / TV 浏览页三处共用，保证口径一致。
+ */
+val LibraryDisplayOrder: Comparator<Map.Entry<String, List<MediaEntity>>> =
+    compareBy<Map.Entry<String, List<MediaEntity>>> { it.key.trim().equals("NSFW", ignoreCase = true) }
+        .thenByDescending { it.value.size }

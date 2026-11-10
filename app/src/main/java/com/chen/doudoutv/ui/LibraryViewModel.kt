@@ -108,6 +108,13 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     var scanMessage by mutableStateOf("")
         private set
 
+    /** 本次同步已拉取条数 / 服务端总条数：顶部进度条的分子分母，总数未知（TVBox）时为 0 */
+    var scanFetched by mutableStateOf(0)
+        private set
+
+    var scanTotal by mutableStateOf(0)
+        private set
+
     var message by mutableStateOf<String?>(null)
 
     // ---------- 来源页展示用的派生数据 ----------
@@ -254,8 +261,15 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             // 冷启动时若已配置来源但本地还没有内容，自动同步一次，避免用户以为"加完就坏了"
             runCatching {
-                if (repo.enabledSources().isNotEmpty() && !repo.hasAnyMedia()) {
+                val enabled = repo.enabledSources()
+                if (enabled.isNotEmpty() && !repo.hasAnyMedia()) {
                     scanAll()
+                } else {
+                    // 已有内容：启动只对 Emby 源做增量更新（runSync 内部按 count 自动选全量/增量），
+                    // TVBox 不在启动时重拉。增量只取上次之后的变化，轻量、避免反复整库同步被限流。
+                    enabled.filter { it.kind == SourceKind.EMBY }.forEach { src ->
+                        runCatching { runSync(src) }
+                    }
                 }
             }
             // 启动时汇总各来源已入库条目数（来源页「N 个条目」展示用）
@@ -786,13 +800,54 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun runSync(source: SourceEntity): Int {
+    private suspend fun runSync(source: SourceEntity, force: Boolean = false): Int {
+        var mode = "全量"
+        // 每个来源各自一份进度：全部同步时进度条按当前来源重新走一遍
+        scanFetched = 0
+        scanTotal = 0
         val count = when (source.kind) {
-            SourceKind.EMBY -> repo.syncEmby(source) { c -> scanMessage = "${source.name}：$c" }
-            SourceKind.TVBOX -> repo.syncTvBox(source) { c -> scanMessage = "${source.name}：$c" }
+            SourceKind.EMBY -> {
+                val last = lastSyncOf(source.id)
+                val hasContent = runCatching { repo.countBySource(source.id) > 0 }.getOrDefault(false)
+                // A①回填：迁移后老条目无库归属，需一次性全量补齐库标签。用持久化标记判「是否已回填」，
+                // 不再按「本地还有无标签的壳」反复判定——总有少量条目逐库查询覆盖不到（如 BB 的 7 条剧集），
+                // 旧判据恒真会让每次刷新都整库重拉，触发公益服限流。
+                val backfilled = Prefs.sourceLibraryBackfilled(source.id)
+                val incremental = !force && hasContent && last > 0 && backfilled
+                val synced = if (incremental) {
+                    // 已同步过全量：只拉上次之后的变化，避免反复整库重拉触发服务端限流
+                    mode = "增量"
+                    repo.syncEmbyIncremental(source, last) { c, t ->
+                        scanFetched = c
+                        scanTotal = t
+                        scanMessage = "${source.name}：增量 $c${if (t > 0) " / $t" else ""}"
+                    }
+                } else {
+                    // 首次（本地为空）或强制（重新登录）：分页拉全量
+                    repo.syncEmby(source) { c, t ->
+                        scanFetched = c
+                        scanTotal = t
+                        scanMessage = "${source.name}：$c${if (t > 0) " / $t" else ""}"
+                    }
+                }
+                // 全量同步后确实打上库标签（拿到 /Views 并逐库同步）才置位；/Views 失败回退整库（无标签）时不置位，
+                // 下次刷新再试，直到拿到库清单。残留的无标签壳不影响置位，避免重蹈恒真覆辙。
+                if (!incremental && runCatching { repo.embyLibraries(source.id).isNotEmpty() }.getOrDefault(false)) {
+                    Prefs.setSourceLibraryBackfilled(source.id, true)
+                }
+                synced
+            }
+            SourceKind.TVBOX -> repo.syncTvBox(source) { c ->
+                scanFetched = c
+                scanMessage = "${source.name}：$c"
+            }
         }
+        // 取证锚点：同步条数只进界面状态、不落 logcat，排查「拉全没」时无据可查；这里补一行（不改逻辑）
+        android.util.Log.i("MediaSync", "${source.name} [$mode${if (force) "/强制" else ""}] 同步 $count 条")
         // 同步成功才记录时间戳：失败时不该把「最近同步」刷新成刚刚
         markSynced(source.id)
+        // 题材清单跟着内容一起更新：分类页与首页的动态分类都要跟着这次同步走
+        if (source.kind == SourceKind.EMBY) refreshEmbyGenres(source.id)
         return count
     }
 
@@ -805,6 +860,11 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 强制重新登录 Emby（token 过期时用），成功后立即重新同步以刷新播放直链 */
     fun reloginEmby(source: SourceEntity) {
+        // 同步期一律不接新请求：并发同步会同时打服务端，也让顶部进度条失去意义
+        if (scanning) {
+            message = "正在同步，请稍候"
+            return
+        }
         viewModelScope.launch {
             scanning = true
             val error = repo.embyLogin(source)
@@ -815,7 +875,7 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
             val refreshed = repo.getSource(source.id) ?: source
             message = try {
-                val count = runSync(refreshed)
+                val count = runSync(refreshed, force = true)
                 "已重新登录：${source.name}，同步 $count 个条目"
             } catch (e: Exception) {
                 "已重新登录，但同步失败：${e.message ?: "网络或接口异常"}"
@@ -877,9 +937,12 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
         }.getOrDefault(emptyList())
 
-    /** 分类浏览页：按类型/题材分页查询 */
-    suspend fun browseGenre(kind: String?, genre: String?, limit: Int, offset: Int): List<MediaEntity> =
-        repo.byGenre(kind, genre, limit, offset)
+    /** 分类浏览页：按类型/题材/媒体库分页查询（library 为 null 即不按库过滤） */
+    suspend fun browseGenre(kind: String?, genre: String?, limit: Int, offset: Int, library: String? = null): List<MediaEntity> =
+        repo.byGenre(kind, genre, library, limit, offset)
+
+    /** 某 Emby 来源已入库的媒体库清单（本地、离线）：分类页/首页按库分区用 */
+    suspend fun embyLibraries(sourceId: Long): List<String> = repo.embyLibraries(sourceId)
 
     /** 类型标签（按内容数量排序） */
     suspend fun genreTags(): List<String> = repo.genreTags()
@@ -887,6 +950,33 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     /** Emby 刮削信息（导演/演员/分级），非 Emby 源返回 null */
     suspend fun embyDetailOf(sourceId: Long, remoteId: String): EmbyClient.ItemDetail? =
         repo.embyDetail(sourceId, remoteId)
+
+    /** 各 Emby 来源的服务端题材清单缓存：按来源记一份，进程内不重复请求 */
+    private val _embyGenres = mutableStateMapOf<Long, List<String>>()
+
+    /** 当前来源已缓存的服务端题材；空表示还没拉到（上层回退本地聚合） */
+    fun embyGenres(sourceId: Long): List<String> = _embyGenres[sourceId].orEmpty()
+
+    /** 拉一次某 Emby 来源的服务端题材并缓存；已有缓存或非 Emby 直接返回，不频繁打 /Genres */
+    fun ensureEmbyGenres(sourceId: Long) {
+        if (_embyGenres.containsKey(sourceId)) return
+        viewModelScope.launch {
+            val src = repo.getSource(sourceId) ?: return@launch
+            if (src.kind != SourceKind.EMBY) return@launch
+            val genres = runCatching { repo.embyGenres(src) }.getOrDefault(emptyList())
+            // 拉到空（失败/无题材）也记一份空列表，避免每次进分类页都重试打接口
+            _embyGenres[sourceId] = genres
+        }
+    }
+
+    /** Emby 同步完重拉题材清单：库里内容变了，首页与分类页的题材要跟着变，不能留旧缓存 */
+    private fun refreshEmbyGenres(sourceId: Long) {
+        viewModelScope.launch {
+            val src = repo.getSource(sourceId) ?: return@launch
+            if (src.kind != SourceKind.EMBY) return@launch
+            _embyGenres[sourceId] = runCatching { repo.embyGenres(src) }.getOrDefault(emptyList())
+        }
+    }
 
     /** TMDB 刮削（海报/背景图/Logo/评分/简介/演职员），未配置 API Key 时返回 null */
     suspend fun tmdbScrape(
@@ -933,6 +1023,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             scanning = true
+            // 换来源重新起一条进度：上一条的分母不能留到这一条
+            scanFetched = 0
+            scanTotal = 0
             try {
                 val src = repo.getSource(sourceId)
                 if (src == null) {

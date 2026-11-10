@@ -326,7 +326,11 @@ class MediaRepository(private val context: Context) {
         ) = size > 16
     }
 
-    suspend fun setFavorite(id: Long, favorite: Boolean) = mediaDao.setFavorite(id, favorite)
+    suspend fun setFavorite(id: Long, favorite: Boolean) {
+        mediaDao.setFavorite(id, favorite)
+        // Emby 源的收藏同步回服务端：在别的客户端/网页端也能看到同一份收藏
+        runCatching { syncFavoriteToEmby(id, favorite) }
+    }
 
     /** 从头播放：把进度归零，播放器读取后就从 0s 开始 */
     suspend fun resetPosition(id: Long) = mediaDao.saveProgress(id, 0L, 0L)
@@ -595,9 +599,12 @@ class MediaRepository(private val context: Context) {
 
     fun observeAnime(limit: Int): Flow<List<MediaEntity>> = mediaDao.observeAnime(limit)
 
-    /** 分类浏览页分页查询 */
-    suspend fun byGenre(kind: String?, genre: String?, limit: Int, offset: Int): List<MediaEntity> =
-        mediaDao.byGenre(kind, genre, limit, offset)
+    /** 分类浏览页分页查询：kind / genre / library 任一为 null 即不过滤该维度 */
+    suspend fun byGenre(kind: String?, genre: String?, library: String?, limit: Int, offset: Int): List<MediaEntity> =
+        mediaDao.byGenre(kind, genre, library, limit, offset)
+
+    /** 某 Emby 来源已入库的媒体库清单（本地、离线）：动态分类按库分区用 */
+    suspend fun embyLibraries(sourceId: Long): List<String> = mediaDao.distinctLibraries(sourceId)
 
     /** Emby 刮削信息（导演/演员/分级/工作室），仅 Emby 源可用 */
     suspend fun embyDetail(sourceId: Long, remoteId: String): EmbyClient.ItemDetail? =
@@ -610,6 +617,14 @@ class MediaRepository(private val context: Context) {
                 EmbyClient(src.location, src.token, src.userId).fetchItemDetail(itemId)
             }.getOrNull()
         }
+
+    /** Emby 全库题材清单：直接问服务端 /Genres，仅 Emby 源可用；失败回退空列表（上层再退本地聚合） */
+    suspend fun embyGenres(source: SourceEntity): List<String> = withContext(Dispatchers.IO) {
+        if (source.kind != SourceKind.EMBY || source.token.isBlank()) return@withContext emptyList()
+        runCatching {
+            EmbyClient(source.location, source.token, source.userId).fetchGenres()
+        }.getOrDefault(emptyList())
+    }
 
     /** 刮削表里的那一行：先按「清洗名 + 年份 + 类型」精确找，再退到不限年份的同名条目 */
     private suspend fun storedMeta(exactKey: String, titleKey: String): ScrapedMetaEntity? =
@@ -815,7 +830,10 @@ class MediaRepository(private val context: Context) {
                     // 列表接口常常不给演员/备注，不能让下一次同步把详情里拿到的清空
                     actors = entity.actors.ifBlank { old.actors },
                     directors = entity.directors.ifBlank { old.directors },
-                    remarks = entity.remarks.ifBlank { old.remarks }
+                    remarks = entity.remarks.ifBlank { old.remarks },
+                    // 库归属：逐库同步给值就用它；回退整库同步给空时保留已有标签，不清空
+                    libraryId = entity.libraryId.ifBlank { old.libraryId },
+                    libraryName = entity.libraryName.ifBlank { old.libraryName }
                 )
             }
         }
@@ -864,13 +882,12 @@ class MediaRepository(private val context: Context) {
     }
 
     /**
-     * 同步 Emby 媒体库 —— 整库只发一次列表请求。
+     * Emby 全量同步 —— 仅首次（本地为空）或强制（重新登录）时走。
      *
-     * 与主流流媒体客户端一致：列表阶段只入库「电影 + 剧集壳」，
-     * 分集在用户点进详情页时按需加载（loadEmbyDetail）。
-     * 之前逐部剧集循环拉分集，几十部剧就是几十个请求，又慢又容易被服务器限流。
+     * 列表阶段分页拉全库「电影 + 剧集壳」入库，分集在用户点进详情页时按需加载（loadEmbyDetail）。
+     * 之后每次启动/刷新走 [syncEmbyIncremental]，只拉变化，避免反复整库重拉触发服务端限流。
      */
-    suspend fun syncEmby(source: SourceEntity, onProgress: (Int) -> Unit = {}): Int =
+    suspend fun syncEmby(source: SourceEntity, onProgress: (Int, Int) -> Unit = { _, _ -> }): Int =
         withContext(Dispatchers.IO) {
             if (source.token.isBlank()) {
                 throw IllegalStateException("Emby 尚未登录，请先点刷新重新登录")
@@ -880,36 +897,94 @@ class MediaRepository(private val context: Context) {
             // 旧版本剧集壳的 remoteId 没带 sourceId，会与新数据重复，先清掉
             mediaDao.deleteLegacyEmbyShells(source.id)
 
-            val items = client.fetchLibrary()
-            if (items.isEmpty()) return@withContext 0
-
-            // 整库一次批量写：之前每条三次 DAO 往返，600 条库就是近 1800 个独立事务
-            val incoming = items.map { item ->
-                val isSeries = item.isSeries
-                MediaEntity(
-                    sourceId = source.id,
-                    // 入库前统一补齐拼音首字母和来源名称（运行时零开销，库里有就覆盖）
-                    pinyinInitials = item.name.toPinyinInitials(),
-                    sourceName = source.name,
-                    uri = if (isSeries) "" else EmbyClient.playbackUrl(source.location, item.id, source.token),
-                    // remoteId 统一带 sourceId：多台 Emby 时不会因 itemId 相同而互相覆盖
-                    remoteId = "emby:${source.id}:${item.id}",
-                    seriesKey = if (isSeries) "emby:${source.id}:${item.id}" else "",
-                    title = item.name,
-                    kind = if (isSeries) MediaKind.SERIES else MediaKind.MOVIE,
-                    year = item.year,
-                    overview = item.overview,
-                    posterUrl = item.posterUrl,
-                    backdropUrl = item.backdropUrl,
-                    logoUrl = item.logoUrl,
-                    rating = item.rating,
-                    genres = item.genres,
-                    durationMs = item.runTimeMs
-                )
-            }
-            upsertMediaAll(incoming, onProgress)
-            incoming.size
+            syncEmbyPerLibrary(client, source, null, onProgress)
         }
+
+    /**
+     * Emby 增量同步 —— 首次全量之后，启动/刷新只拉 [sinceMs] 之后新增/修改的条目。
+     *
+     * 复用全量的 Item→Entity 映射与批量入库（已存在条目保留进度/收藏）。
+     * 不做删除校对：服务端被删的条目增量拉不到，本地残留按口径接受。
+     * @return 本次更新的条数（0 表示没有变化）
+     */
+    suspend fun syncEmbyIncremental(
+        source: SourceEntity,
+        sinceMs: Long,
+        onProgress: (Int, Int) -> Unit = { _, _ -> }
+    ): Int = withContext(Dispatchers.IO) {
+        if (source.token.isBlank()) {
+            throw IllegalStateException("Emby 尚未登录，请先点刷新重新登录")
+        }
+        val client = EmbyClient(source.location, source.token, source.userId)
+        syncEmbyPerLibrary(client, source, sinceMs, onProgress)
+    }
+
+    /**
+     * 按媒体库逐个同步（全量 [sinceMs]=null / 增量非 null 共用）。
+     *
+     * 先 /Views 拿库清单，再逐库 ParentId 分页拉、拉时即打库标签（libraryId/libraryName）——
+     * 整库递归查询不返回 ParentId，无法事后归库，故走 Yamby/openemby 这套逐库路线。
+     * /Views 拿不到时回退旧整库同步（无库标签，upsert 合并时保留已有标签不清空）。
+     * 跳过 playlists（播放列表库不含 Movie/Series）；库间轻微节流，避免短时间连发触发限流。
+     */
+    private suspend fun syncEmbyPerLibrary(
+        client: EmbyClient,
+        source: SourceEntity,
+        sinceMs: Long?,
+        onProgress: (Int, Int) -> Unit
+    ): Int {
+        val views = client.fetchViews()
+        if (views.isEmpty()) {
+            val items = if (sinceMs != null) client.fetchUpdated(sinceMs) { f, t -> onProgress(f, t) }
+            else client.fetchLibrary { f, t -> onProgress(f, t) }
+            if (items.isEmpty()) return 0
+            val incoming = items.map { embyItemToEntity(source, it) }
+            upsertMediaAll(incoming)
+            return incoming.size
+        }
+        val libs = views.filter { it.collectionType != "playlists" }
+        var done = 0
+        for ((index, lib) in libs.withIndex()) {
+            val items = client.fetchLibraryItems(lib.id, sinceMs) { f, _ -> onProgress(done + f, 0) }
+            if (items.isNotEmpty()) {
+                upsertMediaAll(items.map { embyItemToEntity(source, it, lib.id, lib.name) })
+                done += items.size
+            }
+            if (index < libs.size - 1) kotlinx.coroutines.delay(200)
+        }
+        onProgress(done, 0)
+        return done
+    }
+
+    /** Emby Item → 本地 MediaEntity：全量与增量共用，remoteId 统一带 sourceId 防多台互覆盖 */
+    private fun embyItemToEntity(
+        source: SourceEntity,
+        item: EmbyClient.Item,
+        libraryId: String = "",
+        libraryName: String = ""
+    ): MediaEntity {
+        val isSeries = item.isSeries
+        return MediaEntity(
+            sourceId = source.id,
+            pinyinInitials = item.name.toPinyinInitials(),
+            sourceName = source.name,
+            uri = if (isSeries) "" else EmbyClient.playbackUrl(source.location, item.id, source.token),
+            remoteId = "emby:${source.id}:${item.id}",
+            seriesKey = if (isSeries) "emby:${source.id}:${item.id}" else "",
+            title = item.name,
+            kind = if (isSeries) MediaKind.SERIES else MediaKind.MOVIE,
+            year = item.year,
+            overview = item.overview,
+            posterUrl = item.posterUrl,
+            backdropUrl = item.backdropUrl,
+            logoUrl = item.logoUrl,
+            rating = item.rating,
+            genres = item.genres,
+            durationMs = item.runTimeMs,
+            libraryId = libraryId,
+            libraryName = libraryName
+        )
+    }
 
     /**
      * 详情页按需拉取 Emby 分集并入库。
@@ -943,7 +1018,9 @@ class MediaRepository(private val context: Context) {
                         durationMs = ep.runTimeMs,
                         posterUrl = ep.posterUrl,
                         backdropUrl = shell.backdropUrl,
-                        logoUrl = shell.logoUrl
+                        logoUrl = shell.logoUrl,
+                        libraryId = shell.libraryId,
+                        libraryName = shell.libraryName
                     )
                 }
             )
@@ -1283,6 +1360,73 @@ class MediaRepository(private val context: Context) {
         } else {
             mediaDao.clearProgress(mediaId)
         }
+        // 服务端也要清：本地删了观看记录，网页端/别的客户端还留着「已看」就对不上了
+        runCatching { clearWatchedOnEmby(row) }
+    }
+
+    // ---------------- Emby 回传：观看进度 / 已看 / 收藏 ----------------
+
+    /**
+     * 离开这条播放时回传一次服务端。
+     *
+     * 一次请求搞定：没看完就把位置写回「续播点」，看完九成就直接标「已看」。
+     * 播放期间不回传 —— 服务端只关心「你最后看到哪」，中途的心跳纯属浪费请求。
+     * 回传失败不打断播放：这是锦上添花，不能因为它把正在看的片子搞挂。
+     */
+    suspend fun reportPlaybackToEmby(mediaId: Long, positionMs: Long, durationMs: Long) {
+        val row = mediaDao.get(mediaId) ?: return
+        val itemId = embyItemIdOf(row) ?: return
+        val client = embyClientOf(row) ?: return
+
+        val ticks = positionMs * 10_000L
+        val watched = durationMs > 0L && positionMs >= durationMs * 9 / 10
+        runCatching {
+            if (watched) {
+                client.markPlayed(itemId, ticks)
+            } else {
+                client.updatePlaybackPosition(itemId, ticks)
+            }
+        }.onFailure {
+            Log.w("EmbyReport", "进度回传失败：${it.message}")
+        }
+    }
+
+    /** 收藏同步回服务端；非 Emby 条目直接跳过 */
+    private suspend fun syncFavoriteToEmby(mediaId: Long, favorite: Boolean) {
+        val row = mediaDao.get(mediaId) ?: return
+        val itemId = embyItemIdOf(row) ?: return
+        val client = embyClientOf(row) ?: return
+        client.setFavorite(itemId, favorite)
+    }
+
+    /** 清除观看记录时把服务端那条「已看 / 续播点」也撤掉 */
+    private suspend fun clearWatchedOnEmby(row: MediaEntity?) {
+        val r = row ?: return
+        val itemId = embyItemIdOf(r) ?: return
+        val client = embyClientOf(r) ?: return
+        // 两个请求各管一头：PlayedItems 撤「已看」，UserData 把续播点归零
+        // （只撤「已看」的话，条目还挂在服务端的「继续观看」里）
+        runCatching { client.unmarkPlayed(itemId) }
+        runCatching { client.updatePlaybackPosition(itemId, 0L) }
+    }
+
+    /**
+     * Emby 的条目 id：remoteId 形如 emby:{sourceId}:{itemId}。
+     * 不是 Emby 条目（TVBox）返回 null，调用方据此跳过回传。
+     */
+    private fun embyItemIdOf(row: MediaEntity): String? {
+        if (!row.remoteId.startsWith("emby:")) return null
+        val parts = row.remoteId.split(':')
+        if (parts.size < 3) return null
+        return parts[2].takeIf { it.isNotBlank() }
+    }
+
+    /** 该条目的 Emby 客户端；来源不是 Emby 或 token 失效时返回 null */
+    private suspend fun embyClientOf(row: MediaEntity): EmbyClient? {
+        val src = sourceDao.get(row.sourceId) ?: return null
+        if (src.kind != SourceKind.EMBY) return null
+        if (src.token.isBlank()) return null
+        return EmbyClient(src.location, src.token, src.userId)
     }
 
     /** 预热出来的直链 + 解析时刻 */

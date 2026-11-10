@@ -222,14 +222,22 @@ interface MediaDao {
     )
     fun observeAnime(limit: Int): Flow<List<MediaEntity>>
 
-    /** 分类浏览页：按类型/题材分页查询，kind 或 genre 传 null 表示不过滤 */
+    /** 分类浏览页：按类型/题材/媒体库分页查询，kind / genre / library 传 null 表示不过滤 */
     @Query(
         "SELECT m.* FROM media m JOIN sources s ON m.sourceId = s.id " +
             "WHERE s.enabled = 1 AND (:kind IS NULL OR m.kind = :kind) " +
             "AND (:genre IS NULL OR m.genres LIKE '%' || :genre || '%') " +
+            "AND (:library IS NULL OR m.libraryName = :library) " +
             "ORDER BY m.addedAt DESC LIMIT :limit OFFSET :offset"
     )
-    suspend fun byGenre(kind: String?, genre: String?, limit: Int, offset: Int): List<MediaEntity>
+    suspend fun byGenre(kind: String?, genre: String?, library: String?, limit: Int, offset: Int): List<MediaEntity>
+
+    /** 某 Emby 来源已入库的媒体库清单（去重、非空，按条目数倒序）：动态分类按库分区用 */
+    @Query(
+        "SELECT libraryName FROM media WHERE sourceId = :sourceId AND libraryName != '' " +
+            "AND kind IN ('MOVIE','SERIES') GROUP BY libraryName ORDER BY COUNT(*) DESC"
+    )
+    suspend fun distinctLibraries(sourceId: Long): List<String>
 
     @Query("SELECT DISTINCT genres FROM media WHERE genres != ''")
     suspend fun distinctGenres(): List<String>

@@ -21,10 +21,12 @@ object Prefs {
     private const val KEY_HOME_SITE_KEY = "home_site_key"
     private const val KEY_HOME_SITE_OF_SOURCE = "home_site_of_source_"
     private const val KEY_SOURCE_LAST_SYNC = "source_last_sync_"
+    private const val KEY_SOURCE_LIBRARY_BACKFILLED = "source_library_backfilled_"
     private const val KEY_SEARCH_HISTORY = "search_history_list"
     private const val KEY_PINYIN_VERSION = "pinyin_version"
     private const val KEY_VIDEO_CACHE_TIER = "video_cache_tier"
     private const val KEY_THEME_ID = "theme_id"
+    private const val KEY_EMBY_DEVICE_ID = "emby_device_id"
 
     /** 缩略图尺寸三档 */
     enum class PosterSize(val mobileDp: Int, val tvDp: Int) {
@@ -195,6 +197,36 @@ object Prefs {
     fun setSourceLastSync(sourceId: Long, timestamp: Long) {
         sp.edit().putLong(KEY_SOURCE_LAST_SYNC + sourceId, timestamp).apply()
     }
+
+    /**
+     * 某个来源是否已完成「按媒体库打标签」的一次性回填（迁移 v12→13 后补 libraryName）。
+     *
+     * 回填是迁移任务，只该跑一次：首次逐库全量同步成功打上库标签即置位，之后刷新走增量。
+     * 之前用「本地还有无库标签的壳」做判据，但总有少量条目逐库查询覆盖不到（如 BB 的 7 条剧集），
+     * 判据恒真导致每次刷新都整库重拉，触发公益服限流。改成持久化标记后不再按数据反复判定。
+     */
+    fun sourceLibraryBackfilled(sourceId: Long): Boolean =
+        sp.getBoolean(KEY_SOURCE_LIBRARY_BACKFILLED + sourceId, false)
+
+    fun setSourceLibraryBackfilled(sourceId: Long, value: Boolean) {
+        sp.edit().putBoolean(KEY_SOURCE_LIBRARY_BACKFILLED + sourceId, value).apply()
+    }
+
+    /**
+     * 上报给 Emby 服务端的设备 ID：每台装机唯一，首次读取时生成 UUID 并落盘。
+     *
+     * 之前鉴权头与 PlaybackInfo 各写死一个常量（还大小写不一致），所有装机上报同一个 ID：
+     * 服务端按 DeviceId 管理设备，管理员拉黑这一个 ID 就会全量连坐，且一台机器被算成两个设备。
+     * 改成装机唯一后，被封只影响那一台，也消掉「一机两设备」。鉴权头与播放前置统一取这里。
+     */
+    val embyDeviceId: String
+        get() {
+            val existing = sp.getString(KEY_EMBY_DEVICE_ID, null)
+            if (!existing.isNullOrBlank()) return existing
+            val id = java.util.UUID.randomUUID().toString()
+            sp.edit().putString(KEY_EMBY_DEVICE_ID, id).apply()
+            return id
+        }
 
     /** 首页选中的 TVBox 站点 key；空字符串表示「全部站点」 */
     var homeSiteKey: String
