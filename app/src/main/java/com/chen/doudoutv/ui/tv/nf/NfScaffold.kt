@@ -181,6 +181,8 @@ class NfChromeState {
     private val browseTabFocus = FocusRequester()
     private val mineTabFocus = FocusRequester()
     private val searchTabFocus = FocusRequester()
+    /** 设置页那颗伪 tab 的落点：落在右簇齿轮键上（设置页内容按 ↑ 交回这里） */
+    private val settingsTabFocus = FocusRequester()
 
     /**
      * 本页在导航条上的那颗 tab —— 内容层按 ↑ 的回交对象。
@@ -191,6 +193,7 @@ class NfChromeState {
         NfTab.Browse -> browseTabFocus
         NfTab.Mine -> mineTabFocus
         NfTab.Search -> searchTabFocus
+        NfTab.Settings -> settingsTabFocus
     }
 
     var openScopeDrawer by mutableStateOf(false)

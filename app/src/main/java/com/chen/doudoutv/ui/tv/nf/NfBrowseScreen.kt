@@ -23,6 +23,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,13 +36,17 @@ import com.chen.doudoutv.data.model.LibraryDisplayOrder
 import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.PrecomposeWindow
+import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
 import com.chen.doudoutv.ui.components.ShimmerCard
+import com.chen.doudoutv.ui.gridState
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
 import com.chen.doudoutv.ui.tv.tvPosterColumns
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.TvText
+import kotlinx.coroutines.launch
 
 /** [ReturnSpot] 的页面标识：每个分类各记一份滚动位置与落点，key 里直接带上分类 */
 private const val NfBrowseKey = "nf_browse"
@@ -154,6 +159,12 @@ fun NfBrowseScreen(
 
     // 返回键的层级：卡片 → 分类栏 → tab 栏（tab 栏那一层由 TvApp 根部接，它不在这页的子树里）
     val jumpTo = rememberNfLayerJump()
+    val scope = rememberCoroutineScope()
+    // 网格滚动 state 提到页面级：返回键要就地把网格滚回顶部。
+    // key 必须和下面两个 NfPosterGrid 的 pageKey 逐字一致，否则记账会分成两份。
+    val gridPageKey = if (isTvBox) "$NfBrowseKey/$currentTypeId"
+        else "$NfBrowseKey/local_${localCats.getOrNull(safeLocalIdx)?.name}"
+    val gridState = ReturnSpot.gridState(gridPageKey, precompose = PrecomposeWindow.Tv)
 
     NfScaffold(
         vm = vm,
@@ -172,7 +183,23 @@ fun NfBrowseScreen(
                 .nfBackKey {
                     when {
                         subNavFocused -> jumpTo(chrome.tabOf(NfTab.Browse))
-                        showSubNav -> jumpTo(currentChipFocus, firstChipFocus)
+                        showSubNav -> {
+                            // 从卡片层返回：滚过就先瞬跳回顶部，再把焦点交给当前选中的那颗 chip。
+                            // 已经在顶部时只做交焦点 —— 无条件 scrollToItem 会白白重组合一屏卡片。
+                            val scrolled = gridState.firstVisibleItemIndex > 0 ||
+                                gridState.firstVisibleItemScrollOffset > 0
+                            if (scrolled) {
+                                scope.launch {
+                                    // 先滚再交焦点：滚回顶部会回收持焦的那张卡，1.9 会顺手 clearFocus，
+                                    // 焦点落到整页第一个可聚焦节点（tab 栏），随后这一跳再把它拿回来
+                                    gridState.scrollToItem(0, 0)
+                                    jumpTo(currentChipFocus, firstChipFocus)
+                                }
+                                true
+                            } else {
+                                jumpTo(currentChipFocus, firstChipFocus)
+                            }
+                        }
                         else -> jumpTo(chrome.tabOf(NfTab.Browse))
                     }
                 }
@@ -203,12 +230,13 @@ fun NfBrowseScreen(
 
                     !isTvBox -> NfPosterGrid(
                         items = localShown,
-                        pageKey = "$NfBrowseKey/local_${localCats.getOrNull(safeLocalIdx)?.name}",
+                        pageKey = gridPageKey,
                         stand = stand,
                         firstFocus = gridFirstFocus,
                         upFocusRequester = gridUpFocus,
                         onDetail = onDetail,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        state = gridState
                     )
 
                     !sitePicked -> NfInlineEmpty(
@@ -244,12 +272,13 @@ fun NfBrowseScreen(
 
                     else -> NfPosterGrid(
                         items = onlineItems,
-                        pageKey = "$NfBrowseKey/$currentTypeId",
+                        pageKey = gridPageKey,
                         stand = stand,
                         firstFocus = gridFirstFocus,
                         upFocusRequester = gridUpFocus,
                         onDetail = onDetail,
                         modifier = Modifier.fillMaxSize(),
+                        state = gridState,
                         onNearEnd = { currentTypeId?.let { vm.loadMoreBrowsePage(it) } },
                         footer = {
                             NfGridFooter(

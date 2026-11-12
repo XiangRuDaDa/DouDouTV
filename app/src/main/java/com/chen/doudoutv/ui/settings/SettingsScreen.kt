@@ -2,6 +2,7 @@ package com.chen.doudoutv.ui.settings
 
 import android.content.Context
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,12 +46,14 @@ import com.chen.doudoutv.core.VideoCache
 import com.chen.doudoutv.player.PlayerFactory
 import com.chen.doudoutv.ui.components.AppButton
 import com.chen.doudoutv.ui.components.AppButtonVariant
+import com.chen.doudoutv.ui.components.appCardSurface
 import com.chen.doudoutv.ui.components.GlassBarClearance
 import com.chen.doudoutv.ui.components.TmdbDisclaimer
 import com.chen.doudoutv.ui.components.ThemeSwatch
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.AppPalette
+import com.chen.doudoutv.ui.theme.Edge
 import com.chen.doudoutv.ui.theme.ThemePalettes
 import com.chen.doudoutv.ui.theme.themeBackdrop
 import com.chen.doudoutv.ui.theme.Radius
@@ -563,9 +566,10 @@ private fun ActionRow(
 @Composable
 private fun SettingCard(title: String, content: @Composable () -> Unit) {
     Card(
-        colors = CardDefaults.cardColors(containerColor = AppColors.Surface),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         shape = Radius.Md,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth().appCardSurface(Radius.Md)
     ) {
         Column(
             Modifier.padding(16.dp),
@@ -587,6 +591,7 @@ private fun StatRow(label: String, value: String) {
         Modifier
             .fillMaxWidth()
             .background(AppColors.SurfaceHi, Radius.Sm)
+            .border(1.dp, Edge.Hairline, Radius.Sm)
             .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

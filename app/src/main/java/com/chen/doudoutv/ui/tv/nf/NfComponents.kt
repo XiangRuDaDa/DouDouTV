@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -42,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -53,12 +55,17 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -106,11 +113,12 @@ import com.chen.doudoutv.ui.theme.TvText
  * Netflix 基准布局（TV 端唯一在用的一套）的共用件，经典版 `ui/tv` 的页面仍在但入口已下线。
  *
  * 焦点机制直接复用经典版那套纯机制 helper（tvMoveFocus / tvClaimFocusOnEnter），不写第二份。
- * 相对旧件新增两件事：
- *   · 焦点「移动效果」两档可切（[Prefs.tvCardMotion]）：默认只放大图片那一层、片名不参与，
- *     另一档整卡不涨只上抬；
- *   · 列表「逐格入场 stagger」：只在每行首次拿到数据那一段时间里播，滚动中不重播
- *     （海报淡入在电视上会读成「整屏刷新了一下」，这里绕开同一个坑）。
+ * 相对旧件新增一件事：焦点「移动效果」两档可切（[Prefs.tvCardMotion]），
+ * 默认只放大图片那一层、片名不参与，另一档整卡不涨只上抬。
+ *
+ * 卡片不做逐格入场动画：切 tab 那一帧要同时组合约 30 张卡，每张各挂一条 delay 协程
+ * 加一个 Animatable，再叠 220ms 的整屏 alpha/位移合成，弱盒子上就是可见的掉帧。
+ * 数据到位直接满态出现，和「切页 0ms 直切」是同一个口径。
  */
 
 /** 焦点抬起量。必须小于所在行的纵向 contentPadding（[NfRowVerticalPadding]），否则抬出容器边界被裁掉 */
@@ -128,11 +136,6 @@ private val PosterLift = 12.dp
  * 上面余量 14dp、下面到片名有 8dp 间距，两头都撞不到线。
  */
 private const val ArtZoom = 1.05f
-
-/** 入场动画时长与逐格间隔 */
-private const val EnterMillis = 220
-private const val EnterSlotMillis = 45L
-private val EnterRise = 14.dp
 
 /** 卡与卡的间距 */
 val NfCardGap = 16.dp
@@ -155,8 +158,14 @@ val NfRowVerticalPadding = 14.dp
  */
 val NfGridTopPadding = 18.dp
 
-/** 一级导航的四个落点 */
-enum class NfTab { Home, Browse, Mine, Search }
+/**
+ * 一级导航的落点。前四颗是导航条上可见的 tab。
+ *
+ * [Settings] 是「外壳专用伪 tab」：设置页要像分类 / 搜索一样嵌在常驻顶栏下面，
+ * 借这套槽位与焦点交棒管线，但它不在四颗 tab 那一行里出现（那行是写死的），
+ * 选中态落在右簇的齿轮键上。它不参与 tab 互切的栈规则（仍是 push / 出栈）。
+ */
+enum class NfTab { Home, Browse, Mine, Search, Settings }
 
 /**
  * 「刚点过导航条 tab」的进程级标记：点哪颗、哪页接住。
@@ -280,60 +289,63 @@ fun Modifier.nfKeyDown(
     }
 }
 
+/** 焦点白框的描边宽度 */
+private val NfFocusFrameWidth = 1.5.dp
+
+/** 焦点白框的圆角：与导航条右簇的 [Radius.Md] 同值，这里要的是能进 DrawScope 的 dp 数 */
+private val NfFocusFrameRadius = 12.dp
+
+/** 选中标记（下划线）的厚度：选中与焦点靠形状分开，不靠加粗这条线 */
+private val NfSelectedRuleHeight = 2.dp
+
 /**
- * 这一行的「首次填充」stagger 开关：数据第一次到达时为 true，播完永久 false。
- * Lazy 容器滚动时会不断新建 item 的组合，开关若一直开着，每滚进一张卡就播一次淡入。
+ * 焦点白框 + 弱辉光：进度 0→1 只改透明度，不缩放。
  *
- * [key] 给定时（按页面/分类记）播过的内容集再回来不再播：进详情会把整棵子树销毁重建，
- * 「返回」不该被读成一次刷新。
- */
-@Composable
-fun nfFirstFillStagger(itemCount: Int, key: String? = null): Boolean {
-    var playing by remember { mutableStateOf(false) }
-    var started by remember { mutableStateOf(key != null && NfIntroLog.contains(key)) }
-    LaunchedEffect(itemCount) {
-        if (started || itemCount <= 0) return@LaunchedEffect
-        started = true
-        if (key != null) NfIntroLog.add(key)
-        playing = true
-        delay(itemCount.coerceAtMost(10) * EnterSlotMillis + EnterMillis + 120L)
-        playing = false
-    }
-    return playing
-}
-
-/** 进程级的「已入场」名单：页面重建后 remember 全新一份，靠它分清「第一次出数据」和「又渲染了一遍同样的数据」 */
-private object NfIntroLog {
-    private val played = HashSet<String>()
-    fun contains(key: String): Boolean = synchronized(played) { played.contains(key) }
-    fun add(key: String): Unit = synchronized(played) { played.add(key) }
-}
-
-/**
- * 入场进度 0→1；[stagger] 为 false 时直接给 1（不播）。
- * 序号超过 12 的按 12 封顶，免得排在长列表后面的格子等半秒才亮。
- */
-@Composable
-fun nfEntrance(index: Int, stagger: Boolean): Float {
-    var shown by remember(stagger) { mutableStateOf(!stagger) }
-    LaunchedEffect(stagger, index) {
-        if (!stagger) {
-            shown = true
-        } else if (!shown) {
-            delay(index.coerceAtMost(12) * EnterSlotMillis)
-            shown = true
-        }
-    }
-    return animateFloatAsState(if (shown) 1f else 0f, tween(EnterMillis, easing = Motion.Ease), label = "nfEnter").value
-}
-
-/**
- * 导航条的一颗 tab：状态完全由「文字色 + 下方横线」表达，不再有任何方框底块。
- * 选中 = 白字加粗 + 主题色横线；焦点 = 白字 + 白色横线 + 微放大；其余 = 灰字无横线。
+ * 进度在**绘制期**读（不是组合期），所以焦点移动只重绘这一颗、不触发重组。
+ * 辉光用两圈等宽描边做亮度递减（0–3dp 一层、3–6dp 一层），不用 BlurMaskFilter ——
+ * 模糊滤镜每帧都要重算一张离屏图，弱盒子上和「切页那一帧组合 30 张卡」抢同一份绘制时间。
  *
- * 焦点移动的全部视觉量都走过渡而不是硬切：文字色与横线色用 [animateColorAsState]，
- * 缩放和横线展开用 spring —— 硬切 + 120ms 硬 tween 的组合在遥控器连按时
- * 读作「一卡一卡」，spring 在目标中途换向时速度连续，不会每按一次都从零起步。
+ * 挂在 padding 之前，框才会把内边距一起圈进去；描边内缩半个线宽，避免被裁掉一半。
+ * 调用方不要给它套 clip：辉光要画到节点外面去。
+ */
+private fun Modifier.nfFocusFrame(progress: State<Float>): Modifier = drawBehind {
+    val alpha = progress.value.coerceIn(0f, 1f)
+    if (alpha <= 0.01f) return@drawBehind
+    val stroke = NfFocusFrameWidth.toPx()
+    val inset = stroke / 2f
+    val box = Size(size.width - stroke, size.height - stroke)
+    val radius = NfFocusFrameRadius.toPx()
+    val band = 3.dp.toPx()
+    for (i in 0..1) {
+        val expand = band * (i + 0.5f)
+        drawRoundRect(
+            color = Color.White.copy(alpha = alpha * if (i == 0) 0.10f else 0.045f),
+            topLeft = Offset(inset - expand, inset - expand),
+            size = Size(box.width + expand * 2, box.height + expand * 2),
+            cornerRadius = CornerRadius(radius + expand),
+            style = Stroke(band)
+        )
+    }
+    drawRoundRect(
+        color = Color.White.copy(alpha = alpha),
+        topLeft = Offset(inset, inset),
+        size = box,
+        cornerRadius = CornerRadius(radius),
+        style = Stroke(stroke)
+    )
+}
+
+/**
+ * 导航条的一颗 tab：选中与焦点用**不同形状**表达 —— 选中 = 白字加粗 + 主题色下划线（常驻，只此一处），
+ * 焦点 = 整颗白色圆角描边框 + 弱辉光，其余 = 灰字。
+ *
+ * 为什么不再用「白色下划线」表示焦点：默认品牌色就是苹果灰，和白线只差明度、形状还一样，
+ * 三米外两条线必然糊成一条；焦点落在选中那颗上时白线更是直接把品牌线盖掉，等于没有选中提示。
+ *
+ * 焦点不放大，所以这里连 graphicsLayer 都不需要：每颗只剩一个透明度动画，
+ * 且值在绘制期读，焦点移动不触发重组、也不多一层离屏缓冲。
+ * 下划线只跟「选中」有关，而选中只在切页时变、页面本来就是整棵重建的，所以不做动画。
+ * 未选中时横线画成透明而不是不画：省掉这几 dp 会让选中的那颗比邻居高一截。
  */
 @Composable
 private fun NfNavTab(
@@ -344,32 +356,26 @@ private fun NfNavTab(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale = animateFloatAsState(if (focused) 1.04f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "tab")
-    val line = animateFloatAsState(if (selected || focused) 1f else 0f, spring(dampingRatio = 0.85f, stiffness = 380f), label = "tabLine")
-    val textColor = animateColorAsState(
-        if (selected || focused) Color.White else TvText.Meta,
-        tween(Motion.BASE, easing = Motion.Ease), label = "tabText"
-    )
-    val lineColor = animateColorAsState(
-        if (selected) AppColors.Brand else Color.White.copy(alpha = 0.9f),
-        tween(Motion.BASE, easing = Motion.Ease), label = "tabLineColor"
+    val focus = animateFloatAsState(
+        if (focused) 1f else 0f,
+        tween(Motion.BASE, easing = Motion.Ease), label = "tabFocus"
     )
     Column(
         modifier
             // 下划线要 fillMaxWidth 对齐字宽，但 Column 本身必须收在字的固有宽度：
             // 不收的话 fillMaxWidth 会把这颗 tab 撑满整条 Row，把兄弟 tab 和右簇全挤出去
             .width(IntrinsicSize.Max)
+            // 辉光要画到节点外面，焦点这颗必须压在兄弟之上
             .zIndex(if (focused) 1f else 0f)
-            // 焦点目标排在 graphicsLayer 外层：缩放不进焦点矩形（同海报卡的顺序约束）
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+            .nfFocusFrame(focus)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             text,
-            color = textColor.value,
+            color = if (selected || focused) Color.White else TvText.Meta,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1
@@ -377,11 +383,10 @@ private fun NfNavTab(
         Box(
             Modifier
                 .padding(top = 5.dp)
-                .height(3.dp)
+                .height(NfSelectedRuleHeight)
                 .fillMaxWidth()
-                .graphicsLayer { scaleX = line.value }
                 .clip(Radius.Pill)
-                .background(lineColor.value)
+                .background(if (selected) AppColors.Brand else Color.Transparent)
         )
     }
 }
@@ -468,12 +473,18 @@ private fun NfNavIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     loading: Boolean = false,
+    /** 当前页指示（设置页时齿轮常亮）：未聚焦也留一层品牌淡底 + 品牌色图标 */
+    selected: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val scale = animateFloatAsState(if (focused) 1.08f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "navIcon")
     val bg = animateColorAsState(
-        if (focused) Color.White.copy(alpha = 0.14f) else Color.Transparent,
+        when {
+            focused -> Color.White.copy(alpha = 0.14f)
+            selected -> AppColors.Brand.copy(alpha = 0.18f)
+            else -> Color.Transparent
+        },
         tween(Motion.BASE, easing = Motion.Ease), label = "navIconBg"
     )
     Box(
@@ -485,7 +496,13 @@ private fun NfNavIconButton(
             .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(Radius.Md)
             .background(bg.value)
-            .then(if (focused) Modifier.border(1.5.dp, Color.White, Radius.Md) else Modifier)
+            .then(
+                when {
+                    focused -> Modifier.border(1.5.dp, Color.White, Radius.Md)
+                    selected -> Modifier.border(1.dp, AppColors.Brand.copy(alpha = 0.6f), Radius.Md)
+                    else -> Modifier
+                }
+            )
             .padding(6.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -499,7 +516,11 @@ private fun NfNavIconButton(
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
-                tint = if (focused) Color.White else TvText.Body,
+                tint = when {
+                    focused -> Color.White
+                    selected -> AppColors.BrandSoft
+                    else -> TvText.Body
+                },
                 modifier = Modifier.size(22.dp)
             )
         }
@@ -530,8 +551,10 @@ fun NfNavBar(
     modifier: Modifier = Modifier
 ) {
     val route = Modifier.nfFocusRoute(up = FocusRequester.Cancel, down = belowFocusRequester)
-    // 点 tab 先记标记再切路由：目标页的入口抢焦凭它把焦点留在标签上，而不是交给内容首卡
+    // 点 tab 先记标记再切路由：目标页的入口抢焦凭它把焦点留在标签上，而不是交给内容首卡。
+    // 交焦点这一下是给手指点按用的：切到别的页时新页会自己抢焦，点的却是当前这颗 tab 时不补就没人交。
     val goTab: (NfTab) -> Unit = { tab ->
+        tvMoveFocus(tabFocus(tab))
         NfTabSwitch.arm(tab)
         onTab(tab)
     }
@@ -594,7 +617,8 @@ fun NfNavBar(
                 icon = Icons.Filled.Tune,
                 contentDescription = "设置",
                 onClick = onSettings,
-                modifier = route
+                selected = current == NfTab.Settings,
+                modifier = route.focusRequester(tabFocus(NfTab.Settings))
             )
         }
     }
@@ -635,7 +659,7 @@ fun NfRowTitle(
  * 焦点态看 [Prefs.tvCardMotion] 两档：
  * · 放大（默认）—— 只有图片那一层涨 5%，片名的位置和字号一动不动；
  * · 上抬 —— 整卡不涨，往上走 [PosterLift]。
- * 两档都叠一圈 1.5dp 细白描边标落点。入场时淡入并自下 [EnterRise] 归位。
+ * 两档都叠一圈 1.5dp 细白描边标落点。
  * 放在 LazyRow / LazyVerticalGrid 里时，行的纵向 contentPadding 至少给 [NfRowVerticalPadding]，
  * 否则抬起/涨出来的那几像素会被 Lazy 容器的边界裁掉。
  */
@@ -646,14 +670,12 @@ fun NfPosterCard(
     modifier: Modifier = Modifier,
     width: Dp = Prefs.posterSize.tvDp.dp,
     fillCell: Boolean = false,
-    anchorStart: Boolean = false,
-    entrance: Float = 1f
+    anchorStart: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val density = LocalDensity.current
     val liftPx = with(density) { PosterLift.toPx() }
-    val risePx = with(density) { EnterRise.toPx() }
     // 焦点所在的那一项不许被 Lazy 回收，否则 1.9 会直接把焦点清空（见 tvKeepFocusedItemAlive）
     tvKeepFocusedItemAlive(focused)
     val liftMode = Prefs.tvCardMotion == Prefs.CardMotion.LIFT
@@ -672,10 +694,7 @@ fun NfPosterCard(
             // 同一行的邻卡立刻全变成「在它下面」的合法候选，↓ 被吃掉去横向跳格，
             // searchBeyondBounds 因此永不触发，Lazy 网格不再补组合下一行，列表卡死在屏幕底部。
             // 放大档没这毛病是因为 scale 挂在图片那一层、且绕中心涨，焦点矩形没动过。
-            .graphicsLayer {
-                alpha = entrance
-                translationY = -lift.value + (1f - entrance) * risePx
-            }
+            .graphicsLayer { translationY = -lift.value }
     ) {
         // 圆角和放大只作用在图片这一层。片名要是跟着一起放大，同一行的字号就齐不了，
         // 涨出来的高度还会往下压到下一行的片名上 —— 图外字幕这版排版要的就是文字层稳定。
@@ -759,14 +778,12 @@ fun NfContinueCard(
     onClick: () -> Unit,
     onMenu: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
-    anchorStart: Boolean = false,
-    entrance: Float = 1f
+    anchorStart: Boolean = false
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     val density = LocalDensity.current
     val liftPx = with(density) { CardLift.toPx() }
-    val risePx = with(density) { EnterRise.toPx() }
     val scale = animateFloatAsState(if (focused) 1.06f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "nfCont")
     val lift = animateFloatAsState(if (focused) liftPx else 0f, tween(Motion.FAST, easing = Motion.Ease), label = "nfContLift")
     val cardShape = remember { Radius.Md }
@@ -811,10 +828,9 @@ fun NfContinueCard(
             // 变换挪到 clickable 之后，焦点矩形回到卡片本身（与 NfPosterCard 同一顺序）。
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .graphicsLayer {
-                alpha = entrance
                 scaleX = scale.value
                 scaleY = scale.value
-                translationY = -lift.value + (1f - entrance) * risePx
+                translationY = -lift.value
                 if (anchorStart) translationX = (scale.value - 1f) * size.width / 2f
                 shape = cardShape
                 clip = true
@@ -917,14 +933,21 @@ fun NfSubNav(
             .heightIn(min = 44.dp),
         state = state,
         verticalAlignment = Alignment.CenterVertically,
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 4.dp),
+        // 纵向余量要容得下焦点辉光外扩的那 6dp：LazyRow 会按自己的边界裁剪
+        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         itemsIndexed(labels) { index, label ->
             NfSubChip(
                 text = label,
                 selected = index == selectedIndex,
-                onClick = { onSelect(index) },
+                // 手指点按不产生方向键事件，clickable 在触摸模式下不会自己抢焦：
+                // 不补这一下，焦点框会一直停在顶栏那颗 tab 上（遥控器上看不出来，手机上一点就露）。
+                // 必须先交焦点再换分类：换分类会触发本页入口抢焦，它靠「分类栏是否持焦」决定不把焦点拽走。
+                onClick = {
+                    tvMoveFocus(anchors[index])
+                    onSelect(index)
+                },
                 modifier = Modifier
                     .nfFocusRoute(
                         up = upFocusRequester,
@@ -940,9 +963,8 @@ fun NfSubNav(
 }
 
 /**
- * 二级分类的一颗 tab：与一级导航 [NfNavTab] 同一套视觉语言 ——
- * 状态只由「文字色 + 下方横线」表达，没有任何方框底块。
- * 选中 = 亮字加粗 + 主题色横线，焦点 = 亮字 + 白色横线 + 微放大。
+ * 二级分类的一颗 chip：与一级导航 [NfNavTab] 同一套视觉语言 ——
+ * 选中 = 亮字加粗 + 主题色下划线，焦点 = 整颗白色圆角描边框 + 弱辉光，都不放大。
  * 字号比一级小一档（labelLarge），纵向内边距收紧，整条分类栏贴着导航条排。
  */
 @Composable
@@ -957,15 +979,9 @@ private fun NfSubChip(
     // 焦点所在的 chip 不许被 LazyRow 回收：1.9 回收获焦项会直接 clearFocus，
     // 焦点随后落到整页第一个可聚焦节点 —— 也就是一级 tab 栏
     tvKeepFocusedItemAlive(focused)
-    val scale = animateFloatAsState(if (focused) 1.04f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "subChip")
-    val line = animateFloatAsState(if (selected || focused) 1f else 0f, spring(dampingRatio = 0.85f, stiffness = 380f), label = "subChipLine")
-    val textColor = animateColorAsState(
-        if (focused || selected) TvText.Title else TvText.Body,
-        tween(Motion.BASE, easing = Motion.Ease), label = "subChipText"
-    )
-    val lineColor = animateColorAsState(
-        if (selected) AppColors.Brand else Color.White.copy(alpha = 0.9f),
-        tween(Motion.BASE, easing = Motion.Ease), label = "subChipLineColor"
+    val focus = animateFloatAsState(
+        if (focused) 1f else 0f,
+        tween(Motion.BASE, easing = Motion.Ease), label = "subChipFocus"
     )
     Column(
         modifier
@@ -974,13 +990,13 @@ private fun NfSubChip(
             .zIndex(if (focused) 1f else 0f)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+            .nfFocusFrame(focus)
             .padding(horizontal = 14.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             text,
-            color = textColor.value,
+            color = if (focused || selected) TvText.Title else TvText.Body,
             style = MaterialTheme.typography.labelLarge,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             maxLines = 1,
@@ -989,11 +1005,10 @@ private fun NfSubChip(
         Box(
             Modifier
                 .padding(top = 4.dp)
-                .height(3.dp)
+                .height(NfSelectedRuleHeight)
                 .fillMaxWidth()
-                .graphicsLayer { scaleX = line.value }
                 .clip(Radius.Pill)
-                .background(lineColor.value)
+                .background(if (selected) AppColors.Brand else Color.Transparent)
         )
     }
 }
@@ -1002,7 +1017,6 @@ private fun NfSubChip(
  * 竖版海报网格（分类页 / 我的页 / 搜索结果共用）。
  * 行间距取 [NfRowVerticalPadding]，容得下焦点抬起的 [PosterLift]；首行上方另给 [NfGridTopPadding]，
  * 因为纵向滚动容器贴着容器上下边缘裁剪，首行上面没有下一行兜着。
- * 入场只在「这一屏第一次拿到数据」那一段时间里逐格播（[nfFirstFillStagger]）。
  *
  * 滚动位置与落点按 [pageKey] 记账：进详情把这页子树销毁重建，返回时要站在原来那一屏、原来那张卡。
  */
@@ -1020,14 +1034,19 @@ fun NfPosterGrid(
     onNearEnd: (() -> Unit)? = null,
     /** 首行卡片按 ↑ 的落点（分类 chip 或本页那颗 tab） */
     upFocusRequester: FocusRequester? = null,
+    /**
+     * 由调用方持有的滚动 state：分类页的返回键要就地把网格滚回顶部，
+     * 而 [ReturnSpot.gridState] 是按 key `remember` 的，页面里再调一次拿到的是另一个实例。
+     * 不传就按 [pageKey] 内部建（我的页 / 搜索结果不需要外部控制）。
+     */
+    state: LazyGridState? = null,
     footer: (@Composable () -> Unit)? = null
 ) {
     val columns = tvPosterColumns()
     // 记录要在建 gridState 之前读出来：数据还没补齐时 LazyGrid 会把位置 clamp 到末尾，
     // 并通过 gridState 的写回把原记录改小，之后就再也回不到离开时那一屏
     val saved = remember(pageKey) { ReturnSpot.scrollOf(pageKey) }
-    val gridState = ReturnSpot.gridState(pageKey, precompose = PrecomposeWindow.Tv)
-    val stagger = nfFirstFillStagger(items.size, pageKey)
+    val gridState = state ?: ReturnSpot.gridState(pageKey, precompose = PrecomposeWindow.Tv)
     val firstId = items.firstOrNull()?.id
     var scrollRestored by remember(pageKey) { mutableStateOf(false) }
     LaunchedEffect(pageKey, items.size) {
@@ -1064,7 +1083,6 @@ fun NfPosterGrid(
                 onClick = { onDetail(item.id) },
                 fillCell = true,
                 anchorStart = index % columns == 0,
-                entrance = nfEntrance(index, stagger),
                 // 首卡同时是本页的入口锚点，记账复用它的 requester，不挂第二个
                 modifier = Modifier
                     .then(

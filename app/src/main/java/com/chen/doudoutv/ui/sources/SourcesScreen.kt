@@ -63,6 +63,7 @@ import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.components.AppButton
 import com.chen.doudoutv.ui.components.AppButtonVariant
+import com.chen.doudoutv.ui.components.appCardSurface
 import com.chen.doudoutv.ui.components.GlassBarClearance
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.themeBackdrop
@@ -273,11 +274,13 @@ private fun SourceCard(
     val lastSync = vm.lastSyncOf(source.id)
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = AppColors.Surface),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         shape = Radius.Lg,
         modifier = Modifier
             .fillMaxWidth()
             .alpha(if (source.enabled) 1f else 0.55f)
+            .appCardSurface(Radius.Lg)
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
 

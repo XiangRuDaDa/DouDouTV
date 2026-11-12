@@ -244,7 +244,9 @@ fun TvApp(vm: LibraryViewModel) {
                     return@onPreviewKeyEvent false
                 }
                 val tab = if (nfLayout) nfTab else null
-                if (tab == null || tab == NfTab.Home || !nfShell.chrome.navFocused) {
+                // 设置页是 push 进来的覆盖页（不是 tab 互切）：焦点在顶栏按返回时原样交回，
+                // 由下面的 BackHandler 出栈回到「从哪来」那一页，而不是切到首页。
+                if (tab == null || tab == NfTab.Home || tab == NfTab.Settings || !nfShell.chrome.navFocused) {
                     return@onPreviewKeyEvent false
                 }
                 NfTabSwitch.arm(NfTab.Home)
@@ -341,7 +343,13 @@ fun TvApp(vm: LibraryViewModel) {
                     )
 
                     is TvRoute.Sources -> TvSourcesScreen(vm = vm)
-                    is TvRoute.Settings -> TvSettingsScreen(vm = vm)
+                    is TvRoute.Settings -> TvSettingsScreen(
+                        vm = vm,
+                        onTab = { tab -> switchTab(nfRouteOf(tab)) },
+                        // 已在设置页：齿轮是当前页指示，点了不再重复入栈
+                        onSettings = { },
+                        onSources = { push(TvRoute.Sources) }
+                    )
                 }
             }
 
@@ -404,20 +412,22 @@ fun TvApp(vm: LibraryViewModel) {
 /** 双返回退出的确认窗口：比 Android 惯例的 2 秒稍长一点，电视上按键到屏幕回显有延迟 */
 private const val EXIT_CONFIRM_WINDOW_MS = 2500L
 
-/** 导航条的四颗 tab → 路由 */
+/** 导航条的四颗 tab → 路由（Settings 是伪 tab，只供设置页注册槽位，tab 行不会点到它） */
 private fun nfRouteOf(tab: NfTab): TvRoute = when (tab) {
     NfTab.Home -> TvRoute.Home
     NfTab.Browse -> TvRoute.Browse
     NfTab.Mine -> TvRoute.Mine
     NfTab.Search -> TvRoute.Search
+    NfTab.Settings -> TvRoute.Settings
 }
 
-/** 路由 → 导航条 tab；非 tab 页（详情 / 分类 / 来源 / 设置）没有 tab，常驻顶栏不画 */
+/** 路由 → 导航条 tab；设置页借 Settings 伪 tab 露出常驻顶栏，详情 / 分类 / 来源没有 tab */
 private fun nfTabOf(route: TvRoute): NfTab? = when (route) {
     is TvRoute.Home -> NfTab.Home
     is TvRoute.Browse -> NfTab.Browse
     is TvRoute.Mine -> NfTab.Mine
     is TvRoute.Search -> NfTab.Search
+    is TvRoute.Settings -> NfTab.Settings
     else -> null
 }
 

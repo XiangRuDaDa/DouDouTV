@@ -69,6 +69,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.ui.LibraryViewModel
+import com.chen.doudoutv.ui.components.tvCardSurface
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.themeBackdrop
 import com.chen.doudoutv.ui.theme.TvText
@@ -396,12 +397,7 @@ private fun TvSourceCard(
             .width(width)
             .height(height)
             .graphicsLayer { scaleX = scale; scaleY = scale; alpha = disabledAlpha }
-            .clip(Radius.Md)
-            .background(AppColors.Surface)
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
-                else Modifier.border(2.dp, Color.Transparent, Radius.Md)
-            )
+            .tvCardSurface(Radius.Md, focused, borderWidth = 2.dp)
             .clickable(
                 interactionSource = interaction,
                 indication = null,

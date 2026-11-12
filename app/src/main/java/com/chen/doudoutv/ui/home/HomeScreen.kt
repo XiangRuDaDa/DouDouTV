@@ -1355,7 +1355,7 @@ fun SearchScreen(
         focusManager.clearFocus()
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().themeBackdrop()) {
         // 搜索框：不再放返回箭头 —— 系统返回键/侧滑本来就能退出，底栏三个 Tab 也一直在，
         // 这一格留着只会把输入框挤窄，还和「输入框要占满」的直觉打架
         Row(

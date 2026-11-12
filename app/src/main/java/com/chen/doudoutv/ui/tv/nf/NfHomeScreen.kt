@@ -67,6 +67,28 @@ private const val NfHomeKey = "nf_home"
 private val NfHomeHeroIndex = mutableIntStateOf(0)
 
 /**
+ * hero 的刮削横板覆盖图：进程级，按 media id 记。
+ *
+ * 挂在页面级 `remember` 上时每次切 tab 都归零，回首页就要重查 5 条刮削表；
+ * 更糟的是查之前先 clear，hero 会先回落源站小图、再换成刮削横板 —— 肉眼就是「换了一次图」。
+ * 记在这里之后：查过的不再查，切回来直接就是最终那张。
+ *
+ * 空串 = 「查过，没有可用的刮削横板」，和「还没查」区分开，否则没有横板的条目每次都要重查。
+ * 刷新轮次变了才整份作废（切来源 / 切线路 / 点刷新都会自增），刮削表更新后能重新查到。
+ */
+private object NfHeroBackdropCache {
+    val urls = mutableStateMapOf<Long, String>()
+    private var epoch = -1
+
+    fun rollTo(current: Int) {
+        if (epoch != current) {
+            epoch = current
+            urls.clear()
+        }
+    }
+}
+
+/**
  * 本进程是否已经进过首页。冷启动第一次进首页要把焦点站在顶栏第一颗 tab 并回到首屏；
  * 之后从详情/播放器返回则沿用「站在离开时那张卡」的恢复逻辑，不被这次抢焦拽回顶栏。
  */
@@ -100,19 +122,17 @@ fun NfHomeScreen(
     }
     // 刮削横板海报覆盖：Emby 行里的 backdropUrl 可能只是源站的小图，
     // TMDB 刮削来的真·横板存在 scraped_meta 表里；首页 hero 要优先用刮削那份。
-    val heroBackdropOverrides = remember { mutableStateMapOf<Long, String>() }
-    LaunchedEffect(heroItems) {
-        heroBackdropOverrides.clear()
-        val overrides: List<Pair<Long, String>?> = heroItems.map { item ->
+    val heroBackdropOverrides = NfHeroBackdropCache.urls
+    LaunchedEffect(heroItems, vm.homeRefreshEpoch) {
+        NfHeroBackdropCache.rollTo(vm.homeRefreshEpoch)
+        val missing = heroItems.filter { !heroBackdropOverrides.containsKey(it.id) }
+        if (missing.isEmpty()) return@LaunchedEffect
+        missing.map { item ->
             async(Dispatchers.IO) {
-                val meta = vm.tmdbCached(item.title, item.year, item.kind)
-                val bd = meta?.backdropUrl
-                if (!bd.isNullOrBlank() && bd != item.backdropUrl) item.id to bd else null
+                val bd = vm.tmdbCached(item.title, item.year, item.kind)?.backdropUrl
+                item.id to if (!bd.isNullOrBlank() && bd != item.backdropUrl) bd else ""
             }
-        }.awaitAll()
-        overrides.forEach { pair ->
-            pair?.let { (id, url) -> heroBackdropOverrides[id] = url }
-        }
+        }.awaitAll().forEach { (id, url) -> heroBackdropOverrides[id] = url }
     }
     // 继续观看：只列当前首页来源那一份记录 —— 顶栏已经跟着来源换了，这里再把别的来源铺进来就是重复信息。
     // TVBox 一份配置（它下面所有线路/站点）算同一个来源，各线路的追看记录汇在这一行；
@@ -432,7 +452,6 @@ private fun NfContinueRow(
     onMenu: (MediaEntity, FocusRequester) -> Unit
 ) {
     val rowState = ReturnSpot.listState("$NfHomeKey/$rowKey", precompose = PrecomposeWindow.Tv)
-    val stagger = nfFirstFillStagger(items.size, "$NfHomeKey/$rowKey")
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val cardWidth = (screenWidth * 0.30f).coerceIn(240.dp, 380.dp)
     LazyRow(
@@ -455,7 +474,6 @@ private fun NfContinueRow(
                     ReturnSpot.cardStand(NfHomeKey, rowKey, item.id, stand, cardFocus)
                 ),
                 anchorStart = index == 0,
-                entrance = nfEntrance(index, stagger),
                 onClick = { if (item.positionMs > 5_000L) onPlay(item) else onDetail(item.id) },
                 onMenu = { onMenu(item, cardFocus) }
             )

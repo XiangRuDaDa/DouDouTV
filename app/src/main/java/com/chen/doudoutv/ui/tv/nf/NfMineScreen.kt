@@ -224,7 +224,6 @@ private fun NfFavoriteGrid(
 ) {
     val gridState = ReturnSpot.gridState(NfMineKey, precompose = PrecomposeWindow.Tv)
     val columns = tvPosterColumns()
-    val stagger = nfFirstFillStagger(groups.sumOf { it.items.size }, NfMineKey)
     val firstItemId = groups.firstOrNull()?.items?.firstOrNull()?.id
     val firstGroupKey = groups.firstOrNull()?.key
 
@@ -251,7 +250,6 @@ private fun NfFavoriteGrid(
                     onClick = { onOpen(group, item, cardFocus) },
                     fillCell = true,
                     anchorStart = index % columns == 0,
-                    entrance = nfEntrance(index, stagger),
                     // 首组首行的 ↑ 显式交回本页那颗 tab：往上只有一条常驻导航，
                     // 默认几何搜索会先撞到横跨整行的表头（它不可聚焦）
                     modifier = Modifier

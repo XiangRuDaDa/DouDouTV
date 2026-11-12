@@ -200,13 +200,24 @@ fun GlassTabBar(
                     Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .clip(cellShape)
-                        // 选中格带一点主题色：底衬是主题色压出来的柔光，不换图标形状
-                        // 只有图标之后没有文字做区分，选中态全靠这一层底色，所以别调太重
-                        .background(if (selected) brand.copy(alpha = 0.14f) else Color.Transparent)
-                        .clickable { onSelect(index) },
+                        // 去掉水波纹（与全局一致）：底衬缩进 6dp 后，整格大的水波纹会在它
+                        // 四周露出一圈半透明矩形闪现；选中底衬移到本格就是反馈，不要水波纹。
+                        .clickable(interactionSource = null, indication = null) { onSelect(index) },
                     contentAlignment = Alignment.Center
                 ) {
+                    // 选中底衬：主题色压出来的柔光，不换图标形状。
+                    // 上下让开 6dp —— 原来这层铺满整格高，首/末格就顶到玻璃条 17dp 圆角上
+                    // （底衬才 13dp、左侧还缩进 4dp），两弧对不齐、角上缺一块，看着像没填圆；
+                    // 让开后它是一块完整圆角矩形，整块落在条内，不再和条的圆角打架。
+                    if (selected) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .padding(vertical = 6.dp)
+                                .clip(cellShape)
+                                .background(brand.copy(alpha = 0.14f))
+                        )
+                    }
                     Icon(
                         item.icon,
                         contentDescription = item.label,
