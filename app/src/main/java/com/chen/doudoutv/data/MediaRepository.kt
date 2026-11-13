@@ -360,6 +360,17 @@ class MediaRepository(private val context: Context) {
     /** 分集行所属的剧集壳；壳不在库里时返回 null */
     suspend fun shellOf(seriesKey: String): MediaEntity? =
         if (seriesKey.isBlank()) null else mediaDao.shellOf(seriesKey)
+
+    /**
+     * 写入/清除手动配置的片头时长（毫秒，0=清除），只写剧集壳行、全剧生效。
+     * @return 是否写到了壳行（seriesKey 为空或壳不在库里时返回 false）
+     */
+    suspend fun setIntroSkip(seriesKey: String, ms: Long): Boolean {
+        if (seriesKey.isBlank()) return false
+        if (mediaDao.shellOf(seriesKey) == null) return false
+        mediaDao.setIntroSkip(seriesKey, ms)
+        return true
+    }
     suspend fun seasons(seriesKey: String): List<Int> = mediaDao.seasons(seriesKey)
 
     /** TVBox 多播放源：取某剧的全部播放源（云盘/线路）名称，按入库顺序 */
@@ -376,30 +387,38 @@ class MediaRepository(private val context: Context) {
     /**
      * 解析 TVBox 播放地址。
      *
-     * 云盘 scheme 地址（quark://、aliyundrive:// 等）不是视频直链，必须走 spider 解析；
-     * http(s) 直链同样交给 spider 处理（可能补 Cookie/Referer，也可能识别出需要网页解析）。
+     * 云盘地址（quark://、aliyundrive:// 等 scheme，以及 pan.quark.cn 这类分享页 http 链接）
+     * 不是视频直链，必须走 spider 解析；普通 http(s) 直链同样交给 spider 处理
+     * （可能补 Cookie/Referer，也可能识别出需要网页解析）。
      * 直链解析失败/超时会由 [TvBoxClient.resolvePlayUrl] 内部回退原地址，不影响可播性。
      *
-     * 云盘线路额外做一件事：分集 uri 里是带分享令牌的 id，令牌会过期，
-     * 入库久了的记录拿去转存会被夸克回 HTTP 404。所以先按需刷新详情换新令牌，
-     * 解析仍失败时再强刷一次重试。
+     * 云盘线路额外做一件事：分集 uri 里是带分享令牌的 id/分享页，令牌会过期、
+     * 源站重新分享后旧链接会整剧失效，拿去转存会被夸克回 HTTP 404。
+     * 所以先按需刷新详情换新令牌，解析仍失败时再强刷一次重试。
      *
      * @param episode 分集实体（需包含 sourceId、seriesKey、playSource、uri）
+     * @param forceRefresh true 表示播放端刚报了死链（404/403/412）：丢弃解析缓存，
+     *   并跳过云盘刷新防抖强制重拉详情 + 重新解析
      * @return 解析结果（URL + headers）；非 TVBox 来源原样返回 uri
      *
      * 结果按「分集 id|uri」缓存 [RESOLVED_URL_TTL_MS]：播放器会在本集临近结束时预热下一集，
      * 真到切集时命中缓存，省掉刷令牌 + 问 spider 要直链这两跳。
      */
-    suspend fun resolveTvBoxPlayUrl(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl =
+    suspend fun resolveTvBoxPlayUrl(
+        episode: MediaEntity,
+        forceRefresh: Boolean = false
+    ): TvBoxClient.ResolvedPlayUrl =
         withContext(Dispatchers.IO) {
             val key = "${episode.id}|${episode.uri}"
-            val resolved = RESOLVED_URLS[key]?.takeIf {
+            if (forceRefresh) RESOLVED_URLS.remove(key)
+            val cached = if (forceRefresh) null else RESOLVED_URLS[key]?.takeIf {
                 System.currentTimeMillis() - it.at < RESOLVED_URL_TTL_MS
             }?.let {
                 Log.w("SpiderProxy", "直链命中预热缓存，跳过解析 mediaId=${episode.id}")
                 it.value
-            } ?: run {
-                val fresh = resolveTvBoxPlayUrlUncached(episode)
+            }
+            val resolved = cached ?: run {
+                val fresh = resolveTvBoxPlayUrlUncached(episode, forceRefresh)
                 if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) {
                     RESOLVED_URLS.entries.removeAll { System.currentTimeMillis() - it.value.at >= RESOLVED_URL_TTL_MS }
                     if (RESOLVED_URLS.size >= RESOLVED_URL_MAX) RESOLVED_URLS.clear()
@@ -415,7 +434,10 @@ class MediaRepository(private val context: Context) {
             resolved
         }
 
-    private suspend fun resolveTvBoxPlayUrlUncached(episode: MediaEntity): TvBoxClient.ResolvedPlayUrl = withContext(Dispatchers.IO) {
+    private suspend fun resolveTvBoxPlayUrlUncached(
+        episode: MediaEntity,
+        forceRefresh: Boolean = false
+    ): TvBoxClient.ResolvedPlayUrl = withContext(Dispatchers.IO) {
         val source = sourceDao.get(episode.sourceId)
             ?: return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
         if (source.kind != SourceKind.TVBOX) return@withContext TvBoxClient.ResolvedPlayUrl(episode.uri)
@@ -424,12 +446,14 @@ class MediaRepository(private val context: Context) {
         val (siteKey, _) = parseTvBoxKey(episode.sourceId, episode.seriesKey)
         val client = TvBoxClient(source.location, context)
 
-        // 直链没有时效问题，照旧一次解析
+        // 直链没有时效问题，照旧一次解析；网盘分享页虽是 http 但不是直链，走下面的云盘流程
         if (episode.uri.startsWith("http://") || episode.uri.startsWith("https://")) {
-            return@withContext client.resolvePlayUrl(siteKey, episode.playSource, episode.uri)
+            if (!TvBoxClient.isCloudShareUrl(episode.uri)) {
+                return@withContext client.resolvePlayUrl(siteKey, episode.playSource, episode.uri)
+            }
         }
 
-        val current = refreshCloudShareUris(episode, client, siteKey, force = false) ?: episode
+        val current = refreshCloudShareUris(episode, client, siteKey, force = forceRefresh) ?: episode
         try {
             client.resolvePlayUrl(siteKey, current.playSource, current.uri)
         } catch (e: Exception) {
@@ -452,7 +476,9 @@ class MediaRepository(private val context: Context) {
     /**
      * 用最新详情覆盖该剧同一条云盘线路的全部分集 uri。
      *
-     * 只改 uri，不动行 id 与播放进度；直链分集不碰。
+     * 只改 uri，不动行 id 与播放进度；普通直链分集不碰，
+     * 但网盘分享页（pan.quark.cn/s/xxx 这类 http 链接）要一起换——
+     * 源站重新分享后旧分享页会整剧失效，必须跟 scheme 行一样刷成新链接。
      *
      * @param force true 表示解析刚失败、怀疑令牌已失效，跳过时间窗口
      * @return 当前分集的最新副本；没刷新（还在窗口内/拉取失败/线路已不存在）时返回 null
@@ -497,7 +523,8 @@ class MediaRepository(private val context: Context) {
         val unmatched = ArrayList<String>(2)
         var freshUri: String? = null
         for ((index, row) in rows.withIndex()) {
-            if (row.uri.startsWith("http")) continue
+            // 普通直链跳过；网盘分享页虽是 http 但会整剧失效，要一起刷成新链接
+            if (row.uri.startsWith("http") && !TvBoxClient.isCloudShareUrl(row.uri)) continue
             val bySourceName = byName[row.title]
                 ?: byCore[cloudNameCore(row.title)]
                 ?: cloudEpisodeNumber(row.title)?.let { byNumber[it] }

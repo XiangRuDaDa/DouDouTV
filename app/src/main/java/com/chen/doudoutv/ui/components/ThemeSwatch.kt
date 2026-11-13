@@ -26,6 +26,7 @@ import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.LocalTvMode
 import com.chen.doudoutv.ui.theme.TvText
 import com.chen.doudoutv.ui.theme.ThemePalette
+import com.chen.doudoutv.ui.tv.tvFocusRing
 
 /**
  * 主题色色卡：一颗色点 + 下面一行名字。
@@ -69,9 +70,7 @@ fun ThemeSwatch(
                         else -> Color.Transparent
                     }
                 )
-                .then(
-                    if (focused) Modifier.border(2.dp, Color.White, CircleShape) else Modifier
-                ),
+                .tvFocusRing(focused, radius = haloSize / 2),
             contentAlignment = Alignment.Center
         ) {
             Box(

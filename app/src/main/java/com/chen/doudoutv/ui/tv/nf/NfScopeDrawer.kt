@@ -61,6 +61,7 @@ import androidx.compose.ui.zIndex
 import com.chen.doudoutv.data.model.SourceEntity
 import com.chen.doudoutv.data.model.SourceKind
 import com.chen.doudoutv.data.tvbox.TvBoxClient
+import com.chen.doudoutv.ui.tv.tvFocusRing
 import com.chen.doudoutv.ui.tv.tvMoveFocus
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.Edge
@@ -436,7 +437,7 @@ private fun NfSourceRow(
                     else -> AppColors.Surface.copy(alpha = 0.6f)
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(horizontal = 16.dp, vertical = 13.dp)
@@ -518,8 +519,9 @@ private fun NfSiteCell(
                     else -> AppColors.Surface.copy(alpha = 0.6f)
                 }
             )
+            .tvFocusRing(focused)
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
+                if (focused) Modifier
                 else if (selected) Modifier.border(1.dp, AppColors.Brand, Radius.Md)
                 else Modifier.border(1.dp, Edge.Hairline, Radius.Md)
             )

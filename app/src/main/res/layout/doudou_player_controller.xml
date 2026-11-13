@@ -185,6 +185,12 @@
                     android:text="下一集" />
 
                 <TextView
+                    android:id="@+id/doudou_intro_skip"
+                    style="@style/PlayerPill"
+                    android:text="设片头"
+                    android:visibility="gone" />
+
+                <TextView
                     android:id="@+id/doudou_speed"
                     style="@style/PlayerPill"
                     android:text="1.0x" />

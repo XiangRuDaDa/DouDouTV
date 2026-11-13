@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -60,6 +61,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -70,6 +73,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.chen.doudoutv.data.MediaRepository
+import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.format.FormatProbe
 import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.data.tvbox.TvBoxClient
@@ -77,9 +81,12 @@ import com.chen.doudoutv.player.DownloadMeter
 import com.chen.doudoutv.player.PlayerFactory
 import com.chen.doudoutv.ui.components.episodeLabel
 import com.chen.doudoutv.ui.components.usesSourceEpisodeName
+import com.chen.doudoutv.ui.detail.fmtIntroMs
+import com.chen.doudoutv.ui.player.SkipJumpController
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.DouDouTvTheme
 import com.chen.doudoutv.ui.theme.Radius
+import com.chen.doudoutv.ui.tv.tvFocusRing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -128,6 +135,13 @@ class TvPlayerActivity : ComponentActivity() {
 
     /** 本集是否已经为下一集预热过直链：一集最多一次，失败也不重试，不去反复敲源站 */
     private var prefetched = false
+
+    /**
+     * 已做过「死链重试」的分集 id：播放中收到 404/403/412（缓存的签名直链已失效，
+     * 典型场景是夸克重新分享/令牌过期）时，丢弃解析缓存强制重新解析并重播一次。
+     * 同一集只重试一次，再失败就照旧弹提示；切集时复位。
+     */
+    private var deadStatusRetriedId = 0L
 
     /**
      * 装载代数。每调一次 [play] 加一，解析回来后只对号入座。
@@ -200,6 +214,23 @@ class TvPlayerActivity : ComponentActivity() {
     private var titleText by mutableStateOf("")
     private var trackOptions by mutableStateOf<List<TvTrack>>(emptyList())
 
+    // ---------- 跳过片头 ----------
+
+    /** 剧集壳行手动配置的片头时长（毫秒），0=未配置 */
+    private var introSkipMs = 0L
+
+    /** 本集 playerContent 返回的协议 skips 区间 */
+    private var introSkips: List<TvBoxClient.VodSkip> = emptyList()
+
+    /** 片头配置已为哪个 seriesKey 装载：同剧切集复用，不重复查库 */
+    private var introLoadedKey: String? = null
+
+    /** 跳过片头判定器（与手机端共用）：每集消费一次，切集自动复位 */
+    private val skipController = SkipJumpController()
+
+    /** 已配置片头时，点「设片头」弹的确认小面板显隐 */
+    private var showIntroConfirm by mutableStateOf(false)
+
     /** PlayerView 引用：用于设置字幕样式 */
     private var playerView: PlayerView? = null
 
@@ -261,6 +292,25 @@ class TvPlayerActivity : ComponentActivity() {
                     if (p.isPlaying) {
                         saveProgress(force = false)
                         prefetchNextEpisode()
+                    }
+                    // 跳过片头：位置进入区间即 seek（本集只跳一次，切集自动复位）。
+                    // 挂在 500ms ticker 上，不另开定时器。
+                    val cur = current
+                    if (cur != null) {
+                        val jump = skipController.nextJump(
+                            enabled = Prefs.skipIntroEnabled,
+                            introMs = introSkipMs,
+                            skips = introSkips,
+                            episodeId = cur.id,
+                            position = positionMs,
+                            duration = durationMs,
+                            isPlaying = isPlaying
+                        )
+                        if (jump != null) {
+                            p.seekTo(jump)
+                            positionMs = jump
+                            toast = "已跳过片头"
+                        }
                     }
                 }
             }
@@ -404,6 +454,20 @@ class TvPlayerActivity : ComponentActivity() {
                         }
                         return
                     }
+                    // 死链（404/403/412）多半是缓存/入库的签名直链已失效：
+                    // 丢弃解析缓存、强制刷新分享令牌重新解析，同一集只自动重试一次
+                    val ep = current
+                    val deadStatus = causeMsg?.startsWith("HTTP 404") == true ||
+                        causeMsg?.startsWith("HTTP 403") == true ||
+                        causeMsg?.startsWith("HTTP 412") == true
+                    if (deadStatus && ep != null && ep.seriesKey.startsWith("tvbox:") &&
+                        deadStatusRetriedId != ep.id
+                    ) {
+                        deadStatusRetriedId = ep.id
+                        Log.w("TvPlayer", "死链重试：强制重新解析 mediaId=${ep.id} cause=$causeMsg")
+                        play(ep, maxOf(p.currentPosition, positionMs), forceRefresh = true)
+                        return
+                    }
                     toast = when {
                         causeMsg?.startsWith("HTTP 404") == true -> causeMsg
                         causeMsg?.startsWith("HTTP 403") == true ||
@@ -507,7 +571,7 @@ class TvPlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun play(item: MediaEntity, startMs: Long) {
+    private fun play(item: MediaEntity, startMs: Long, forceRefresh: Boolean = false) {
         // 与手机端同一守卫：空地址喂给播放器只会得到一个看不懂的 IO 错误
         if (item.uri.isBlank()) {
             loading = false
@@ -529,7 +593,7 @@ class TvPlayerActivity : ComponentActivity() {
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
         val gen = ++playGeneration
         workScope.launch {
-            val resolved = resolvePlayUrl(item, gen)
+            val resolved = resolvePlayUrl(item, gen, forceRefresh)
                 ?: run {
                     // 被更新的一次切集取代时别撤黑幕，那层黑幕现在是给新一集用的
                     if (gen == playGeneration) loading = false
@@ -537,6 +601,10 @@ class TvPlayerActivity : ComponentActivity() {
                 }
             // 解析在飞的这几秒里用户可能又按了一次下一集，旧地址不能喂给新集
             if (gen != playGeneration) return@launch
+
+            // 片头配置：手动 > 协议 skips；同剧切集走缓存，不重复查库
+            loadIntroConfig(item.seriesKey)
+            introSkips = resolved.skips
 
             // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
             // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
@@ -570,11 +638,16 @@ class TvPlayerActivity : ComponentActivity() {
      * 解析播放地址：云盘 scheme 与 http(s) 直链统一交给 [MediaRepository.resolveTvBoxPlayUrl]
      * （直链也会先问 spider，失败/超时自动回退原地址）；非 TVBox 来源原样返回。
      * @param gen 本次装载的代数，与被取代的旧装载对不上就不写 [toast]，免得新一集还在转圈却弹出上一集的错
+     * @param forceRefresh true 表示死链重试：丢弃解析缓存并强制刷新云盘分享令牌
      * @return 解析结果（URL + headers）；解析失败返回 null
      */
-    private suspend fun resolvePlayUrl(item: MediaEntity, gen: Int): TvBoxClient.ResolvedPlayUrl? {
+    private suspend fun resolvePlayUrl(
+        item: MediaEntity,
+        gen: Int,
+        forceRefresh: Boolean = false
+    ): TvBoxClient.ResolvedPlayUrl? {
         return runCatching {
-            repo.resolveTvBoxPlayUrl(item)
+            repo.resolveTvBoxPlayUrl(item, forceRefresh)
         }.fold(
             onSuccess = { it },
             onFailure = {
@@ -585,6 +658,53 @@ class TvPlayerActivity : ComponentActivity() {
                 null
             }
         )
+    }
+
+    /** 读剧集壳行的手动片头配置；同剧切集命中缓存直接复用 */
+    private suspend fun loadIntroConfig(seriesKey: String) {
+        if (seriesKey.isBlank()) {
+            introSkipMs = 0L
+            introLoadedKey = null
+            return
+        }
+        if (introLoadedKey == seriesKey) return
+        introSkipMs = runCatching { repo.shellOf(seriesKey)?.introSkipMs ?: 0L }.getOrDefault(0L)
+        introLoadedKey = seriesKey
+    }
+
+    /** 「设片头」点击：未配置 → 写当前播放位置（>10 分钟拒绝）；已配置 → 弹确认小面板 */
+    private fun onIntroClick() {
+        val cur = current ?: return
+        if (cur.kind != com.chen.doudoutv.data.model.MediaKind.EPISODE || cur.seriesKey.isBlank()) return
+        val pos = positionMs
+        if (introSkipMs > 0L) {
+            showIntroConfirm = true
+            return
+        }
+        if (pos > 600_000L) {
+            toast = "片头位置超过 10 分钟，请回退到片头附近再设置"
+            return
+        }
+        if (pos < 1_000L) {
+            toast = "等画面播到片头结尾时再按"
+            return
+        }
+        saveIntroSkip(cur.seriesKey, pos)
+    }
+
+    /** 写片头时长到剧集壳行（0=清除），成功后 toast 反馈 */
+    private fun saveIntroSkip(seriesKey: String, ms: Long) {
+        if (seriesKey.isBlank()) return
+        workScope.launch {
+            val ok = runCatching { repo.setIntroSkip(seriesKey, ms) }.getOrDefault(false)
+            if (!ok) {
+                toast = "未找到该剧的剧集信息，设置失败"
+                return@launch
+            }
+            introSkipMs = ms
+            introLoadedKey = seriesKey
+            toast = if (ms > 0L) "已设置跳过片头 ${fmtIntroMs(ms)}（全剧生效）" else "已清除片头设置"
+        }
     }
 
     /**
@@ -602,6 +722,8 @@ class TvPlayerActivity : ComponentActivity() {
         reportToEmby()
         player?.pause()
         current = ep
+        // 新一集的死链重试闸门重新打开
+        deadStatusRetriedId = 0L
         play(ep, ep.positionMs)
         // 进度层叫回来：黑幕上没有别的文字，这一条就是「切到第几集了」的凭据
         overlayVisible = true
@@ -1088,6 +1210,14 @@ class TvPlayerActivity : ComponentActivity() {
                     subtitleBgAlpha = subtitleBgAlpha,
                     subtitleTextSize = subtitleTextSize,
                     hasEpisodes = episodes.isNotEmpty(),
+                    // 「设片头」按钮：剧集 + 全局开关开启才显示
+                    introVisible = Prefs.skipIntroEnabled &&
+                        (current?.let {
+                            it.kind == com.chen.doudoutv.data.model.MediaKind.EPISODE &&
+                                it.seriesKey.isNotBlank()
+                        } == true),
+                    introMs = introSkipMs,
+                    onIntroClick = { onIntroClick() },
                     // 一级按钮：按确定展开/收起它的二级选项（同一个按钮再按一次收起）
                     onTabChange = {
                         // 展开选集时先把窗口对到当前集，否则看到的还是上一次那一段
@@ -1136,6 +1266,25 @@ class TvPlayerActivity : ComponentActivity() {
                 ) {
                     Text(it, color = Color.White, style = MaterialTheme.typography.titleMedium)
                 }
+            }
+
+            // 「设片头」已配置时的确认小面板：改为当前位置 / 清除 / 取消
+            if (showIntroConfirm) {
+                TvIntroConfirmDialog(
+                    introMs = introSkipMs,
+                    posMs = positionMs,
+                    onDismiss = { showIntroConfirm = false },
+                    onUseCurrent = {
+                        showIntroConfirm = false
+                        saveIntroSkip(current?.seriesKey ?: "", positionMs)
+                        tick++
+                    },
+                    onClear = {
+                        showIntroConfirm = false
+                        saveIntroSkip(current?.seriesKey ?: "", 0L)
+                        tick++
+                    }
+                )
             }
         }
     }
@@ -1257,6 +1406,12 @@ private fun TvFunctionPanel(
     subtitleBgAlpha: Float,
     subtitleTextSize: Float,
     hasEpisodes: Boolean,
+    /** 「设片头」按钮显隐：剧集 + 全局开关开启 */
+    introVisible: Boolean,
+    /** 当前已配置的片头时长（毫秒），决定按钮文案 */
+    introMs: Long,
+    /** 「设片头」点击：直接执行 / 弹确认小面板，不是二级标签 */
+    onIntroClick: () -> Unit,
     onTabChange: (TvPanelTab) -> Unit,
     onSpeed: (Float) -> Unit,
     onTrack: (TvTrack) -> Unit,
@@ -1300,6 +1455,14 @@ private fun TvFunctionPanel(
                 TvChip(text = "下一集", selected = false, onClick = onNextEpisode)
             }
             TvPanelTab.entries.forEach { t ->
+                // 「设片头」：插在「倍速」前的直接执行按钮（不展开二级）
+                if (introVisible && t == TvPanelTab.SPEED) {
+                    TvChip(
+                        text = if (introMs > 0L) "片头 ${fmtIntroMs(introMs)}" else "设片头",
+                        selected = false,
+                        onClick = onIntroClick
+                    )
+                }
                 val selected = t == tab
                 val focusModifier = when {
                     selected -> Modifier.focusRequester(tabFocus)
@@ -1418,6 +1581,54 @@ private fun TvFunctionPanel(
     }
 }
 
+/**
+ * 「跳过片头」确认小面板（遥控器焦点）：改为当前位置 / 清除 / 取消。
+ * 只在已配置时由「设片头」按钮弹出。
+ */
+@Composable
+private fun TvIntroConfirmDialog(
+    introMs: Long,
+    posMs: Long,
+    onDismiss: () -> Unit,
+    onUseCurrent: () -> Unit,
+    onClear: () -> Unit
+) {
+    val first = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { first.requestFocus() } }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier
+                    .width(640.dp)
+                    .clip(Radius.Lg)
+                    .background(Color.Black.copy(alpha = 0.92f))
+                    .border(1.dp, Color.White.copy(alpha = 0.18f), Radius.Lg)
+                    .padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    "跳过片头：已设置 ${fmtIntroMs(introMs)}（全剧生效）",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    TvChip(
+                        text = if (posMs > 0L) "改为当前位置 ${fmtIntroMs(posMs)}" else "改为当前位置",
+                        selected = false,
+                        modifier = Modifier.focusRequester(first),
+                        onClick = onUseCurrent
+                    )
+                    TvChip(text = "清除", selected = false, onClick = onClear)
+                    TvChip(text = "取消", selected = false, onClick = onDismiss)
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun TvHint(text: String) {
     Text(
@@ -1447,10 +1658,7 @@ private fun TvChip(
                     else -> Color.White.copy(alpha = 0.12f)
                 }
             )
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
-                else Modifier
-            )
+            .tvFocusRing(focused)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .onPreviewKeyEvent { ev ->

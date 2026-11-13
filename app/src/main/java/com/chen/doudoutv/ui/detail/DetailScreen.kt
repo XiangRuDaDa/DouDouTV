@@ -32,12 +32,17 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -128,6 +133,9 @@ fun DetailScreen(
 
     /** 播放源 chips 的滚动状态：切换线路时把当前选中项滚进可见区域 */
     val playSourceListState = rememberLazyListState()
+
+    /** 「跳过片头」预设面板（底部弹层）显隐 */
+    var showSkipSheet by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
 
@@ -746,6 +754,26 @@ fun DetailScreen(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AppColors.TextTertiary
                             )
+                            // 「跳过片头」胶囊：剧集 + 全局开关开启才出现，点击弹预设面板。
+                            // 配置写在剧集壳行上：全剧生效、每部剧只配一次。
+                            if (Prefs.skipIntroEnabled && item.seriesKey.isNotBlank()) {
+                                val introMs = item.introSkipMs
+                                Text(
+                                    text = if (introMs > 0) "跳过片头 · ${fmtIntroMs(introMs)}"
+                                    else "跳过片头 · 关",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (introMs > 0) AppColors.Brand else AppColors.TextSecondary,
+                                    modifier = Modifier
+                                        .padding(start = 10.dp)
+                                        .clip(Radius.Pill)
+                                        .background(
+                                            if (introMs > 0) AppColors.Brand.copy(alpha = 0.16f)
+                                            else AppColors.SurfaceHi
+                                        )
+                                        .clickable { showSkipSheet = true }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                )
+                            }
                         }
                     }
 
@@ -914,8 +942,127 @@ fun DetailScreen(
                     }
                 }
             }
+
+            // ---------- 「跳过片头」预设面板 ----------
+            if (showSkipSheet && item.kind == MediaKind.SERIES && item.seriesKey.isNotBlank()) {
+                SkipIntroSheet(
+                    currentMs = item.introSkipMs,
+                    onDismiss = { showSkipSheet = false },
+                    onPick = { ms ->
+                        showSkipSheet = false
+                        scope.launch {
+                            // 写成功后重读壳行，胶囊文案立刻反映新值
+                            if (vm.setIntroSkip(item.seriesKey, ms)) {
+                                media = vm.mediaOf(item.id) ?: media
+                            }
+                        }
+                    }
+                )
+            }
         }
     }
+}
+
+/** 片头时长的展示文案：1:30 / 12:30 这种分秒格式 */
+internal fun fmtIntroMs(ms: Long): String {
+    val totalSec = (ms / 1000L).coerceAtLeast(0L)
+    return "%d:%02d".format(totalSec / 60, totalSec % 60)
+}
+
+/**
+ * 「跳过片头」底部面板：预设档位 chips + 自定义 mm:ss 输入。
+ * 选中即写入剧集壳行（全剧生效），0 表示清除（不跳）。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SkipIntroSheet(currentMs: Long, onDismiss: () -> Unit, onPick: (Long) -> Unit) {
+    val presets = listOf(0L to "不跳", 30_000L to "30s", 60_000L to "60s", 90_000L to "90s",
+        120_000L to "120s", 150_000L to "150s", 180_000L to "180s")
+    var custom by remember { mutableStateOf("") }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = AppColors.Surface
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                "跳过片头（全剧生效，只需配置一次）",
+                style = MaterialTheme.typography.titleMedium,
+                color = AppColors.TextPrimary
+            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                presets.forEach { (ms, label) ->
+                    FilterChip(
+                        selected = currentMs == ms,
+                        onClick = { onPick(ms) },
+                        label = { Text(label) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = AppColors.Brand,
+                            selectedLabelColor = Color.White,
+                            containerColor = AppColors.SurfaceHi,
+                            labelColor = AppColors.TextSecondary
+                        )
+                    )
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedTextField(
+                    value = custom,
+                    onValueChange = { custom = it },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    placeholder = { Text("自定义 分:秒，如 1:30") },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = AppColors.TextPrimary,
+                        unfocusedTextColor = AppColors.TextPrimary,
+                        focusedBorderColor = AppColors.Brand,
+                        unfocusedBorderColor = AppColors.SurfaceHi
+                    )
+                )
+                AppButton(
+                    text = "确定",
+                    variant = AppButtonVariant.Primary,
+                    onClick = {
+                        parseIntroInput(custom)?.let { onPick(it) }
+                    }
+                )
+            }
+        }
+    }
+}
+
+/** 解析 mm:ss / h:mm:ss / 纯秒数输入，非法返回 null；上限 30 分钟 */
+internal fun parseIntroInput(raw: String): Long? {
+    val text = raw.trim()
+    if (text.isEmpty()) return null
+    val sec = if (text.contains(':')) {
+        val parts = text.split(':')
+        if (parts.size > 3 || parts.any { it.isBlank() || !it.all { c -> c.isDigit() } }) return null
+        val nums = parts.map { it.toLong() }
+        when (nums.size) {
+            1 -> nums[0]
+            2 -> nums[0] * 60 + nums[1]
+            else -> nums[0] * 3600 + nums[1] * 60 + nums[2]
+        }
+    } else {
+        if (!text.all { it.isDigit() }) return null
+        text.toLong()
+    }
+    if (sec <= 0 || sec > 1800) return null
+    return sec * 1000L
 }
 
 /** 决定「播放」按钮跳哪一集：优先未看完的，其次第一集 */

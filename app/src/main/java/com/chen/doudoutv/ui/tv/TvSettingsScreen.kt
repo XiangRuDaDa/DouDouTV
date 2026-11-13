@@ -72,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.window.Dialog
@@ -168,12 +169,14 @@ fun TvSettingsScreen(
     // 视频缓存的档位与占用：同上，写 Prefs 不会触发重组，选中态得自己留一份
     var videoTier by remember { mutableStateOf(Prefs.videoCacheTier) }
     var videoCache by remember { mutableStateOf(0L) }
+    var skipIntro by remember { mutableStateOf(Prefs.skipIntroEnabled) }
 
     // 档位收进弹窗：记住开的是哪一组，以及是哪一行叫出来的（关掉后焦点要还给那一行）
     var choice by remember { mutableStateOf<Pair<SettingChoice, FocusRequester>?>(null) }
     val posterFocus = remember { FocusRequester() }
     val motionFocus = remember { FocusRequester() }
     val themeFocus = remember { FocusRequester() }
+    val skipIntroFocus = remember { FocusRequester() }
 
     // 侧栏 master-detail：selected 是当前预览/展开的分组；railFocus 是左栏五颗入口；
     // paneFirstFocus 是右栏第一颗可聚焦元件（信息组没有可聚焦行，落在可滚动的容器上）。
@@ -414,6 +417,17 @@ fun TvSettingsScreen(
                                     focusRequester = themeFocus,
                                     value = AppPalette.current.label,
                                     onClick = { choice = SettingChoice.Theme to themeFocus }
+                                )
+                                TvSettingRow(
+                                    title = "自动跳过片头",
+                                    hint = "开启后剧集详情页与播放器显示「跳过片头」按钮；关闭则不显示、也不再自动跳过",
+                                    focusRequester = skipIntroFocus,
+                                    value = if (skipIntro) "已开启" else "已关闭",
+                                    accent = skipIntro,
+                                    onClick = {
+                                        skipIntro = !skipIntro
+                                        Prefs.skipIntroEnabled = skipIntro
+                                    }
                                 )
                             }
 
@@ -690,10 +704,11 @@ private fun <T> TvChoiceDialog(
             contentAlignment = Alignment.Center
         ) {
             // 手机窄屏：弹窗占满可用宽（左右各留 20dp），档位每行颗数收小保证手指点得中；
-            // 电视：取半屏宽（520–860dp），色板一行 7 颗、其余一行 3 颗。
+            // 电视：取半屏宽（520–860dp）。色板档一行 4 颗（窄屏 3 颗）——
+            // 名字里带拉丁文（NF红 / Plex 橙）比纯中文宽，一行 7 颗会把名字截断。
             val compact = maxWidth < 700.dp
             val dialogWidth = if (compact) maxWidth - 40.dp else (maxWidth * 0.5f).coerceIn(520.dp, 860.dp)
-            val perRow = if (dot != null) (if (compact) 4 else 7) else (if (compact) 2 else 3)
+            val perRow = if (dot != null) (if (compact) 3 else 4) else (if (compact) 2 else 3)
             Column(
                 Modifier
                     .width(dialogWidth)
@@ -757,11 +772,8 @@ private fun TvChoiceOption(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.03f else 1f, tween(Motion.FAST), label = "tv_choice_tile")
     Column(
         modifier
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .height(if (dot != null) 96.dp else 60.dp)
             .clip(Radius.Md)
             .background(
@@ -771,9 +783,10 @@ private fun TvChoiceOption(
                     else -> AppColors.Bg.copy(alpha = 0.5f)
                 }
             )
+            .tvFocusRing(focused)
             .then(
                 when {
-                    focused -> Modifier.border(2.dp, Color.White, Radius.Md)
+                    focused -> Modifier
                     selected -> Modifier.border(1.5.dp, AppColors.Brand, Radius.Md)
                     else -> Modifier.border(1.dp, Edge.Hairline, Radius.Md)
                 }
@@ -802,7 +815,8 @@ private fun TvChoiceOption(
                 style = MaterialTheme.typography.labelLarge,
                 color = if (focused || selected) TvText.Title else TvText.Body,
                 fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Medium,
-                maxLines = 1
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         } else {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -849,19 +863,16 @@ private fun TvSettingsRailItem(
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
     LaunchedEffect(focused) { if (focused) onFocused() }
-    val scale by animateFloatAsState(if (focused) 1.02f else 1f, tween(Motion.FAST), label = "tv_settings_rail")
     val brand = AppColors.Brand
     val active = focused || selected
     Row(
         Modifier
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .fillMaxWidth()
             .tvFocusRoute(up = up, down = down)
             .focusRequester(focusRequester)
             .clip(Radius.Md)
             .background(if (active) AppColors.SurfaceHi else Color.Transparent)
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .drawWithContent {
                 if (selected && !focused) {
                     drawRect(brand, topLeft = Offset.Zero, size = Size(4.dp.toPx(), size.height))
@@ -993,16 +1004,13 @@ private fun TvSettingRow(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.015f else 1f, tween(Motion.FAST), label = "tv_setting_row")
 
     Row(
         Modifier
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .fillMaxWidth()
             .clip(Radius.Md)
             .background(if (focused) AppColors.SurfaceHi else AppColors.Bg.copy(alpha = 0.35f))
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .then(focusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)
             .clickable(
                 interactionSource = interaction,

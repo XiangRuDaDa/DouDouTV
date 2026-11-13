@@ -38,16 +38,23 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.LocalPinnableContainer
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -196,6 +203,53 @@ fun tvMoveFocus(
     return false
 }
 
+/** 焦点描边线宽：TV 端所有按键共用这一个数，不再一处 1.5 一处 2 */
+val TvFocusRingWidth = 1.5.dp
+
+/** 白线内侧那圈黑的宽度 */
+private val TvFocusRingKeyline = 1.dp
+
+/**
+ * TV 端统一的焦点描边：外圈纯白，紧贴内侧再压一道 40% 黑。不发光、不放大。
+ *
+ * 为什么要那圈黑：描边画在节点边界之内，海报卡的边界里面就是图片本身 ——
+ * 浅色海报的边缘碰上白线等于白对白，三米外直接消失。黑边把白线和底图隔开，
+ * 白线两侧（外侧是近黑背景、内侧是黑边）就都有对比，任何底图上都是同一圈白。
+ *
+ * 全部画在节点内，所以挂在 clip 之后也不会被裁掉。和 [androidx.compose.foundation.border]
+ * 一样先画内容再画线，图片盖不住它。
+ */
+fun Modifier.tvFocusRing(focused: Boolean, radius: Dp = 12.dp): Modifier =
+    if (!focused) this else drawWithContent {
+        drawContent()
+        tvDrawFocusRing(Rect(Offset.Zero, size), radius.toPx())
+    }
+
+/**
+ * 把焦点描边画到指定矩形上（bar 内移动焦点框用：矩形每帧在变，线宽和圆角不变）。
+ * 半径按矩形短边夹一次，圆形元件传一个大值就能得到正圆。
+ */
+internal fun DrawScope.tvDrawFocusRing(rect: Rect, radiusPx: Float) {
+    val w = TvFocusRingWidth.toPx()
+    val k = TvFocusRingKeyline.toPx()
+    if (rect.width <= w * 2f || rect.height <= w * 2f) return
+    val maxR = minOf(rect.width, rect.height) / 2f
+    drawRoundRect(
+        color = Color.White,
+        topLeft = Offset(rect.left + w / 2f, rect.top + w / 2f),
+        size = Size(rect.width - w, rect.height - w),
+        cornerRadius = CornerRadius(minOf(radiusPx - w / 2f, maxR).coerceAtLeast(0f)),
+        style = Stroke(w)
+    )
+    drawRoundRect(
+        color = Color.Black.copy(alpha = 0.4f),
+        topLeft = Offset(rect.left + w + k / 2f, rect.top + w + k / 2f),
+        size = Size(rect.width - 2f * w - k, rect.height - 2f * w - k),
+        cornerRadius = CornerRadius(minOf(radiusPx - w - k / 2f, maxR).coerceAtLeast(0f)),
+        style = Stroke(k)
+    )
+}
+
 /** 每次界面重新回到前台 +1（进播放器再退出来也会走一次 ON_RESUME）。 */
 @Composable
 fun tvResumeTick(): Int {
@@ -323,15 +377,11 @@ fun TvPillButton(
     // （Hero 播放键 → 顶栏同步键）时会出现逻辑焦点已移走、画面高亮却停在原按钮上的错位。
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.06f else 1f, tween(Motion.FAST, easing = Motion.Ease), label = "pill")
     val brand = AppColors.Brand
     val brandSoft = AppColors.BrandSoft
 
     Box(
         modifier
-            // 放大后要把绘制层级抬起来，否则同排右侧的兄弟节点会压在白边上面
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .then(
                 // 只有实底档发光：一屏多颗光晕会互相干扰，反而显脏
                 if (primary) {
@@ -351,9 +401,10 @@ fun TvPillButton(
                     else ButtonMaterial.glassStops()
                 )
             )
+            .tvFocusRing(focused)
             .then(
                 when {
-                    focused -> Modifier.border(2.dp, Color.White, Radius.Md)
+                    focused -> Modifier
                     primary -> Modifier.border(1.dp, ButtonMaterial.highlightEdge, Radius.Md)
                     else -> Modifier.border(1.dp, ButtonMaterial.glassEdge, Radius.Md)
                 }
@@ -472,13 +523,10 @@ fun TvIconButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(if (focused) 1.08f else 1f, tween(Motion.FAST), label = "tv_icon")
     val shape = tvButtonShape()
 
     Box(
         modifier
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .size(sizeDp)
             .clip(shape)
             .background(
@@ -493,8 +541,9 @@ fun TvIconButton(
                     else -> Brush.verticalGradient(ButtonMaterial.glassStops())
                 }
             )
+            .tvFocusRing(focused)
             .then(
-                if (focused) Modifier.border(2.dp, Color.White, shape)
+                if (focused) Modifier
                 else if (active) Modifier.border(1.dp, ButtonMaterial.highlightEdge, shape)
                 else Modifier.border(1.dp, ButtonMaterial.glassEdge, shape)
             )
@@ -595,10 +644,11 @@ fun TvPosterCard(
                 clip = true
             }
             .background(AppColors.Surface)
+            .tvFocusRing(focused)
             // 静止态勾一道亮边：近黑底上投影读不出来，卡片与页面底的分离只能靠描边+明度差。
             // 一屏几十张卡只描边不挂投影，避免弱盒子多出一层离屏缓冲。
             .then(
-                if (focused) Modifier.border(2.5.dp, Color.White, cardShape)
+                if (focused) Modifier
                 else Modifier.border(1.dp, Edge.Hairline, cardShape)
             )
             .padding(0.dp)
@@ -809,10 +859,7 @@ fun TvMenuRow(
                     else -> AppColors.SurfaceHi.copy(alpha = 0.35f)
                 }
             )
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
-                else Modifier
-            )
+            .tvFocusRing(focused)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -1070,7 +1117,7 @@ fun TvFilterChip(
                     else -> AppColors.SurfaceHi
                 }
             )
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .onFocusChanged { focused = it.isFocused }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },

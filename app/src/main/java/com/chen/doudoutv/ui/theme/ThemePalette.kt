@@ -24,27 +24,37 @@ data class ThemePalette(
 /**
  * 7 套色板，第 0 套是默认态。
  *
- * 品牌色直接当按钮底色用，按钮文字是纯黑（黑字在 7 套色上对比度 4.9:1~9.5:1，
- * 比白字更稳），所以每套都有一个「黑字压得住」的亮度下限。
+ * 品牌色直接当按钮底色用，按钮文字是纯黑（黑字比白字稳，七套色都压得住），
+ * 所以每套都有一个「黑字压得住」的亮度下限。
  *
- * 默认态 2026-11-10 从「石墨蓝」换成「苹果灰」（#8E8E93 / #AEAEB4）：
- * 蓝色主题配近黑底，整屏读起来是「蓝黑底 + 蓝光晕」；换成苹果灰之后，
- * 背景层、按钮、焦点、进度条统一在一套无彩色体系里，只靠明度分层。
+ * 默认态 2026-11-12 从「苹果灰」换成「NF红」：
+ * 无彩色品牌色在近黑底上只靠明度分层，三米外「选中 vs 未选中」读不出来，
+ * 整套界面因此缺一个能一眼认出是谁家的色相。红是流媒体十英尺界面里最成熟的那一个。
  * id 仍是 graphite：存储键一改，已经存着这个 id 的设备会被 paletteFor 判成旧版本残留、
  * 回落默认色板 —— 用户看到的结果是「我选的色自己没了」。改名字不动键。
  *
- * 其余六套保持原样：青瓷 193° 低饱和、鸢尾、赤铜、胭脂、汝窑、霜青。
- * 命名色还是那个颜色：汝窑取 193°、饱和度只留 22%（釉面失透、青中泛蓝而非泛绿）。
+ * 其余五套保持原样：青瓷 193° 低饱和、鸢尾、赤铜、胭脂、霜青。
+ * bamboo 那一档换成「Plex 橙」，同样只改 label 与色值、不动 id。
+ *
+ * 两套命名色都不取品牌原值，而是**锁住色相、只压饱和度**（同日真机走查：原值太艷）：
+ * NF红 357° S96%→72%（#E50914 → #D93D44），Plex 橙 41° S94%→70%（#E5A00D → #D9A841），
+ * 明度同时收 90%→85%。色相一度没动，所以「这是 Netflix 红 / 这是 Plex 橙」还认得出来，
+ * 但铺到天光、按钮、下划线、缺图海报上不再是一整片荧光。
+ * 浅色档跟着同色相压：#EF6A72（S56%）、#EDC572（S52%）。
+ *
+ * 黑字下限：主按钮色阶最底那一档是 lerp(brand, Black, 0.16)。
+ * 压饱和之后这一档反而更稳 —— NF红 #B63339 黑字 3.52:1（原值 3.28:1，是七套里最低的一档），
+ * Plex 橙 #B68D37 6.85:1；中间档 #D93D44 4.70:1、#D9A841 9.63:1，都过 3.2 的线。
  */
 val ThemePalettes: List<ThemePalette> = listOf(
-    ThemePalette("graphite", "苹果灰", Color(0xFF8E8E93), Color(0xFFAEAEB4)),
+    ThemePalette("graphite", "NF红", Color(0xFFD93D44), Color(0xFFEF6A72)),
     ThemePalette("celadon", "青瓷", Color(0xFF1CA193), Color(0xFF41D7C7)),
     ThemePalette("iris", "鸢尾", Color(0xFF9480EA), Color(0xFFCDC4F3)),
     ThemePalette("copper", "赤铜", Color(0xFFBF834D), Color(0xFFD5B293)),
     ThemePalette("rouge", "胭脂", Color(0xFFD66F90), Color(0xFFE9B9C8)),
     // id 仍是 bamboo：存储键一改，已经选中这套的设备就被 paletteFor 判成旧版本残留、
     // 回落默认色板 —— 用户看到的结果是「我选的色自己没了」。改名字不动键。
-    ThemePalette("bamboo", "汝窑", Color(0xFF6D97A2), Color(0xFFA6BEC4)),
+    ThemePalette("bamboo", "Plex 橙", Color(0xFFD9A841), Color(0xFFEDC572)),
     ThemePalette("steel", "霜青", Color(0xFF7E93B8), Color(0xFFBAC5D7))
 )
 

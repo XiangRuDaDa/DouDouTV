@@ -65,6 +65,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.chen.doudoutv.R
+import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.MediaRepository
 import com.chen.doudoutv.data.format.FormatProbe
 import com.chen.doudoutv.data.model.MediaEntity
@@ -74,6 +75,8 @@ import com.chen.doudoutv.player.PlayerFactory
 import com.chen.doudoutv.ui.components.AppButton
 import com.chen.doudoutv.ui.components.AppButtonVariant
 import com.chen.doudoutv.ui.components.usesSourceEpisodeName
+import com.chen.doudoutv.ui.detail.fmtIntroMs
+import com.chen.doudoutv.ui.player.SkipJumpController
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.DouDouTvTheme
 import com.chen.doudoutv.ui.theme.Radius
@@ -146,6 +149,13 @@ class PhonePlayerActivity : ComponentActivity() {
      */
     private var endedEpisodeId = 0L
 
+    /**
+     * 已做过「死链重试」的分集 id：播放中收到 404/403/412（缓存的签名直链已失效，
+     * 典型场景是夸克重新分享/令牌过期）时，丢弃解析缓存强制重新解析并重播一次。
+     * 同一集只重试一次，再失败就照旧弹提示；切集时复位。
+     */
+    private var deadStatusRetriedId = 0L
+
     /** 拖动进度时的目标时间提示（只是提示，不是控制条） */
     private var seekPreview by mutableStateOf<String?>(null)
     private var seekPreviewJob: Job? = null
@@ -186,6 +196,24 @@ class PhonePlayerActivity : ComponentActivity() {
     private var nextEpisodeView: TextView? = null
     private var episodesView: TextView? = null
     private var playPauseView: TextView? = null
+
+    /** 功能栏「设片头」按钮（剧集 + 全局开关开启才显示） */
+    private var introView: TextView? = null
+
+    /** 剧集壳行手动配置的片头时长（毫秒），0=未配置 */
+    private var introSkipMs = 0L
+
+    /** 本集 playerContent 返回的协议 skips 区间 */
+    private var introSkips: List<TvBoxClient.VodSkip> = emptyList()
+
+    /** 片头配置已为哪个 seriesKey 装载：同剧切集复用，不重复查库 */
+    private var introLoadedKey: String? = null
+
+    /** 跳过片头判定器：每集消费一次，切集自动复位 */
+    private val skipController = SkipJumpController()
+
+    /** 500ms 轮询：检查是否该跳片头 */
+    private var skipJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -316,6 +344,7 @@ class PhonePlayerActivity : ComponentActivity() {
         nextEpisodeView = view.findViewById(R.id.doudou_next_episode)
         episodesView = view.findViewById(R.id.doudou_episodes)
         playPauseView = view.findViewById(R.id.doudou_play_pause)
+        introView = view.findViewById(R.id.doudou_intro_skip)
 
         titleView?.text = titleState
         speedView?.text = formatSpeed(speedState)
@@ -338,6 +367,7 @@ class PhonePlayerActivity : ComponentActivity() {
         episodesView?.setOnClickListener {
             if (episodeList.isNotEmpty()) showEpisodeDialog = true
         }
+        introView?.setOnClickListener { onIntroClick() }
 
         // 底部栏首位：播放暂停（快退/快进已移到左右滑动手势）
         playPauseView?.setOnClickListener {
@@ -349,6 +379,8 @@ class PhonePlayerActivity : ComponentActivity() {
         // 遥控器：控制条显示后不要过快自动隐藏，方便选择上下集
         view.controllerShowTimeoutMs = 5_000
         updateEpisodeButtons()
+        updateIntroButton()
+        startSkipTicker()
 
         buildLoadingViews(view)
     }
@@ -569,7 +601,8 @@ class PhonePlayerActivity : ComponentActivity() {
     private fun startPlayback(
         item: MediaEntity,
         startPosition: Long = item.positionMs,
-        headers: Map<String, String> = emptyMap()
+        headers: Map<String, String> = emptyMap(),
+        forceRefresh: Boolean = false
     ) {
         if (item.uri.isBlank()) {
             toastState = "该条目没有可播放地址（可能需要在详情页重新加载）"
@@ -582,7 +615,7 @@ class PhonePlayerActivity : ComponentActivity() {
         endedEpisodeId = 0L
         val gen = ++playGeneration
         lifecycleScope.launch {
-            val resolved = resolvePlayUrl(item, gen)
+            val resolved = resolvePlayUrl(item, gen, forceRefresh)
             if (resolved == null) {
                 // 失败时 toastState 已在 resolvePlayUrl 内设置；黑幕必须撤，否则错误提示压在转圈下
                 if (gen == playGeneration) setLoading(false)
@@ -590,6 +623,12 @@ class PhonePlayerActivity : ComponentActivity() {
             }
             // 解析在飞的这几秒里用户可能又切了一次，旧地址不能喂给新集
             if (gen != playGeneration) return@launch
+
+            // 片头配置：手动 > 协议 skips；旧集的协议区间先清掉再挂新集的
+            introSkips = emptyList()
+            loadIntroConfig(item.seriesKey)
+            introSkips = resolved.skips
+            updateIntroButton()
 
             // 必须先释放旧 player 再创建新的 —— SimpleCache 单例同一时刻只能被一个 player 引用
             PlayerFactory.release(player)
@@ -653,6 +692,7 @@ class PhonePlayerActivity : ComponentActivity() {
                         }
                         return
                     }
+                    if (handleDeadStatusRetry(p, error)) return
                     toastState = translatePlayerError(error)
                 }
             })
@@ -670,11 +710,16 @@ class PhonePlayerActivity : ComponentActivity() {
      * 解析播放地址：云盘 scheme 与 http(s) 直链统一交给 [MediaRepository.resolveTvBoxPlayUrl]
      * （直链也会先问 spider，失败/超时自动回退原地址）；非 TVBox 来源原样返回。
      * @param gen 本次装载的代数，与被取代的旧装载对不上就不写 [toastState]
+     * @param forceRefresh true 表示死链重试：丢弃解析缓存并强制刷新云盘分享令牌
      * @return 解析结果（URL + headers）；解析失败返回 null
      */
-    private suspend fun resolvePlayUrl(item: MediaEntity, gen: Int): TvBoxClient.ResolvedPlayUrl? {
+    private suspend fun resolvePlayUrl(
+        item: MediaEntity,
+        gen: Int,
+        forceRefresh: Boolean = false
+    ): TvBoxClient.ResolvedPlayUrl? {
         return runCatching {
-            MediaRepository(this@PhonePlayerActivity).resolveTvBoxPlayUrl(item)
+            MediaRepository(this@PhonePlayerActivity).resolveTvBoxPlayUrl(item, forceRefresh)
         }.fold(
             onSuccess = { it },
             onFailure = {
@@ -737,6 +782,108 @@ class PhonePlayerActivity : ComponentActivity() {
         return episodeList.indexOfFirst { it.id == cur.id }
     }
 
+    /** 读剧集壳行的手动片头配置；同剧切集命中缓存直接复用 */
+    private suspend fun loadIntroConfig(seriesKey: String) {
+        if (seriesKey.isBlank()) {
+            introSkipMs = 0L
+            introLoadedKey = null
+            return
+        }
+        if (introLoadedKey == seriesKey) return
+        introSkipMs = runCatching {
+            MediaRepository(this).shellOf(seriesKey)?.introSkipMs ?: 0L
+        }.getOrDefault(0L)
+        introLoadedKey = seriesKey
+    }
+
+    /** 「设片头」按钮：全局开关 + 剧集才显示；文案随配置变化 */
+    private fun updateIntroButton() {
+        val cur = current
+        val isSeries = cur != null && cur.kind == MediaKind.EPISODE && cur.seriesKey.isNotBlank()
+        introView?.visibility =
+            if (Prefs.skipIntroEnabled && isSeries) View.VISIBLE else View.GONE
+        introView?.text = if (introSkipMs > 0L) "片头 ${fmtIntroMs(introSkipMs)}" else "设片头"
+    }
+
+    /**
+     * 「设片头」点击：
+     * · 未配置 → 把当前播放位置写为片头终点（>10 分钟拒绝）；
+     * · 已配置 → 弹小面板：改为当前位置 / 清除 / 取消。
+     */
+    private fun onIntroClick() {
+        val p = player ?: return
+        val cur = current ?: return
+        if (cur.kind != MediaKind.EPISODE || cur.seriesKey.isBlank()) return
+        val pos = p.currentPosition
+        if (introSkipMs > 0L) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("跳过片头")
+                .setMessage("当前已设置 ${fmtIntroMs(introSkipMs)}（全剧生效）")
+                .setPositiveButton(
+                    if (pos > 0L) "改为当前位置 ${fmtIntroMs(pos)}" else "改为当前位置"
+                ) { _, _ -> if (pos > 0L) saveIntroSkip(cur.seriesKey, pos) }
+                .setNeutralButton("清除") { _, _ -> saveIntroSkip(cur.seriesKey, 0L) }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
+        if (pos > 600_000L) {
+            toastState = "片头位置超过 10 分钟，请回退到片头附近再设置"
+            return
+        }
+        if (pos < 1_000L) {
+            toastState = "等画面播到片头结尾时再按"
+            return
+        }
+        saveIntroSkip(cur.seriesKey, pos)
+    }
+
+    /** 写片头时长到剧集壳行（0=清除），成功后刷新按钮文案 */
+    private fun saveIntroSkip(seriesKey: String, ms: Long) {
+        lifecycleScope.launch {
+            val ok = runCatching {
+                MediaRepository(this@PhonePlayerActivity).setIntroSkip(seriesKey, ms)
+            }.getOrDefault(false)
+            if (!ok) {
+                toastState = "未找到该剧的剧集信息，设置失败"
+                return@launch
+            }
+            introSkipMs = ms
+            introLoadedKey = seriesKey
+            updateIntroButton()
+            toastState = if (ms > 0L) "已设置跳过片头 ${fmtIntroMs(ms)}（全剧生效）"
+            else "已清除片头设置"
+        }
+    }
+
+    /**
+     * 片头跳过轮询：每 500ms 拿一次位置问 [SkipJumpController]。
+     * 播放器还没建起来 / 电影 / 全局开关关闭时都静默跳过，不产生任何副作用。
+     */
+    private fun startSkipTicker() {
+        if (skipJob?.isActive == true) return
+        skipJob = lifecycleScope.launch {
+            while (true) {
+                delay(500L)
+                val p = player ?: continue
+                val cur = current ?: continue
+                val jump = skipController.nextJump(
+                    enabled = Prefs.skipIntroEnabled,
+                    introMs = introSkipMs,
+                    skips = introSkips,
+                    episodeId = cur.id,
+                    position = p.currentPosition,
+                    duration = p.duration,
+                    isPlaying = p.isPlaying
+                )
+                if (jump != null) {
+                    p.seekTo(jump)
+                    toastState = "已跳过片头"
+                }
+            }
+        }
+    }
+
     private fun playEpisode(episode: MediaEntity) {
         if (episode.uri.isBlank()) return
         // 先落盘：saveProgress 按 current 写库，必须赶在切到新一集之前
@@ -750,6 +897,8 @@ class PhonePlayerActivity : ComponentActivity() {
         titleState = displayTitle(episode)
         titleView?.text = titleState
         updateEpisodeButtons()
+        // 上一集的协议 skips 区间作废，等这一集解析完再挂新的
+        introSkips = emptyList()
 
         setLoading(true)
         bufferHint = null
@@ -758,6 +907,8 @@ class PhonePlayerActivity : ComponentActivity() {
         prefetchArmedFor = 0L
         // 新一集允许它自己播完一次连播（旧集的 ENDED 闸门见 endedEpisodeId 注释）
         endedEpisodeId = 0L
+        // 新一集的死链重试闸门重新打开
+        deadStatusRetriedId = 0L
 
         // 云盘 scheme 地址需要先解析出真实视频 URL + 请求头再喂给播放器
         val gen = ++playGeneration
@@ -769,6 +920,11 @@ class PhonePlayerActivity : ComponentActivity() {
             }
             // 解析在飞的这几秒里用户可能又按了一次下一集，旧地址不能喂给新集
             if (gen != playGeneration) return@launch
+
+            // 片头配置：手动 > 协议 skips（同剧切集走缓存，不重复查库）
+            loadIntroConfig(episode.seriesKey)
+            introSkips = resolved.skips
+            updateIntroButton()
 
             // 合并基础头（Emby 鉴权）与云盘解析出的头（Cookie 等）。
             // 对 Emby 的 http 直链：resolved.headers 为空 → mergedHeaders = baseHeaders（不变，不重建）。
@@ -826,6 +982,7 @@ class PhonePlayerActivity : ComponentActivity() {
                             }
                             return
                         }
+                        if (handleDeadStatusRetry(np, error)) return
                         toastState = translatePlayerError(error)
                     }
                 })
@@ -931,6 +1088,31 @@ class PhonePlayerActivity : ComponentActivity() {
         val dur = p.duration
         if (dur <= 0L) return false
         return maxOf(p.currentPosition, p.bufferedPosition) >= dur - TAIL_ERROR_TOLERANCE_MS
+    }
+
+    /**
+     * 死链（404/403/412）处理：缓存/入库的签名直链已失效（典型场景是夸克重新分享、
+     * 令牌过期，整剧旧链接一起凉）。丢弃解析缓存、强制刷新分享令牌重新解析，
+     * 从当前位置自动重播这一集一次；同一集只重试一次（切集复位），再失败照旧弹提示。
+     *
+     * @return true 表示已发起重试，调用方不要再弹错误提示
+     */
+    private fun handleDeadStatusRetry(
+        p: Player,
+        error: androidx.media3.common.PlaybackException
+    ): Boolean {
+        val causeMsg = error.cause?.message
+        val deadStatus = causeMsg?.startsWith("HTTP 404") == true ||
+            causeMsg?.startsWith("HTTP 403") == true ||
+            causeMsg?.startsWith("HTTP 412") == true
+        val ep = current
+        if (!deadStatus || ep == null || !ep.seriesKey.startsWith("tvbox:") ||
+            deadStatusRetriedId == ep.id
+        ) return false
+        deadStatusRetriedId = ep.id
+        Log.w("PhonePlayer", "死链重试：强制重新解析 mediaId=${ep.id} cause=$causeMsg")
+        startPlayback(ep, maxOf(p.currentPosition, ep.positionMs), baseHeaders, forceRefresh = true)
+        return true
     }
 
     /** 错误翻译：优先用 OkHttp 层抛出的中文提示，其次说实话，最后才兜底到网络 */

@@ -27,6 +27,7 @@ object Prefs {
     private const val KEY_VIDEO_CACHE_TIER = "video_cache_tier"
     private const val KEY_THEME_ID = "theme_id"
     private const val KEY_EMBY_DEVICE_ID = "emby_device_id"
+    private const val KEY_SKIP_INTRO_ENABLED = "skip_intro_enabled"
 
     /** 缩略图尺寸三档 */
     enum class PosterSize(val mobileDp: Int, val tvDp: Int) {
@@ -124,6 +125,18 @@ object Prefs {
             sp = context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
         }
     }
+
+    /**
+     * 「自动跳过片头」全局开关。默认开。
+     *
+     * 关掉后：详情页与播放器功能栏都不显示跳过片头按钮，
+     * 已配置的片头时长也不再生效（配置本身保留，重新打开即恢复）。
+     */
+    var skipIntroEnabled: Boolean
+        get() = sp.getBoolean(KEY_SKIP_INTRO_ENABLED, true)
+        set(value) {
+            sp.edit().putBoolean(KEY_SKIP_INTRO_ENABLED, value).apply()
+        }
 
     /**
      * TMDB 刮削总开关。默认 false。

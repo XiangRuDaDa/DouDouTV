@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -26,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.request.ImageRequest
+import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.LocalTvMode
 
 /**
@@ -33,7 +35,7 @@ import com.chen.doudoutv.ui.theme.LocalTvMode
  *
  * TVBox 源的 vod_pic 经常是空串，或者填了却是个 404 死链；这两种情况都不能让海报位
  * 只剩一块纯灰矩形。这里按片名哈希出一对稳定的深色做斜向渐变，同一部片永远是同一组颜色，
- * 一排卡片肉眼能分开，也不会随刷新变色。
+ * 一排卡片肉眼能分开，也不会随刷新变色。色相锁在品牌色 ±20°，整屏缺图卡是同一族色而不是彩虹。
  *
  * 底色亮度刻意压得很低（value 0.13~0.28），保证白字可读、也不会在一排海报里发光。
  */
@@ -50,7 +52,8 @@ fun PosterFallback(
     titleFontSize: TextUnit = 14.sp,
     subtitleFontSize: TextUnit = 11.sp,
 ) {
-    val brush = remember(title) { posterFallbackBrush(title) }
+    val brand = AppColors.Brand
+    val brush = remember(title, brand) { posterFallbackBrush(title, brand) }
     Box(
         modifier
             .fillMaxSize()
@@ -131,13 +134,15 @@ fun PosterArt(
     )
 }
 
-private fun posterFallbackBrush(seed: String): Brush {
-    val hue = ((seed.hashCode() and 0x7fffffff) % 360).toFloat()
+private fun posterFallbackBrush(seed: String, brand: Color): Brush {
+    val brandHsv = FloatArray(3)
+    android.graphics.Color.colorToHSV(brand.toArgb(), brandHsv)
+    // 色相锁在品牌色 ±20°：原来 hue = hash % 360，每张缺图卡各抓一个随机色相，
+    // 一屏三十张铺出来是彩虹占位图，和「近黑底 + 单一品牌色」的口径正好相反。
+    // 哈希只用来在这一族里挑一个偏移，同一部片仍然永远是同一组颜色。
+    val jitter = ((seed.hashCode() and 0x7fffffff) % 41) - 20
+    val hue = (brandHsv[0] + jitter + 360f) % 360f
     val from = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.44f, 0.28f)))
-    val to = Color(
-        android.graphics.Color.HSVToColor(
-            floatArrayOf((hue + 38f) % 360f, 0.58f, 0.13f)
-        )
-    )
+    val to = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.58f, 0.13f)))
     return Brush.linearGradient(listOf(from, to))
 }

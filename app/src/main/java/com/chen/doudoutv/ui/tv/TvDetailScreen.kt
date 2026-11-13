@@ -13,6 +13,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -34,6 +35,8 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -63,6 +66,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -79,10 +84,13 @@ import com.chen.doudoutv.data.tvbox.HtmlText
 import com.chen.doudoutv.ui.LibraryViewModel
 import com.chen.doudoutv.ui.detail.FocusColorCache
 import com.chen.doudoutv.ui.detail.fallbackColorFromTitle
+import com.chen.doudoutv.ui.detail.fmtIntroMs
+import com.chen.doudoutv.ui.detail.parseIntroInput
 import com.chen.doudoutv.ui.detail.focusColorOf
 import com.chen.doudoutv.ui.detail.loadPosterBitmap
 import com.chen.doudoutv.ui.detail.pageTonesOf
 import com.chen.doudoutv.ui.theme.AppColors
+import com.chen.doudoutv.ui.theme.Edge
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -179,6 +187,9 @@ fun TvDetailScreen(
     /** TVBox 多播放源（云盘/线路） */
     var playSources by remember { mutableStateOf<List<String>>(emptyList()) }
     var selectedPlaySource by remember { mutableStateOf<String>("") }
+
+    /** 「跳过片头」预设弹窗（遥控器焦点）显隐 */
+    var showSkipDialog by remember { mutableStateOf(false) }
 
     // 详情页期间把 MainActivity 的 finish() 拦下来：爬虫壳拉详情（网盘线路）时会顺手结束宿主，
     // 不拦就会「点详情直接闪退」。
@@ -577,11 +588,15 @@ fun TvDetailScreen(
         if (isEmbySource) embyRowState.scrollToItem(0)
     }
     val hasEpisodes = episodes.isNotEmpty()
-    /** 选集控制条只有在「多源」「多季」或「多页」时才存在：
+    /** 「跳过片头」胶囊：剧集壳 + 全局开关开启才出现在控制条末尾 */
+    val skipPillVisible = media?.let {
+        Prefs.skipIntroEnabled && it.kind == MediaKind.SERIES && it.seriesKey.isNotBlank()
+    } == true
+    /** 选集控制条只有在「多源」「多季」「多页」或「有跳过片头胶囊」时才存在：
      *  它是网格首行上键的落点，所以条件必须和上面控制条的显示条件完全一致，
      *  否则翻页按钮会变成按不到的孤立节点。
-     *  controlsFocusRequester 按「源首颗 → 季首颗 → 上一页」的顺序只挂一颗。 */
-    val hasControlAnchor = playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1
+     *  controlsFocusRequester 按「源首颗 → 季首颗 → 上一页 → 跳过片头胶囊」的顺序只挂一颗。 */
+    val hasControlAnchor = playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1 || skipPillVisible
 
     // 换季 / 换源 / 翻页会换掉整组卡片，但按键落点在控制条上，控制条本身不随内容变化消失，
     // 焦点因此不会掉 —— 这里刻意不再做任何抢焦。
@@ -1077,9 +1092,9 @@ fun TvDetailScreen(
                                 contentPadding = PaddingValues(top = 16.dp, bottom = 6.dp)
                             )
 
-                            // 控制条：多源 / 多季 / 翻页。
+                            // 控制条：多源 / 多季 / 翻页 / 跳过片头胶囊。
                             // 有源或季时它是「播放 ↔ 选集」之间的焦点站；只有翻页时不占焦点站。
-                            if (playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1) {
+                            if (hasControlAnchor) {
                                 Row(
                                     Modifier
                                         .fillMaxWidth()
@@ -1179,6 +1194,23 @@ fun TvDetailScreen(
                                             onClick = {
                                                 epPage = totalPages - 1
                                             }
+                                        )
+                                    }
+                                    // 「跳过片头」胶囊：剧集 + 全局开关开启才出现，点击弹预设弹窗。
+                                    // 配置写在剧集壳行上：全剧生效、每部剧只配一次。
+                                    val skipShell = media
+                                    if (skipPillVisible && skipShell != null) {
+                                        TvPillButton(
+                                            text = if (skipShell.introSkipMs > 0)
+                                                "跳过片头 ${fmtIntroMs(skipShell.introSkipMs)}"
+                                            else "跳过片头 · 关",
+                                            primary = skipShell.introSkipMs > 0,
+                                            // 单源单季单页时胶囊就是控制条唯一元件，锚点得跟着挂到它，
+                                            // 否则网格首行的上键指向一个没挂载的节点。
+                                            modifier = if (playSources.size <= 1 && tvSeasons.size <= 1 && totalPages <= 1) {
+                                                pillFocus.focusRequester(controlsFocusRequester)
+                                            } else pillFocus,
+                                            onClick = { showSkipDialog = true }
                                         )
                                     }
                                 }
@@ -1321,6 +1353,116 @@ fun TvDetailScreen(
             Spacer(Modifier.height(60.dp))
         }
         // 遥控器 Back 键 = TvApp.BackHandler 统一处理，不再显示页面内返回按钮
+
+        // ---------- 「跳过片头」预设弹窗（遥控器焦点） ----------
+        val skipShell = media
+        if (showSkipDialog && skipShell != null && skipShell.kind == MediaKind.SERIES &&
+            skipShell.seriesKey.isNotBlank()
+        ) {
+            TvSkipIntroDialog(
+                currentMs = skipShell.introSkipMs,
+                onDismiss = { showSkipDialog = false },
+                onPick = { ms ->
+                    showSkipDialog = false
+                    scope.launch {
+                        // 写成功后重读壳行，胶囊文案立刻反映新值
+                        if (vm.setIntroSkip(skipShell.seriesKey, ms)) {
+                            media = vm.mediaOf(skipShell.id) ?: media
+                        }
+                    }
+                }
+            )
+        }
+    }
+}
+
+/**
+ * 电视端「跳过片头」预设弹窗：预设档位 + 自定义 mm:ss 输入，遥控器焦点操作。
+ * 选中即写入剧集壳行（全剧生效），「不跳」= 清除配置。
+ */
+@Composable
+private fun TvSkipIntroDialog(
+    currentMs: Long,
+    onDismiss: () -> Unit,
+    onPick: (Long) -> Unit
+) {
+    val presets = listOf(0L to "不跳", 30_000L to "30s", 60_000L to "60s", 90_000L to "90s",
+        120_000L to "120s", 150_000L to "150s", 180_000L to "180s")
+    var custom by remember { mutableStateOf("") }
+    val firstFocus = remember { FocusRequester() }
+    // 打开即落在当前档位上；未配置落「不跳」
+    val focusIndex = presets.indexOfFirst { it.first == currentMs }.coerceAtLeast(0)
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        tvMoveFocus(firstFocus)
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            val compact = maxWidth < 700.dp
+            val dialogWidth = if (compact) maxWidth - 40.dp
+            else (maxWidth * 0.55f).coerceIn(520.dp, 900.dp)
+            Column(
+                Modifier
+                    .width(dialogWidth)
+                    .clip(Radius.Lg)
+                    .background(AppColors.SurfaceHi)
+                    .border(1.dp, Edge.HairlineStrong, Radius.Lg)
+                    .padding(22.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    "跳过片头（全剧生效，只需配置一次）",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = TvText.Title
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    presets.forEachIndexed { i, (ms, label) ->
+                        TvPillButton(
+                            text = label,
+                            primary = currentMs == ms,
+                            modifier = Modifier.weight(1f).then(
+                                if (i == focusIndex) Modifier.focusRequester(firstFocus) else Modifier
+                            ),
+                            onClick = { onPick(ms) }
+                        )
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = custom,
+                        onValueChange = { custom = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = { Text("自定义 分:秒，如 1:30", color = TvText.Muted) },
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = AppColors.Brand,
+                            unfocusedBorderColor = Edge.HairlineStrong,
+                            cursorColor = AppColors.Brand
+                        )
+                    )
+                    TvPillButton(
+                        text = "确定",
+                        primary = false,
+                        onClick = { parseIntroInput(custom)?.let { onPick(it) } }
+                    )
+                }
+                Text(
+                    "OK 选中 · Back 关闭",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TvText.Muted
+                )
+            }
+        }
     }
 }
 
@@ -1508,7 +1650,7 @@ private fun TvCastRow(
                         .size(56.dp)
                         .clip(avatarShape)
                         .background(AppColors.SurfaceHi)
-                        .then(if (focused) Modifier.border(2.dp, Color.White, avatarShape) else Modifier),
+                        .tvFocusRing(focused, radius = 28.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     if (person.imageUrl.isNotBlank()) {
@@ -1618,11 +1760,8 @@ private fun TvEpisodeCard(
             focusChain
                 .clip(Radius.Md)
                 .background(AppColors.Surface)
-                .border(
-                    width = if (focused) 2.dp else 1.dp,
-                    color = if (focused) AppColors.Brand else AppColors.SurfaceHi,
-                    shape = Radius.Md
-                )
+                .tvFocusRing(focused)
+                .then(if (focused) Modifier else Modifier.border(1.dp, AppColors.SurfaceHi, Radius.Md))
         ) {
             EpisodeStill(episode)
         }
@@ -1633,14 +1772,11 @@ private fun TvEpisodeCard(
         focusChain
             // 详情页不放大获焦的卡片：放大一改焦点矩形，verticalScroll 的
             // bring-into-view 每次都补一点滚动，左右切集时整屏跟着上下抖。
-            // 焦点只用边框表示（品牌色 2dp），尺寸一动都不动。
+            // 焦点只用全局那圈白描边表示，尺寸一动都不动。
             .clip(Radius.Md)
             .background(if (watched) AppColors.Brand.copy(alpha = 0.18f) else AppColors.Surface)
-            .border(
-                width = if (focused) 2.dp else 1.dp,
-                color = if (focused) AppColors.Brand else AppColors.SurfaceHi,
-                shape = Radius.Md
-            )
+            .tvFocusRing(focused)
+            .then(if (focused) Modifier else Modifier.border(1.dp, AppColors.SurfaceHi, Radius.Md))
             .padding(horizontal = 12.dp, vertical = 12.dp)
     ) {
         Text(

@@ -116,6 +116,7 @@ fun SettingsScreen(vm: LibraryViewModel) {
     // Prefs 背后是 SharedPreferences，写它不会触发重组；行上的当前值得自己留一份状态
     var posterSize by remember { mutableStateOf(Prefs.posterSize) }
     var videoTier by remember { mutableStateOf(Prefs.videoCacheTier) }
+    var skipIntro by remember { mutableStateOf(Prefs.skipIntroEnabled) }
     var videoCacheBytes by remember { mutableStateOf(0L) }
     var imageCacheBytes by remember { mutableStateOf(0L) }
     val scope = rememberCoroutineScope()
@@ -184,6 +185,34 @@ fun SettingsScreen(vm: LibraryViewModel) {
 
                 ValueRow("缩略图大小", posterSize.label()) { choice = SettingChoice.PosterSize }
                 ValueRow("主题色", AppPalette.current.label) { choice = SettingChoice.Theme }
+
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(AppColors.SurfaceHi, Radius.Sm)
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "自动跳过片头",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AppColors.TextPrimary
+                        )
+                        Text(
+                            "开启后剧集详情页与播放器显示「跳过片头」按钮；关闭则不显示、也不再自动跳过。",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AppColors.TextTertiary
+                        )
+                    }
+                    Switch(
+                        checked = skipIntro,
+                        onCheckedChange = {
+                            skipIntro = it
+                            Prefs.skipIntroEnabled = it
+                        }
+                    )
+                }
             }
 
             // ---------- 刮削 ----------

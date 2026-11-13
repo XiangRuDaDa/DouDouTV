@@ -115,7 +115,9 @@ class TvBoxClient(
         val api: String,
         val ext: Any?,
         val searchable: Boolean = true,
-        val quickSearch: Boolean = true
+        val quickSearch: Boolean = true,
+        /** 站点级请求头（UA/Referer 等），解析结果没有同名头时兜底合并（对齐 FongMi SiteApi） */
+        val header: Map<String, String> = emptyMap()
     )
 
     companion object {
@@ -151,6 +153,24 @@ class TvBoxClient(
 
         /** 直链解析的独立协程作用域：超时后可以不等待阻塞中的反射调用直接返回 */
         private val directCallScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        /**
+         * 网盘分享页域名：这类 http 地址不是直链，必须交给 spider playerContent 解析，
+         * 且源站重新分享后旧链接会整剧失效，播放前要刷新详情拿新分享链接（对齐 FongMi：
+         * type=3 站点每次播放都走 playerContent，进播放页必重新拉 detail）。
+         */
+        private val CLOUD_SHARE_HOSTS = listOf(
+            "pan.quark.cn", "my.quark.cn", "drive.uc.cn",
+            "alipan.com", "pan.baidu.com", "yun.baidu.com", "pan.xunlei.com"
+        )
+
+        /** 是否网盘分享页 URL（http(s) 且 host 命中网盘域名）：是 http 但不是直链 */
+        fun isCloudShareUrl(url: String): Boolean {
+            val lower = url.lowercase()
+            if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
+            val host = lower.substringAfter("://").substringBefore("/")
+            return CLOUD_SHARE_HOSTS.any { host == it || host.endsWith(".$it") }
+        }
 
         /** 地址归一化：补协议 + 中文域名转 punycode */
         internal fun normalizeEndpoint(raw: String): String =
@@ -538,6 +558,16 @@ class TvBoxClient(
         return vod
     }
 
+    /**
+     * 协议自带的跳过区间（playerContent 的 skips 数组一项）。
+     * 协议里 from/to 是秒，这里统一转毫秒存着，播放器直接用。
+     */
+    data class VodSkip(
+        val name: String,
+        val fromMs: Long,
+        val toMs: Long
+    )
+
     /** playerContent 解析结果：视频直链 + 所需 HTTP 请求头 */
     data class ResolvedPlayUrl(
         val url: String,
@@ -545,7 +575,9 @@ class TvBoxClient(
         /** playerContent 返回的 parse 标记：0 = 可直接播放，1 = 需要网页解析 */
         val parse: Int = 0,
         /** 需要网页解析（parse/jx = 1，或返回地址本身是网页）：当前版本不支持 */
-        val needsWebParse: Boolean = false
+        val needsWebParse: Boolean = false,
+        /** playerContent 返回的 skips 跳过区间（片头/片尾），通常为空 */
+        val skips: List<VodSkip> = emptyList()
     )
 
     /**
@@ -555,10 +587,14 @@ class TvBoxClient(
      * spider 能补上 Cookie/Referer 等请求头，也能识别出需要网页解析的线路。
      *
      * 为不影响现有可播链路，额外做三点保护：
-     *  1. 直链 + 本进程从未加载过 spider（如「继续观看」冷启动）→ 直接返回原地址，
+     *  1. 真直链 + 本进程从未加载过 spider（如「继续观看」冷启动）→ 直接返回原地址，
      *     不为一个本来就能播的链接去下载/解密 JAR、起本地代理；
-     *  2. 直链解析超时（[DIRECT_RESOLVE_TIMEOUT_MS]）、异常或返回空 → 回退原地址；
-     *  3. 网盘 scheme（quark:// 等）必须解析成功，失败时保留原始错误（原地址播不了）。
+     *  2. 真直链解析超时（[DIRECT_RESOLVE_TIMEOUT_MS]）、异常或返回空 → 回退原地址；
+     *  3. 网盘 scheme（quark:// 等）与网盘分享页 URL 必须解析成功，失败时保留原始错误
+     *     （这两类原地址本身播不了，回退只会掩盖失败，对齐 FongMi 不做兜底）。
+     *
+     * 「直链」按 http 前缀判定，但网盘分享页（pan.quark.cn 等）除外：它们也是 http，
+     * 地址本身却播不了，必须走完整解析（对齐 FongMi：type=3 站点每次都调 playerContent）。
      *
      * @param siteKey    站点 key（用于定位 spider 站点）
      * @param playSource 播放源名称（即 vod_play_from，如「夸克网盘」），作为 playerContent 的 flag
@@ -570,7 +606,8 @@ class TvBoxClient(
         playSource: String,
         rawUrl: String
     ): ResolvedPlayUrl = withContext(Dispatchers.IO) {
-        val isDirect = rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
+        // 网盘分享页虽是 http，但不是直链：回退原地址只会把分享页喂给播放器，必须走完整解析
+        val isDirect = rawUrl.startsWith("http://", true) && !isCloudShareUrl(rawUrl)
 
         // 冷启动保护：spider 从未加载过时，直链不需要（也不值得）走解析
         if (isDirect) {
@@ -640,7 +677,10 @@ class TvBoxClient(
             ?: throw IllegalStateException("playerContent 返回空")
 
         logPlayerContentResult(playSource, flags, json)
-        val resolved = parsePlayerContentResult(json)
+        val parsed = parsePlayerContentResult(json)
+        // 对齐 FongMi SiteApi：站点级 header（UA/Referer 等）合并进播放请求，解析结果同名头优先
+        val resolved = if (site.header.isEmpty()) parsed
+        else parsed.copy(headers = site.header + parsed.headers)
         // 分两行打，避免 logcat 单行截断看不到 URL。
         // 用 W 级：这台电视 ROM 吞掉 app 的 D 级日志，播放链路取证只能靠 W 才抓得到。
         // 地址按构建类型脱敏：debug 包保留全文，正式包只留 host 与路径尾（见 LogGate）。
@@ -743,7 +783,11 @@ class TvBoxClient(
         val obj = JSONObject(json)
         val parse = obj.optInt("parse", 0)
         val jx = obj.optInt("jx", 0)
-        val rawUrl = obj.optString("url").takeIf { it.isNotBlank() }
+        // 对齐 FongMi UrlAdapter：url 可能是多画质数组，取第一个可播地址
+        val rawUrl = when (val u = obj.opt("url")) {
+            is JSONArray -> (0 until u.length()).map { u.optString(it) }.firstOrNull { it.isNotBlank() }
+            else -> u?.toString()
+        }?.takeIf { it.isNotBlank() }
         if (rawUrl == null) {
             val msg = obj.optString("msg").takeIf { it.isNotBlank() }
                 ?: obj.optString("message").takeIf { it.isNotBlank() }
@@ -751,9 +795,29 @@ class TvBoxClient(
             throw IllegalStateException(msg)
         }
         val headers = parseHeaders(obj.opt("header"))
-        val url = unwrapLocalProxyUrl(rawUrl)
+        // 对齐 FongMi Result.getRealUrl()：playUrl 是拼在地址前面的前缀（代理/鉴权入口）
+        val playUrl = obj.optString("playUrl")
+        val url = unwrapLocalProxyUrl(if (playUrl.isBlank()) rawUrl else playUrl + rawUrl)
         val needsWebParse = parse == 1 || jx == 1 || isWebPageUrl(url)
-        return ResolvedPlayUrl(url, headers, parse, needsWebParse)
+        return ResolvedPlayUrl(url, headers, parse, needsWebParse, parseSkips(obj))
+    }
+
+    /**
+     * 解析 playerContent 的 skips 数组（CatVod 约定）：
+     * [{"name":"片头","from":0,"to":90}, ...]，from/to 单位是秒。
+     * 没有该字段或格式不对时返回空列表，不影响播放。
+     */
+    private fun parseSkips(obj: JSONObject): List<VodSkip> {
+        val arr = obj.optJSONArray("skips") ?: return emptyList()
+        val out = ArrayList<VodSkip>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val from = o.optLong("from", -1L)
+            val to = o.optLong("to", -1L)
+            if (from < 0 || to <= from) continue
+            out.add(VodSkip(o.optString("name", "片头"), from * 1000L, to * 1000L))
+        }
+        return out
     }
 
     /**
@@ -771,6 +835,15 @@ class TvBoxClient(
                 // 本地代理形态但没带 url 参数：整条视频流都会经 127.0.0.1 中转，
                 // 单连接吞吐受代理本身限制 —— 网盘播放慢的第一嫌疑，必须留痕。
                 Log.w("SpiderProxy", "本地代理地址无 url 参数，播放器将直连 127.0.0.1：$url")
+                url
+            } else if (android.net.Uri.parse(cdnUrl).path?.let {
+                    it.endsWith(".m3u8", true) || it.endsWith(".m3u", true)
+                } == true
+            ) {
+                // 播放列表不解包（对齐 FongMi：代理地址原样播）：m3u8 正文里的分片地址
+                // 通常已被代理改写成继续走代理（分片要靠代理补签名/Cookie），
+                // 换成 CDN 直链拉列表会丢这层改写，分片 403/404。
+                Log.w("SpiderProxy", "播放列表地址，保留本地代理转发：$cdnUrl")
                 url
             } else {
                 Log.w(
@@ -819,13 +892,19 @@ class TvBoxClient(
             val rawKey = o.optString("key").ifBlank { o.optString("name") }.ifBlank { "spider$i" }
             val name = o.optString("name").ifBlank { rawKey }
             val ext = o.opt("ext")
+            val header = when (val h = o.opt("header")) {
+                is JSONObject -> parseHeaders(h.toString())
+                is String -> parseHeaders(h)
+                else -> emptyMap()
+            }
             out += SpiderSite(
                 key = rawKey.replace(":", ""),
                 name = name,
                 api = api,
                 ext = ext,
                 searchable = optFlag(o, "searchable"),
-                quickSearch = optFlag(o, "quickSearch")
+                quickSearch = optFlag(o, "quickSearch"),
+                header = header
             )
         }
         return out.distinctBy { it.key }

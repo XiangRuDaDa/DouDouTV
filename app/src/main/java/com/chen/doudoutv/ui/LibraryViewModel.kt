@@ -1129,6 +1129,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 分集行所属的剧集壳：详情页把「继续观看」的分集记录换成整部剧来展示 */
     suspend fun shellOf(seriesKey: String): MediaEntity? = repo.shellOf(seriesKey)
+
+    /** 写入/清除手动配置的片头时长（毫秒，0=清除），只写剧集壳行、全剧生效 */
+    suspend fun setIntroSkip(seriesKey: String, ms: Long): Boolean = repo.setIntroSkip(seriesKey, ms)
     suspend fun seasonsOf(seriesKey: String): List<Int> = repo.seasons(seriesKey)
 
     /** TVBox 多播放源：某剧的全部云盘/线路名称 */

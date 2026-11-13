@@ -175,6 +175,13 @@ interface MediaDao {
     @Query("UPDATE media SET favorite = :favorite WHERE id = :id")
     suspend fun setFavorite(id: Long, favorite: Boolean)
 
+    /**
+     * 写入/清除手动配置的片头时长（毫秒，0=清除）。
+     * 只更新剧集壳行：全剧共用一个配置，切集时按 seriesKey 回读壳行即可。
+     */
+    @Query("UPDATE media SET introSkipMs = :ms WHERE seriesKey = :seriesKey AND kind = 'SERIES'")
+    suspend fun setIntroSkip(seriesKey: String, ms: Long)
+
     @Query("UPDATE media SET durationMs = :duration WHERE id = :id AND durationMs = 0")
     suspend fun fillDuration(id: Long, duration: Long)
 

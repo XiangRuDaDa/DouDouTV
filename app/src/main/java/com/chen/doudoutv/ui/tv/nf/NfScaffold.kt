@@ -61,6 +61,7 @@ import com.chen.doudoutv.ui.theme.Motion
 import com.chen.doudoutv.ui.theme.Radius
 import com.chen.doudoutv.ui.theme.TvText
 import com.chen.doudoutv.ui.theme.themeBackdrop
+import com.chen.doudoutv.ui.tv.tvFocusRing
 import com.chen.doudoutv.ui.tv.tvMoveFocus
 
 /** 顶栏收色带的高度：导航条本身透明，文字要有一层由页面底色淡出的衬底才读得清 */
@@ -599,18 +600,11 @@ fun NfActionButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale by animateFloatAsState(
-        if (focused) 1.06f else 1f,
-        tween(Motion.FAST, easing = Motion.Ease),
-        label = "nfAction"
-    )
     val brand = AppColors.Brand
     val brandSoft = AppColors.BrandSoft
     val contentColor = if (primary) Color.Black else TvText.Title
     Box(
         modifier
-            .zIndex(if (focused) 1f else 0f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
             .then(
                 if (primary) {
                     Modifier.shadow(
@@ -629,9 +623,10 @@ fun NfActionButton(
                     else ButtonMaterial.glassStops()
                 )
             )
+            .tvFocusRing(focused)
             .then(
                 when {
-                    focused -> Modifier.border(2.dp, Color.White, Radius.Md)
+                    focused -> Modifier
                     primary -> Modifier.border(1.dp, ButtonMaterial.highlightEdge, Radius.Md)
                     else -> Modifier.border(1.dp, ButtonMaterial.glassEdge, Radius.Md)
                 }

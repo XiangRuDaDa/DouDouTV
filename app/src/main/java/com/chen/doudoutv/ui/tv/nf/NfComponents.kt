@@ -1,6 +1,9 @@
 package com.chen.doudoutv.ui.tv.nf
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector4D
+import androidx.compose.animation.core.TwoWayConverter
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -16,6 +19,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -56,12 +60,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusManager
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -70,6 +76,10 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -83,6 +93,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -102,6 +113,8 @@ import com.chen.doudoutv.ui.gridState
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.tvPosterColumns
 import com.chen.doudoutv.ui.tv.tvMoveFocus
+import com.chen.doudoutv.ui.tv.tvDrawFocusRing
+import com.chen.doudoutv.ui.tv.tvFocusRing
 import com.chen.doudoutv.ui.tv.tvKeepFocusedItemAlive
 import com.chen.doudoutv.ui.theme.AppColors
 import com.chen.doudoutv.ui.theme.Edge
@@ -289,61 +302,153 @@ fun Modifier.nfKeyDown(
     }
 }
 
-/** 焦点白框的描边宽度 */
-private val NfFocusFrameWidth = 1.5.dp
-
-/** 焦点白框的圆角：与导航条右簇的 [Radius.Md] 同值，这里要的是能进 DrawScope 的 dp 数 */
-private val NfFocusFrameRadius = 12.dp
-
 /** 选中标记（下划线）的厚度：选中与焦点靠形状分开，不靠加粗这条线 */
 private val NfSelectedRuleHeight = 2.dp
 
+/** bar 内焦点框的飞行时长 */
+private const val NfBarFrameMillis = 150
+
+/** 移动框的圆角，与 [Radius.Md] 同值（DrawScope 要的是 dp 数不是 Shape） */
+private val NfBarFrameRadius = 12.dp
+
+private val NfRectConverter = TwoWayConverter<Rect, AnimationVector4D>(
+    convertToVector = { AnimationVector4D(it.left, it.top, it.right, it.bottom) },
+    convertFromVector = { Rect(it.v1, it.v2, it.v3, it.v4) }
+)
+
 /**
- * 焦点白框 + 弱辉光：进度 0→1 只改透明度，不缩放。
+ * 一条 bar（导航 tab 条 / 分类 chip 条）内的移动焦点框。
  *
- * 进度在**绘制期**读（不是组合期），所以焦点移动只重绘这一颗、不触发重组。
- * 辉光用两圈等宽描边做亮度递减（0–3dp 一层、3–6dp 一层），不用 BlurMaskFilter ——
- * 模糊滤镜每帧都要重算一张离屏图，弱盒子上和「切页那一帧组合 30 张卡」抢同一份绘制时间。
+ * 框画在整条 bar 之上的一层：焦点换颗时它从旧矩形平移并形变到新矩形，
+ * 读起来是「一个框在走」，而不是「一个灭了另一个亮」。
  *
- * 挂在 padding 之前，框才会把内边距一起圈进去；描边内缩半个线宽，避免被裁掉一半。
- * 调用方不要给它套 clip：辉光要画到节点外面去。
+ * 只在这条 bar 内飞。焦点离开 bar（下到网格、进弹窗）时这一层直接不画，落点自己那圈
+ * [tvFocusRing] 瞬时亮起 —— 跨层不飞：1.9 的焦点是瞬时吸附，框飞过去的那 150ms 里
+ * 用户已经按了下一个键，读起来就是「框跟不上」。
+ *
+ * 矩形不走重组：布局回调直接喂给 [Animatable]，值只在绘制期读，滚动和飞行每帧只重绘这一层。
+ *
+ * **焦点来源不用 `Modifier.onFocusEvent`，用元件自己那份 `collectIsFocusedAsState`。**
+ * 两条理由，都是真机撞出来的：
+ * ① 1.9 的 `FocusTargetNode.dispatchFocusCallbacks` 同步把子节点的新状态原样推给祖先的
+ *    事件节点，切颗时先推一趟 Inactive 一路推到 bar 容器 —— 容器那下「失焦」是假的，
+ *    夹在两颗之间，拿它清「当前落点」会把飞行起点抹掉，框永远瞬移。
+ * ② 事件节点排在 `clickable` 外层时，那条 `visitSelfAndAncestors(untilType = FocusTarget)`
+ *    走到 clickable 自带的焦点目标就停了，压根收不到 —— 框整个不画。
+ * 元件那份 `focused` 是驱动文字变白的同一个值，它一直是准的，跟着它走就没有这两个坑。
+ *
+ * 另外每颗自带 [nfBarFrameFallback]：这一层没有矩形时它自己画一圈静态框。
+ * 飞行层再怎么出问题，「点哪里框就在哪里」都不会丢。
  */
-private fun Modifier.nfFocusFrame(progress: State<Float>): Modifier = drawBehind {
-    val alpha = progress.value.coerceIn(0f, 1f)
-    if (alpha <= 0.01f) return@drawBehind
-    val stroke = NfFocusFrameWidth.toPx()
-    val inset = stroke / 2f
-    val box = Size(size.width - stroke, size.height - stroke)
-    val radius = NfFocusFrameRadius.toPx()
-    val band = 3.dp.toPx()
-    for (i in 0..1) {
-        val expand = band * (i + 0.5f)
-        drawRoundRect(
-            color = Color.White.copy(alpha = alpha * if (i == 0) 0.10f else 0.045f),
-            topLeft = Offset(inset - expand, inset - expand),
-            size = Size(box.width + expand * 2, box.height + expand * 2),
-            cornerRadius = CornerRadius(radius + expand),
-            style = Stroke(band)
-        )
+class NfBarFocus internal constructor(private val scope: CoroutineScope) {
+    /** 当前持焦的那一颗。只在绘制期读，写它只重绘不重组 */
+    private var focusedIndex by mutableStateOf<Int?>(null)
+
+    /** 上一次画过的落点。跨颗飞行的起点，失焦不清它 */
+    private var lastIndex: Int? = null
+    private val coords = HashMap<Int, LayoutCoordinates>()
+    private var hostCoords: LayoutCoordinates? = null
+
+    /** 这一颗的目标矩形。飞行还没起飞那一帧先画它，避免空一帧 */
+    private var target by mutableStateOf(Rect.Zero)
+    private val frame = Animatable(Rect.Zero, NfRectConverter)
+
+    /** 这一层的矩形；null = 焦点不在这条 bar 上（或还没量到），交给单颗自己画 */
+    internal val rect: Rect?
+        get() {
+            if (focusedIndex == null) return null
+            val flying = frame.value
+            return if (flying.width > 0f && flying.height > 0f) flying
+            else target.takeIf { it.width > 0f && it.height > 0f }
+        }
+
+    internal fun host(coordinates: LayoutCoordinates) {
+        hostCoords = coordinates
+        retarget()
     }
-    drawRoundRect(
-        color = Color.White.copy(alpha = alpha),
-        topLeft = Offset(inset, inset),
-        size = box,
-        cornerRadius = CornerRadius(radius),
-        style = Stroke(stroke)
-    )
+
+    /** 单颗失焦只清自己那一份：新颗的 enter 可能排在它前面，清不到别人头上 */
+    internal fun exit(index: Int) {
+        if (focusedIndex == index) focusedIndex = null
+    }
+
+    internal fun enter(index: Int) {
+        focusedIndex = index
+        retarget()
+    }
+
+    internal fun place(index: Int, coordinates: LayoutCoordinates) {
+        coords[index] = coordinates
+        if (focusedIndex == index) retarget()
+    }
+
+    private fun retarget() {
+        val index = focusedIndex ?: return
+        val c = coords[index]?.takeIf { it.isAttached } ?: return
+        val host = hostCoords?.takeIf { it.isAttached } ?: return
+        val origin = host.positionInRoot()
+        val next = c.boundsInRoot().translate(-origin.x, -origin.y)
+        // 同一颗重复报点（容器和单颗的回调都会进来）不重启动画，否则飞行每帧被打断
+        if (next == target) return
+        val from = lastIndex
+        val fly = from != null && from != index && frame.value.width > 0f
+        target = next
+        lastIndex = index
+        scope.launch {
+            // Animatable 内部互斥：新目标取消上一次没飞完的那趟，连按时框从
+            // 「当前走到的位置」接着走，不回弹。滚动时 from == index → 瞬移，框跟着列表走
+            if (fly) frame.animateTo(next, tween(NfBarFrameMillis, easing = Motion.Ease))
+            else frame.snapTo(next)
+        }
+    }
+}
+
+@Composable
+private fun rememberNfBarFocus(): NfBarFocus {
+    val scope = rememberCoroutineScope()
+    return remember(scope) { NfBarFocus(scope) }
+}
+
+/** 挂在 bar 的容器上：只记录坐标原点，不参与焦点判定 */
+private fun Modifier.nfBarFrameHost(bar: NfBarFocus): Modifier =
+    onGloballyPositioned { bar.host(it) }
+
+/** 挂在 bar 里每一颗上：只报坐标。焦点由元件自己那份 focused 经 [NfBarFrameItem] 报 */
+private fun Modifier.nfBarFrameCoords(bar: NfBarFocus, index: Int): Modifier =
+    onGloballyPositioned { bar.place(index, it) }
+
+/** 把元件自己那份焦点态喂给飞行层。放在元件内部，拿的就是驱动文字变白的同一个值 */
+@Composable
+private fun NfBarFrameItem(bar: NfBarFocus, index: Int, focused: Boolean) {
+    LaunchedEffect(focused) {
+        if (focused) bar.enter(index) else bar.exit(index)
+    }
+}
+
+/**
+ * 兜底描边：飞行层拿不出矩形时，这颗自己画一圈静态框（等于没有飞行层时的老行为）。
+ * `bar.rect` 只在绘制期读，所以飞行不会把这颗拖进重组。
+ */
+private fun Modifier.nfBarFrameFallback(bar: NfBarFocus, focused: Boolean): Modifier =
+    if (!focused) this else drawWithContent {
+        drawContent()
+        if (bar.rect == null) tvDrawFocusRing(Rect(Offset.Zero, size), NfBarFrameRadius.toPx())
+    }
+
+/** 盖在 bar 上面的那一层：只画框，不吃触摸也不吃按键 */
+private fun Modifier.nfBarFrameOverlay(bar: NfBarFocus): Modifier = drawWithContent {
+    drawContent()
+    bar.rect?.let { tvDrawFocusRing(it, NfBarFrameRadius.toPx()) }
 }
 
 /**
  * 导航条的一颗 tab：选中与焦点用**不同形状**表达 —— 选中 = 白字加粗 + 主题色下划线（常驻，只此一处），
- * 焦点 = 整颗白色圆角描边框 + 弱辉光，其余 = 灰字。
+ * 焦点 = 整条 bar 上那圈移动的白描边（[NfBarFocus]），其余 = 灰字。
  *
- * 为什么不再用「白色下划线」表示焦点：默认品牌色就是苹果灰，和白线只差明度、形状还一样，
- * 三米外两条线必然糊成一条；焦点落在选中那颗上时白线更是直接把品牌线盖掉，等于没有选中提示。
+ * 为什么不再用「白色下划线」表示焦点：两条线形状一样、只差颜色，三米外必然糊成一条；
+ * 焦点落在选中那颗上时白线更是直接把品牌线盖掉，等于没有选中提示。
  *
- * 焦点不放大，所以这里连 graphicsLayer 都不需要：每颗只剩一个透明度动画，
- * 且值在绘制期读，焦点移动不触发重组、也不多一层离屏缓冲。
+ * 这颗自己不画焦点框、也不放大：框由 bar 那一层统一画，才能在颗与颗之间走起来。
  * 下划线只跟「选中」有关，而选中只在切页时变、页面本来就是整棵重建的，所以不做动画。
  * 未选中时横线画成透明而不是不画：省掉这几 dp 会让选中的那颗比邻居高一截。
  */
@@ -352,24 +457,21 @@ private fun NfNavTab(
     text: String,
     selected: Boolean,
     onClick: () -> Unit,
+    bar: NfBarFocus,
+    index: Int,
     modifier: Modifier = Modifier,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val focus = animateFloatAsState(
-        if (focused) 1f else 0f,
-        tween(Motion.BASE, easing = Motion.Ease), label = "tabFocus"
-    )
+    NfBarFrameItem(bar, index, focused)
     Column(
         modifier
+            .nfBarFrameFallback(bar, focused)
             // 下划线要 fillMaxWidth 对齐字宽，但 Column 本身必须收在字的固有宽度：
             // 不收的话 fillMaxWidth 会把这颗 tab 撑满整条 Row，把兄弟 tab 和右簇全挤出去
             .width(IntrinsicSize.Max)
-            // 辉光要画到节点外面，焦点这颗必须压在兄弟之上
-            .zIndex(if (focused) 1f else 0f)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .nfFocusFrame(focus)
             .padding(horizontal = 10.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -411,24 +513,19 @@ private fun NfScopeChip(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale = animateFloatAsState(if (focused) 1.04f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "scope")
     val bg = animateColorAsState(
         if (focused) AppColors.Brand.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.05f),
         tween(Motion.BASE, easing = Motion.Ease), label = "scopeBg"
     )
     Row(
         modifier
-            .zIndex(if (focused) 1f else 0f)
             .height(NfNavControlHeight)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(Radius.Md)
             .background(bg.value)
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
-                else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md)
-            )
+            .tvFocusRing(focused)
+            .then(if (focused) Modifier else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md))
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -478,7 +575,6 @@ private fun NfNavIconButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
-    val scale = animateFloatAsState(if (focused) 1.08f else 1f, spring(dampingRatio = 0.8f, stiffness = 420f), label = "navIcon")
     val bg = animateColorAsState(
         when {
             focused -> Color.White.copy(alpha = 0.14f)
@@ -489,19 +585,15 @@ private fun NfNavIconButton(
     )
     Box(
         modifier
-            .zIndex(if (focused) 1f else 0f)
             .size(NfNavControlHeight)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
             .clip(Radius.Md)
             .background(bg.value)
+            .tvFocusRing(focused)
             .then(
-                when {
-                    focused -> Modifier.border(1.5.dp, Color.White, Radius.Md)
-                    selected -> Modifier.border(1.dp, AppColors.Brand.copy(alpha = 0.6f), Radius.Md)
-                    else -> Modifier
-                }
+                if (!focused && selected) Modifier.border(1.dp, AppColors.Brand.copy(alpha = 0.6f), Radius.Md)
+                else Modifier
             )
             .padding(6.dp),
         contentAlignment = Alignment.Center
@@ -576,23 +668,29 @@ fun NfNavBar(
                 fontWeight = FontWeight.Bold,
                 maxLines = 1
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                NfNavTab(
-                    "首页", NfTab.Home == current, { goTab(NfTab.Home) },
-                    modifier = route.focusRequester(tabFocus(NfTab.Home))
-                )
-                NfNavTab(
-                    "分类", NfTab.Browse == current, { goTab(NfTab.Browse) },
-                    modifier = route.focusRequester(tabFocus(NfTab.Browse))
-                )
-                NfNavTab(
-                    "我的", NfTab.Mine == current, { goTab(NfTab.Mine) },
-                    modifier = route.focusRequester(tabFocus(NfTab.Mine))
-                )
-                NfNavTab(
-                    "搜索", NfTab.Search == current, { goTab(NfTab.Search) },
-                    modifier = route.focusRequester(tabFocus(NfTab.Search))
-                )
+            // 四颗 tab 共用一层移动焦点框：左右交棒时框平移过去，切页时也跟着走
+            // （导航条画在转场之外、不随页面重建，所以这一下飞行是连贯的）
+            val tabBar = rememberNfBarFocus()
+            Box(Modifier.nfBarFrameHost(tabBar)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    NfNavTab(
+                        "首页", NfTab.Home == current, { goTab(NfTab.Home) }, tabBar, 0,
+                        modifier = route.nfBarFrameCoords(tabBar, 0).focusRequester(tabFocus(NfTab.Home))
+                    )
+                    NfNavTab(
+                        "分类", NfTab.Browse == current, { goTab(NfTab.Browse) }, tabBar, 1,
+                        modifier = route.nfBarFrameCoords(tabBar, 1).focusRequester(tabFocus(NfTab.Browse))
+                    )
+                    NfNavTab(
+                        "我的", NfTab.Mine == current, { goTab(NfTab.Mine) }, tabBar, 2,
+                        modifier = route.nfBarFrameCoords(tabBar, 2).focusRequester(tabFocus(NfTab.Mine))
+                    )
+                    NfNavTab(
+                        "搜索", NfTab.Search == current, { goTab(NfTab.Search) }, tabBar, 3,
+                        modifier = route.nfBarFrameCoords(tabBar, 3).focusRequester(tabFocus(NfTab.Search))
+                    )
+                }
+                Spacer(Modifier.matchParentSize().nfBarFrameOverlay(tabBar))
             }
         }
         Row(
@@ -711,7 +809,7 @@ fun NfPosterCard(
                     }
                 )
                 .clip(cardShape)
-                .then(if (focused) Modifier.border(1.5.dp, Color.White, cardShape) else Modifier)
+                .tvFocusRing(focused)
         ) {
             // 内容体单独一个组合函数、只收稳定原语参数：焦点态翻转会重组外壳（层级 / 位移都跟着变），
             // 参数没变时内容体整块被跳过，图片不跟着重排。一屏几十张卡，这块不切开就白吃一遍布局。
@@ -836,7 +934,8 @@ fun NfContinueCard(
                 clip = true
             }
             .background(AppColors.SurfaceHi)
-            .border(if (focused) 1.5.dp else 1.dp, if (focused) Color.White else Edge.Hairline, cardShape)
+            .tvFocusRing(focused)
+            .then(if (focused) Modifier else Modifier.border(1.dp, Edge.Hairline, cardShape))
     ) {
         PosterArt(model = item.backdropUrl.ifBlank { item.posterUrl }, contentDescription = item.title) {
             PosterFallback(title = item.title, showTitle = false, titleFontSize = 30.sp)
@@ -927,44 +1026,51 @@ fun NfSubNav(
         }
         if (target != null) state.animateScrollToItem(target)
     }
-    LazyRow(
-        modifier
-            .fillMaxWidth()
-            .heightIn(min = 44.dp),
-        state = state,
-        verticalAlignment = Alignment.CenterVertically,
-        // 纵向余量要容得下焦点辉光外扩的那 6dp：LazyRow 会按自己的边界裁剪
-        contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        itemsIndexed(labels) { index, label ->
-            NfSubChip(
-                text = label,
-                selected = index == selectedIndex,
-                // 手指点按不产生方向键事件，clickable 在触摸模式下不会自己抢焦：
-                // 不补这一下，焦点框会一直停在顶栏那颗 tab 上（遥控器上看不出来，手机上一点就露）。
-                // 必须先交焦点再换分类：换分类会触发本页入口抢焦，它靠「分类栏是否持焦」决定不把焦点拽走。
-                onClick = {
-                    tvMoveFocus(anchors[index])
-                    onSelect(index)
-                },
-                modifier = Modifier
-                    .nfFocusRoute(
-                        up = upFocusRequester,
-                        down = downFocusRequester,
-                        left = if (index == 0) FocusRequester.Cancel else anchors[index - 1],
-                        right = if (index == labels.lastIndex) FocusRequester.Cancel else anchors[index + 1]
-                    )
-                    .focusRequester(anchors[index])
-                    .then(if (index == 0 && firstChipFocus != null) Modifier.focusRequester(firstChipFocus) else Modifier)
-            )
+    val chipBar = rememberNfBarFocus()
+    Box(modifier.nfBarFrameHost(chipBar)) {
+        LazyRow(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp),
+            state = state,
+            verticalAlignment = Alignment.CenterVertically,
+            // 纵向留白：框画在 chip 边界之内，这 6dp 只是让它不贴着导航条和网格
+            contentPadding = PaddingValues(horizontal = TvPagePadding, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            itemsIndexed(labels) { index, label ->
+                NfSubChip(
+                    text = label,
+                    selected = index == selectedIndex,
+                    // 手指点按不产生方向键事件，clickable 在触摸模式下不会自己抢焦：
+                    // 不补这一下，焦点框会一直停在顶栏那颗 tab 上（遥控器上看不出来，手机上一点就露）。
+                    // 必须先交焦点再换分类：换分类会触发本页入口抢焦，它靠「分类栏是否持焦」决定不把焦点拽走。
+                    onClick = {
+                        tvMoveFocus(anchors[index])
+                        onSelect(index)
+                    },
+                    modifier = Modifier
+                        .nfFocusRoute(
+                            up = upFocusRequester,
+                            down = downFocusRequester,
+                            left = if (index == 0) FocusRequester.Cancel else anchors[index - 1],
+                            right = if (index == labels.lastIndex) FocusRequester.Cancel else anchors[index + 1]
+                        )
+                        .nfBarFrameCoords(chipBar, index)
+                        .focusRequester(anchors[index])
+                        .then(if (index == 0 && firstChipFocus != null) Modifier.focusRequester(firstChipFocus) else Modifier),
+                    bar = chipBar,
+                    index = index
+                )
+            }
         }
+        Spacer(Modifier.matchParentSize().nfBarFrameOverlay(chipBar))
     }
 }
 
 /**
  * 二级分类的一颗 chip：与一级导航 [NfNavTab] 同一套视觉语言 ——
- * 选中 = 亮字加粗 + 主题色下划线，焦点 = 整颗白色圆角描边框 + 弱辉光，都不放大。
+ * 选中 = 亮字加粗 + 主题色下划线，焦点 = 整条分类条上那圈移动的白描边，都不放大。
  * 字号比一级小一档（labelLarge），纵向内边距收紧，整条分类栏贴着导航条排。
  */
 @Composable
@@ -972,6 +1078,8 @@ private fun NfSubChip(
     text: String,
     selected: Boolean,
     onClick: () -> Unit,
+    bar: NfBarFocus,
+    index: Int,
     modifier: Modifier = Modifier
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -979,18 +1087,14 @@ private fun NfSubChip(
     // 焦点所在的 chip 不许被 LazyRow 回收：1.9 回收获焦项会直接 clearFocus，
     // 焦点随后落到整页第一个可聚焦节点 —— 也就是一级 tab 栏
     tvKeepFocusedItemAlive(focused)
-    val focus = animateFloatAsState(
-        if (focused) 1f else 0f,
-        tween(Motion.BASE, easing = Motion.Ease), label = "subChipFocus"
-    )
+    NfBarFrameItem(bar, index, focused)
     Column(
         modifier
+            .nfBarFrameFallback(bar, focused)
             // 同一级 tab：下划线 fillMaxWidth 对齐字宽，Column 收在固有宽度，不撑满 LazyRow
             .width(IntrinsicSize.Max)
-            .zIndex(if (focused) 1f else 0f)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
-            .nfFocusFrame(focus)
             .padding(horizontal = 14.dp, vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {

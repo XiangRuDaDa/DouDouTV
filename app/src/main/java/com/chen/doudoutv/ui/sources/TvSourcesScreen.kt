@@ -82,6 +82,7 @@ import com.chen.doudoutv.ui.tv.TvPillButton
 import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.TvSourceMinCellWidth
 import com.chen.doudoutv.ui.tv.tvGridColumns
+import com.chen.doudoutv.ui.tv.tvFocusRing
 
 /**
  * TV 端来源管理 —— 10 英尺界面。
@@ -1123,22 +1124,13 @@ private fun TvDeleteConfirmDialog(
                     Spacer(Modifier.width(16.dp))
                     // 危险按钮：红色 PillButton 变体
                     var delFocused by remember { mutableStateOf(false) }
-                    val delScale by animateFloatAsState(
-                        targetValue = if (delFocused) 1.06f else 1f,
-                        animationSpec = tween(Motion.FAST),
-                        label = "del-scale"
-                    )
                     Box(
                         Modifier
-                            .graphicsLayer { scaleX = delScale; scaleY = delScale }
                             .clip(Radius.Md)
                             .background(
                                 if (delFocused) Color.White else AppColors.Danger
                             )
-                            .then(
-                                if (delFocused) Modifier.border(2.dp, Color.White, Radius.Md)
-                                else Modifier
-                            )
+                            .tvFocusRing(delFocused)
                             .onFocusChanged { delFocused = it.isFocused }
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },

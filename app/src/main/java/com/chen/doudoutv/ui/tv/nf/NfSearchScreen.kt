@@ -74,6 +74,7 @@ import com.chen.doudoutv.ui.tv.TvPagePadding
 import com.chen.doudoutv.ui.tv.TvSearchUiState
 import com.chen.doudoutv.ui.tv.tvClaimFocusOnEnter
 import com.chen.doudoutv.ui.tv.tvPosterColumns
+import com.chen.doudoutv.ui.tv.tvFocusRing
 import com.chen.doudoutv.ui.tv.tvMoveFocus
 import com.chen.doudoutv.ui.tv.tvResumeTick
 import com.chen.doudoutv.ui.theme.AppColors
@@ -391,10 +392,8 @@ private fun NfSearchField(
             .zIndex(1f)
             .clip(Radius.Md)
             .background(if (focused) AppColors.SurfaceHi else AppColors.Surface)
-            .then(
-                if (focused) Modifier.border(2.dp, Color.White, Radius.Md)
-                else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md)
-            )
+            .tvFocusRing(focused)
+            .then(if (focused) Modifier else Modifier.border(1.dp, Edge.HairlineStrong, Radius.Md))
             .nfFocusRoute(up = upFocusRequester, down = downFocusRequester)
             .focusRequester(focusRequester)
             .onFocusEvent { focused = it.hasFocus }
@@ -452,7 +451,7 @@ private fun NfSuggestionRow(
             .fillMaxWidth()
             .clip(Radius.Md)
             .background(if (focused) Color.White else AppColors.Surface)
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(horizontal = 18.dp, vertical = 13.dp),
@@ -528,7 +527,7 @@ private fun NfHistoryChip(
             .widthIn(max = 420.dp)
             .clip(Radius.Md)
             .background(if (focused) Color.White else AppColors.Surface)
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable(interactionSource = interaction)
             .padding(horizontal = 20.dp, vertical = 11.dp),
@@ -748,7 +747,7 @@ private fun NfSourceHeader(
             .fillMaxWidth()
             .clip(Radius.Md)
             .background(if (focused) AppColors.SurfaceHi else Color.Transparent)
-            .then(if (focused) Modifier.border(2.dp, Color.White, Radius.Md) else Modifier)
+            .tvFocusRing(focused)
             .then(upFocusRequester?.let { Modifier.nfFocusRoute(up = it) } ?: Modifier)
             .focusRequester(focusRequester)
             .clickable(

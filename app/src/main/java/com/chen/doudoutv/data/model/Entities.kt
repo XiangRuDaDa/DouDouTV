@@ -132,7 +132,13 @@ data class MediaEntity(
      * 整库递归查询不返回 ParentId，故同步时逐库 ParentId 拉取并在此打标。
      */
     val libraryId: String = "",
-    val libraryName: String = ""
+    val libraryName: String = "",
+
+    /**
+     * 手动配置的片头时长（毫秒），只写在剧集壳行上，全剧生效、每部剧只配一次。
+     * 0 表示未配置；优先级：本字段 > 协议 skips > 不跳。
+     */
+    val introSkipMs: Long = 0L
 ) {
     /**
      * 所属剧集名，只在内存里填，不落库。

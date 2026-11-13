@@ -12,7 +12,7 @@ import com.chen.doudoutv.data.model.SourceEntity
 
 @Database(
     entities = [SourceEntity::class, MediaEntity::class, HotTitleEntity::class, ScrapedMetaEntity::class],
-    version = 13,
+    version = 14,
     // schema 落档到 app/schemas/：以后加索引之类的改动能用 Room 的自动迁移，
     // 也能拿历史 JSON 对比出漏写的迁移
     exportSchema = true
@@ -101,6 +101,16 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v13 → v14：新增 introSkipMs 列（手动配置的片头时长，毫秒）。
+         * 只写在剧集壳行上，全剧生效；0 表示未配置。ADD COLUMN 增量迁移，老数据默认 0。
+         */
+        private val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE media ADD COLUMN introSkipMs INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -174,7 +184,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(
                         MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
                         MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11,
-                        MIGRATION_11_12, MIGRATION_12_13
+                        MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14
                     )
                     // 这里刻意不调 fallbackToDestructiveMigration()：
                     // 它会在「漏写某段迁移」时静默整库重建，观看进度和收藏全丢且没有任何迹象，
