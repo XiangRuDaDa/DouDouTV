@@ -164,10 +164,11 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <TextView
+                <ImageView
                     android:id="@+id/doudou_play_pause"
-                    style="@style/PlayerPill"
-                    android:text="暂停" />
+                    style="@style/PlayerIcon"
+                    android:contentDescription="播放/暂停"
+                    android:src="@drawable/doudou_ic_pause" />
 
                 <TextView
                     android:id="@+id/doudou_prev_episode"
@@ -210,10 +211,13 @@
                     style="@style/PlayerPill"
                     android:text="适应" />
 
-                <TextView
+                <!-- 最右：全屏切换，方框图标 -->
+                <ImageView
                     android:id="@+id/doudou_orientation"
-                    style="@style/PlayerPill"
-                    android:text="全屏" />
+                    style="@style/PlayerIcon"
+                    android:layout_marginEnd="0dp"
+                    android:contentDescription="全屏切换"
+                    android:src="@drawable/doudou_ic_fullscreen" />
 
                 <!-- 以下 id 只作为 Media3 内部绑定的占位，不参与布局 -->
                 <ImageButton

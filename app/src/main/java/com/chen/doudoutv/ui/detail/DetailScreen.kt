@@ -92,6 +92,21 @@ import kotlinx.coroutines.withContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
+ * 详情页控件的磨砂材质。
+ *
+ * 页面底是海报暗调渐变（下半屏亮度只有 0.14~0.34），实心的 Surface/SurfaceHi
+ * 铺上去和背景几乎同色，按钮看着就是一块块黑。这里统一改用半透明白磨砂 + 发丝描边：
+ * 比全局玻璃档（13%/7%）再亮一档，保证在任何色调的页面底上都能读出边界。
+ */
+private val DetailGlassStops = listOf(
+    Color.White.copy(alpha = 0.16f),
+    Color.White.copy(alpha = 0.08f)
+)
+private val DetailGlassEdge: Brush = Brush.verticalGradient(
+    listOf(Color.White.copy(alpha = 0.32f), Color.White.copy(alpha = 0.15f))
+)
+
+/**
  * 剧集/电影详情页（沉浸式头图形态）。
  *
  * 结构自上而下：
@@ -594,12 +609,12 @@ fun DetailScreen(
                                             ButtonMaterial.primaryStops(AppColors.Brand, AppColors.BrandSoft)
                                         )
                                     } else {
-                                        Brush.verticalGradient(ButtonMaterial.glassStops())
+                                        Brush.verticalGradient(DetailGlassStops)
                                     }
                                 )
                                 .border(
                                     1.dp,
-                                    if (fav) ButtonMaterial.highlightEdge else ButtonMaterial.glassEdge,
+                                    if (fav) ButtonMaterial.highlightEdge else DetailGlassEdge,
                                     Radius.Md
                                 )
                         ) {
@@ -724,8 +739,14 @@ fun DetailScreen(
                                     colors = FilterChipDefaults.filterChipColors(
                                         selectedContainerColor = AppColors.Brand,
                                         selectedLabelColor = Color.White,
-                                        containerColor = AppColors.SurfaceHi,
+                                        containerColor = Color.White.copy(alpha = 0.10f),
                                         labelColor = AppColors.TextSecondary
+                                    ),
+                                    border = FilterChipDefaults.filterChipBorder(
+                                        enabled = true,
+                                        selected = selectedSeason == s,
+                                        borderColor = Color.White.copy(alpha = 0.28f),
+                                        selectedBorderColor = Color.Transparent
                                     )
                                 )
                             }
@@ -758,17 +779,34 @@ fun DetailScreen(
                             // 配置写在剧集壳行上：全剧生效、每部剧只配一次。
                             if (Prefs.skipIntroEnabled && item.seriesKey.isNotBlank()) {
                                 val introMs = item.introSkipMs
+                                val brand = AppColors.Brand
                                 Text(
                                     text = if (introMs > 0) "跳过片头 · ${fmtIntroMs(introMs)}"
                                     else "跳过片头 · 关",
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = if (introMs > 0) AppColors.Brand else AppColors.TextSecondary,
+                                    color = if (introMs > 0) brand else AppColors.TextSecondary,
                                     modifier = Modifier
                                         .padding(start = 10.dp)
                                         .clip(Radius.Pill)
                                         .background(
-                                            if (introMs > 0) AppColors.Brand.copy(alpha = 0.16f)
-                                            else AppColors.SurfaceHi
+                                            if (introMs > 0) {
+                                                Brush.verticalGradient(
+                                                    listOf(brand.copy(alpha = 0.28f), brand.copy(alpha = 0.14f))
+                                                )
+                                            } else {
+                                                Brush.verticalGradient(DetailGlassStops)
+                                            }
+                                        )
+                                        .border(
+                                            1.dp,
+                                            if (introMs > 0) {
+                                                Brush.verticalGradient(
+                                                    listOf(brand.copy(alpha = 0.70f), brand.copy(alpha = 0.35f))
+                                                )
+                                            } else {
+                                                DetailGlassEdge
+                                            },
+                                            Radius.Pill
                                         )
                                         .clickable { showSkipSheet = true }
                                         .padding(horizontal = 10.dp, vertical = 5.dp)
@@ -819,8 +857,14 @@ fun DetailScreen(
                                         colors = FilterChipDefaults.filterChipColors(
                                             selectedContainerColor = AppColors.Brand,
                                             selectedLabelColor = Color.White,
-                                            containerColor = AppColors.SurfaceHi,
+                                            containerColor = Color.White.copy(alpha = 0.10f),
                                             labelColor = AppColors.TextSecondary
+                                        ),
+                                        border = FilterChipDefaults.filterChipBorder(
+                                            enabled = true,
+                                            selected = selectedPlaySource == src,
+                                            borderColor = Color.White.copy(alpha = 0.28f),
+                                            selectedBorderColor = Color.Transparent
                                         )
                                     )
                                 }
@@ -977,7 +1021,7 @@ internal fun fmtIntroMs(ms: Long): String {
 @Composable
 private fun SkipIntroSheet(currentMs: Long, onDismiss: () -> Unit, onPick: (Long) -> Unit) {
     val presets = listOf(0L to "不跳", 30_000L to "30s", 60_000L to "60s", 90_000L to "90s",
-        120_000L to "120s", 150_000L to "150s", 180_000L to "180s")
+        120_000L to "120s", 150_000L to "150s")
     var custom by remember { mutableStateOf("") }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1176,7 +1220,8 @@ private fun EpisodeCard(
             modifier = modifier
                 .fillMaxWidth()
                 .clip(shape)
-                .background(AppColors.Surface)
+                .background(Brush.verticalGradient(DetailGlassStops))
+                .border(1.dp, DetailGlassEdge, shape)
                 .then(if (focused) Modifier.border(2.dp, AppColors.Brand, shape) else Modifier)
                 .clickable(interactionSource = interaction, indication = null, onClick = onClick)
                 .focusable()
@@ -1190,7 +1235,8 @@ private fun EpisodeCard(
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
-            .background(AppColors.Surface)
+            .background(Brush.verticalGradient(DetailGlassStops))
+            .border(1.dp, DetailGlassEdge, shape)
             .then(if (focused) Modifier.border(2.dp, AppColors.Brand, shape) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .focusable()

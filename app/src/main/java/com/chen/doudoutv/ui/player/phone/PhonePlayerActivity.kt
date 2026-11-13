@@ -8,6 +8,7 @@ import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -19,6 +20,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ProgressBar
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -44,6 +46,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -74,6 +77,7 @@ import com.chen.doudoutv.data.tvbox.TvBoxClient
 import com.chen.doudoutv.player.PlayerFactory
 import com.chen.doudoutv.ui.components.AppButton
 import com.chen.doudoutv.ui.components.AppButtonVariant
+import com.chen.doudoutv.player.DownloadMeter
 import com.chen.doudoutv.ui.components.usesSourceEpisodeName
 import com.chen.doudoutv.ui.detail.fmtIntroMs
 import com.chen.doudoutv.ui.player.SkipJumpController
@@ -172,6 +176,15 @@ class PhonePlayerActivity : ComponentActivity() {
     private var bufferHint by mutableStateOf<String?>(null)
     private var bufferJob: Job? = null
 
+    /** 缓冲下载速度（字节/秒），-1 表示还没算出来 */
+    private var downloadBps = -1L
+
+    /** 网速采样窗口起点（SystemClock） */
+    private var speedWindowAt = 0L
+
+    /** 网速采样窗口起点累计字节 */
+    private var speedWindowBytes = 0L
+
     private var speedState by mutableStateOf(1f)
 
     /** 0=适应 1=铺满 2=缩放 */
@@ -191,11 +204,11 @@ class PhonePlayerActivity : ComponentActivity() {
     private var titleView: TextView? = null
     private var speedView: TextView? = null
     private var aspectView: TextView? = null
-    private var orientationView: TextView? = null
+    private var orientationView: ImageView? = null
     private var prevEpisodeView: TextView? = null
     private var nextEpisodeView: TextView? = null
     private var episodesView: TextView? = null
-    private var playPauseView: TextView? = null
+    private var playPauseView: ImageView? = null
 
     /** 功能栏「设片头」按钮（剧集 + 全局开关开启才显示） */
     private var introView: TextView? = null
@@ -235,6 +248,13 @@ class PhonePlayerActivity : ComponentActivity() {
 
         setContent {
             DouDouTvTheme {
+                // toast 显示 2.5 秒后自动消失，不再常驻画面
+                LaunchedEffect(toastState) {
+                    if (toastState != null) {
+                        delay(2_500L)
+                        toastState = null
+                    }
+                }
                 PlayerScreen(
                     toast = toastState,
                     seekPreview = seekPreview,
@@ -349,7 +369,7 @@ class PhonePlayerActivity : ComponentActivity() {
         titleView?.text = titleState
         speedView?.text = formatSpeed(speedState)
         aspectView?.text = aspectLabel()
-        orientationView?.text = orientationLabel()
+        orientationView?.setImageResource(orientationIcon())
         updatePlayPauseLabel()
 
         view.findViewById<View>(R.id.doudou_back).setOnClickListener { finish() }
@@ -436,10 +456,12 @@ class PhonePlayerActivity : ComponentActivity() {
         }
     }
 
-    /** 更新底部播放暂停按钮文字 */
+    /** 更新底部播放暂停按钮图标 */
     private fun updatePlayPauseLabel() {
         val p = player ?: return
-        playPauseView?.text = if (p.isPlaying) "暂停" else "播放"
+        playPauseView?.setImageResource(
+            if (p.isPlaying) R.drawable.doudou_ic_pause else R.drawable.doudou_ic_play
+        )
     }
 
     /**
@@ -1157,8 +1179,10 @@ class PhonePlayerActivity : ComponentActivity() {
         else -> "适应"
     }
 
-    private fun orientationLabel(): String =
-        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "小屏" else "全屏"
+    private fun orientationIcon(): Int =
+        if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+            R.drawable.doudou_ic_fullscreen_exit
+        else R.drawable.doudou_ic_fullscreen
 
     private fun formatSpeed(speed: Float): String =
         if (speed == speed.toInt().toFloat()) "${speed.toInt()}.0x" else "${speed}x"
@@ -1192,7 +1216,7 @@ class PhonePlayerActivity : ComponentActivity() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        orientationView?.text = orientationLabel()
+        orientationView?.setImageResource(orientationIcon())
         // 转屏后窗口尺寸 / inset 变化，必须重新应用沉浸式，
         // 否则可能残留旧的 cutout 留边，画面看起来偏了。
         enterImmersive()
@@ -1288,7 +1312,7 @@ class PhonePlayerActivity : ComponentActivity() {
     /**
      * 缓冲状态下开始/停止 500ms 轮询。
      * 手机端没有 TV 端那样的常驻进度 ticker（控制条自己刷），所以缓冲期间临时起一个循环，
-     * 让「已缓冲 X 秒」是活的而不是进门时的一次性快照。
+     * 让「下载速度」是活的而不是进门时的一次性快照。
      */
     private fun watchBuffering() {
         val p = player ?: return
@@ -1301,10 +1325,15 @@ class PhonePlayerActivity : ComponentActivity() {
         }
         bufferHint = buildBufferHint(p)
         if (bufferJob?.isActive == true) return
+        // 新一轮缓冲重新起算网速窗口，避免把上一轮的字节算进来
+        speedWindowAt = 0L
+        downloadBps = -1L
         bufferJob = lifecycleScope.launch {
             while (true) {
                 delay(500)
                 val cur = player ?: break
+                // 与 TV 端同款：每攒满 1 秒刷新一次实测下载速度
+                sampleDownloadSpeed()
                 val hint = buildBufferHint(cur)
                 bufferHint = hint
                 if (hint == null) break
@@ -1317,13 +1346,41 @@ class PhonePlayerActivity : ComponentActivity() {
     private fun buildBufferHint(p: Player): String? {
         if (p.playbackState != Player.STATE_BUFFERING) return null
         if (!p.playWhenReady) return null
-        val bufferedSec = (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L) / 1000
+        val speedText = if (downloadBps < 0L) "测速中" else fmtSpeed(downloadBps)
         val bps = videoBitrateBps(p)
         return if (bps > 0) {
-            "缓冲中 · 已缓冲 ${bufferedSec}s · 这条流 ${"%.1f".format(bps / 1_000_000.0)} Mbps"
+            "缓冲中 · 下载 $speedText · 这条流 ${"%.1f".format(bps / 1_000_000.0)} Mbps"
         } else {
-            "缓冲中 · 已缓冲 ${bufferedSec}s"
+            "缓冲中 · 下载 $speedText"
         }
+    }
+
+    /**
+     * 每攒满 1 秒刷新一次实测网速（与 TV 端同款窗口算法）。
+     * 只读 [DownloadMeter] 的累计值，不干扰播放器；取不到增量时保留上一次的值，
+     * 避免 500ms 轮询把数字刷成 0 造成视觉抖动。
+     */
+    private fun sampleDownloadSpeed() {
+        val now = SystemClock.elapsedRealtime()
+        val bytes = DownloadMeter.totalBytes
+        if (speedWindowAt == 0L) {
+            speedWindowAt = now
+            speedWindowBytes = bytes
+            return
+        }
+        val elapsed = now - speedWindowAt
+        if (elapsed < 1_000L) return
+        val delta = bytes - speedWindowBytes
+        if (delta > 0L) {
+            downloadBps = delta * 1000L / elapsed
+            speedWindowAt = now
+            speedWindowBytes = bytes
+        }
+    }
+
+    private fun fmtSpeed(bytesPerSec: Long): String = when {
+        bytesPerSec >= 1_000_000L -> "%.1f MB/s".format(bytesPerSec / 1_000_000.0)
+        else -> "%.0f KB/s".format(bytesPerSec / 1024.0)
     }
 
     /** 当前视频轨的声明码率（bit/s）；容器没写或还拿不到轨信息时返回 0 */
@@ -1519,9 +1576,11 @@ private fun PlayerScreen(
         }
 
         if (!toast.isNullOrBlank()) {
+            // toast 显示在视频上部，外层 2.5 秒后自动清除
             Box(
                 Modifier
-                    .align(Alignment.Center)
+                    .align(Alignment.TopCenter)
+                    .padding(top = 72.dp)
                     .background(Color.Black.copy(alpha = 0.72f), Radius.Md)
                     .padding(horizontal = 18.dp, vertical = 12.dp)
             ) {
@@ -1540,7 +1599,7 @@ private fun PlayerScreen(
             ) {
                 Text(
                     buffering,
-                    color = Color(0xFFFFC46B),
+                    color = Color.White,
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold
                 )

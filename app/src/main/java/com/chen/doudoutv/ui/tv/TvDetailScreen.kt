@@ -136,7 +136,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
  *   · 因此不存在「按下键解锁剧情」「按上键把选集收掉」这两种模态行为：
  *     上键永远只回上一个区域，内容不会消失；
  *   · 只读区块（简介、导演、署名）不接收焦点，下键会直接跳过它们；
- *     主演行是例外：Emby / TMDB 带演员照片，头像本身是可聚焦的一站 ——
+ *     主演行是例外：头像（照片或姓名首字占位）本身是可聚焦的一站 ——
  *     电视上没有滚轮，焦点走不到的内容就等于看不到，尤其电影没有分集可落；
  *   · 主演排在选集之后（整页最后一层）：进详情先看剧情与选集，
  *     选集末行按下即落到主演头像行；导演与 TMDB 署名仍留在选集之前，
@@ -237,6 +237,8 @@ fun TvDetailScreen(
     val playFocusRequester = remember { FocusRequester() }
     val controlsFocusRequester = remember { FocusRequester() }
     val firstEpFocusRequester = remember { FocusRequester() }
+    /** 翻页行（网盘下方、剧集右上）首颗按钮的焦点器：控制条 ↓ / 网格首行 ↑ 都经过它 */
+    val pageFocusRequester = remember { FocusRequester() }
     // 滚动状态提到抢焦之前建：入口抢焦要在焦点落定后把首屏构图压回顶部
     val scrollState = rememberScrollState()
 
@@ -257,6 +259,7 @@ fun TvDetailScreen(
         playFocusRequester -> "play"
         favoriteFocusRequester -> "favorite"
         controlsFocusRequester -> "controls"
+        pageFocusRequester -> "page"
         firstEpFocusRequester -> "ep-first"
         else -> "cell"
     }
@@ -540,25 +543,20 @@ fun TvDetailScreen(
 
     val item = media
 
-    // 主演名单：Emby 刮削优先、TMDB 补齐，最后才回落到源自己给的 vod_actor。
-    // 取前 5 位（电视一行放得下的量）。
+    // 主演名单源数据：Emby 刮削优先、TMDB 补齐，最后才回落到源自己给的 vod_actor。
     val sourceActorNames = splitCastNames(item?.actors.orEmpty())
-    val actorNames = remember(scraped, tmdb, sourceActorNames) {
-        val fromEmby = scraped?.actors?.map { it.name }?.takeIf { it.isNotEmpty() }
-        val fromTmdb = tmdb?.actors?.map { it.name }?.takeIf { it.isNotEmpty() }
-        val fromSource = sourceActorNames.takeIf { it.isNotEmpty() }
-        (fromEmby ?: fromTmdb ?: fromSource).orEmpty().distinct().take(5)
-    }
     /**
-     * 带头像的主演行：只有 Emby / TMDB 这两路数据给演员照片（CatVod 协议本来就只有姓名）。
-     * 有照片就铺一排头像，没有才退回主演文字行 —— 两条路径互斥，不会同屏重复列一遍名字。
+     * 主演头像行：Emby / TMDB 给演员照片就铺照片头像；
+     * TVBox（CatVod 协议只有姓名）没有照片，用姓名首字的圆形占位头像顶上，
+     * 与手机端详情页主演行同口径 —— 不再退回纯文字行。
      */
-    val tvCast = remember(scraped, tmdb) {
+    val tvCast = remember(scraped, tmdb, sourceActorNames) {
         val fromEmby = scraped?.actors?.takeIf { it.isNotEmpty() }
             ?.map { TvCast(it.name, it.role, it.imageUrl) }
         val fromTmdb = tmdb?.actors?.takeIf { it.isNotEmpty() }
             ?.map { TvCast(it.name, it.role, it.imageUrl) }
-        (fromEmby ?: fromTmdb).orEmpty()
+        val fromSource = sourceActorNames.map { TvCast(it, "", "") }
+        (fromEmby ?: fromTmdb ?: fromSource)
             .filter { it.name.isNotBlank() }
             .distinctBy { it.name }
             .take(6)
@@ -592,11 +590,14 @@ fun TvDetailScreen(
     val skipPillVisible = media?.let {
         Prefs.skipIntroEnabled && it.kind == MediaKind.SERIES && it.seriesKey.isNotBlank()
     } == true
-    /** 选集控制条只有在「多源」「多季」「多页」或「有跳过片头胶囊」时才存在：
-     *  它是网格首行上键的落点，所以条件必须和上面控制条的显示条件完全一致，
-     *  否则翻页按钮会变成按不到的孤立节点。
-     *  controlsFocusRequester 按「源首颗 → 季首颗 → 上一页 → 跳过片头胶囊」的顺序只挂一颗。 */
-    val hasControlAnchor = playSources.size > 1 || tvSeasons.size > 1 || totalPages > 1 || skipPillVisible
+    /** 翻页行：多页时独立成一行，排在控制条下方、剧集网格右上方。
+     *  位置固定，不随每页集数浮动，遥控落点有肌肉记忆。 */
+    val hasPageRow = totalPages > 1
+    /** 选集控制条只有在「多源」「多季」或「有跳过片头胶囊」时才存在：
+     *  它是网格首行上键的落点之一，所以条件必须和上面控制条的显示条件完全一致，
+     *  否则按钮会变成按不到的孤立节点。
+     *  controlsFocusRequester 按「源首颗 → 季首颗 → 跳过片头胶囊」的顺序只挂一颗。 */
+    val hasControlAnchor = playSources.size > 1 || tvSeasons.size > 1 || skipPillVisible
 
     // 换季 / 换源 / 翻页会换掉整组卡片，但按键落点在控制条上，控制条本身不随内容变化消失，
     // 焦点因此不会掉 —— 这里刻意不再做任何抢焦。
@@ -755,6 +756,7 @@ fun TvDetailScreen(
         val belowPlay: FocusRequester = when {
             descTruncated -> descFocusRequester
             hasEpisodes && hasControlAnchor -> controlsFocusRequester
+            hasEpisodes && hasPageRow -> pageFocusRequester
             hasEpisodes -> firstEpFocusRequester
             hasCast -> castFocusRequesters.first()
             else -> FocusRequester.Cancel
@@ -765,6 +767,7 @@ fun TvDetailScreen(
          */
         val belowDesc: FocusRequester = when {
             hasEpisodes && hasControlAnchor -> controlsFocusRequester
+            hasEpisodes && hasPageRow -> pageFocusRequester
             hasEpisodes -> firstEpFocusRequester
             hasCast -> castFocusRequesters.first()
             else -> FocusRequester.Cancel
@@ -775,7 +778,8 @@ fun TvDetailScreen(
          */
         val castUpTarget: FocusRequester =
             lastCellRequester.value?.takeIf { hasEpisodes }
-                ?: if (hasControlAnchor) controlsFocusRequester
+                ?: if (hasPageRow) pageFocusRequester
+                else if (hasControlAnchor) controlsFocusRequester
                 else if (descTruncated) descFocusRequester
                 else playFocusRequester
         /** 头像行的下一站：主演是整页最后一层，下面没有内容了 */
@@ -1092,8 +1096,8 @@ fun TvDetailScreen(
                                 contentPadding = PaddingValues(top = 16.dp, bottom = 6.dp)
                             )
 
-                            // 控制条：多源 / 多季 / 翻页 / 跳过片头胶囊。
-                            // 有源或季时它是「播放 ↔ 选集」之间的焦点站；只有翻页时不占焦点站。
+                            // 控制条：多源 / 多季 / 跳过片头胶囊（翻页已挪到下方独立行）。
+                            // 有源或季时它是「播放 ↔ 选集」之间的焦点站；只有翻页时交给翻页行。
                             if (hasControlAnchor) {
                                 Row(
                                     Modifier
@@ -1106,7 +1110,9 @@ fun TvDetailScreen(
                                         // ↑ 按版面顺序往回走：展开按钮 > 播放键
                                         // （主演已下移到选集之后，不再是控制条的上一站）
                                         up = if (descTruncated) descFocusRequester else playFocusRequester
-                                        down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
+                                        // ↓ 先落翻页行（多页时它在控制条与网格之间），没有就直接进网格
+                                        down = if (hasPageRow) pageFocusRequester
+                                            else if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
                                     }.then(publishStand(controlsFocusRequester, "controls"))
                                     // 播放源 / 云盘切换：多条源时展示，默认第一条
                                     if (playSources.size > 1) {
@@ -1153,49 +1159,6 @@ fun TvDetailScreen(
                                             )
                                         }
                                     }
-                                    if (totalPages > 1) {
-                                        TvPillButton(
-                                            text = "上一页",
-                                            icon = androidx.compose.material.icons.Icons.Filled.ChevronLeft,
-                                            primary = false,
-                                            // 单源单季但分集多页时，翻页按钮就是控制条的第一个元件。
-                                            // requester 得跟着挂到这里，否则网格首行的上键指向一个
-                                            // 没挂载的节点，按下去没反应、翻页按钮彻底进不去。
-                                            modifier = if (playSources.size <= 1 && tvSeasons.size <= 1) {
-                                                pillFocus.focusRequester(controlsFocusRequester)
-                                            } else pillFocus,
-                                            onClick = {
-                                                if (pageIndex > 0) {
-                                                    epPage = pageIndex - 1
-                                                }
-                                            }
-                                        )
-                                        Text(
-                                            "${pageIndex + 1} / $totalPages",
-                                            color = Color.White.copy(alpha = 0.55f),
-                                            style = MaterialTheme.typography.bodyMedium
-                                        )
-                                        TvPillButton(
-                                            text = "下一页",
-                                            trailingIcon = androidx.compose.material.icons.Icons.Filled.ChevronRight,
-                                            primary = false,
-                                            modifier = pillFocus,
-                                            onClick = {
-                                                if (pageIndex < totalPages - 1) {
-                                                    epPage = pageIndex + 1
-                                                }
-                                            }
-                                        )
-                                        // 末集直达：几百集的剧不用一路翻到底
-                                        TvPillButton(
-                                            text = "末集",
-                                            primary = false,
-                                            modifier = pillFocus,
-                                            onClick = {
-                                                epPage = totalPages - 1
-                                            }
-                                        )
-                                    }
                                     // 「跳过片头」胶囊：剧集 + 全局开关开启才出现，点击弹预设弹窗。
                                     // 配置写在剧集壳行上：全剧生效、每部剧只配一次。
                                     val skipShell = media
@@ -1205,14 +1168,71 @@ fun TvDetailScreen(
                                                 "跳过片头 ${fmtIntroMs(skipShell.introSkipMs)}"
                                             else "跳过片头 · 关",
                                             primary = skipShell.introSkipMs > 0,
-                                            // 单源单季单页时胶囊就是控制条唯一元件，锚点得跟着挂到它，
-                                            // 否则网格首行的上键指向一个没挂载的节点。
-                                            modifier = if (playSources.size <= 1 && tvSeasons.size <= 1 && totalPages <= 1) {
+                                            // 单源单季时胶囊就是控制条唯一元件，锚点得跟着挂到它，
+                                            // 否则控制条的上键落点指向一个没挂载的节点。
+                                            modifier = if (playSources.size <= 1 && tvSeasons.size <= 1) {
                                                 pillFocus.focusRequester(controlsFocusRequester)
                                             } else pillFocus,
                                             onClick = { showSkipDialog = true }
                                         )
                                     }
+                                }
+                            }
+
+                            // ---------- 翻页行：网盘下方、剧集网格右上方 ----------
+                            // 位置固定，不随每页集数浮动；上一页 / 页码 / 下一页 / 末集整组都在这一行。
+                            if (hasPageRow) {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                                ) {
+                                    val pageFocus = Modifier.focusProperties {
+                                        // ↑ 有控制条回控制条，没有按版面顺序回展开按钮 / 播放键
+                                        up = if (hasControlAnchor) controlsFocusRequester
+                                            else if (descTruncated) descFocusRequester
+                                            else playFocusRequester
+                                        down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
+                                    }.then(publishStand(pageFocusRequester, "page"))
+                                    // 锚点挂首颗：上下键进这一行都落在「上一页」
+                                    TvPillButton(
+                                        text = "上一页",
+                                        icon = androidx.compose.material.icons.Icons.Filled.ChevronLeft,
+                                        primary = false,
+                                        modifier = pageFocus.focusRequester(pageFocusRequester),
+                                        onClick = {
+                                            if (pageIndex > 0) {
+                                                epPage = pageIndex - 1
+                                            }
+                                        }
+                                    )
+                                    Text(
+                                        "${pageIndex + 1} / $totalPages",
+                                        color = Color.White.copy(alpha = 0.55f),
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    TvPillButton(
+                                        text = "下一页",
+                                        trailingIcon = androidx.compose.material.icons.Icons.Filled.ChevronRight,
+                                        primary = false,
+                                        modifier = pageFocus,
+                                        onClick = {
+                                            if (pageIndex < totalPages - 1) {
+                                                epPage = pageIndex + 1
+                                            }
+                                        }
+                                    )
+                                    // 末集直达：几百集的剧不用一路翻到底
+                                    TvPillButton(
+                                        text = "末集",
+                                        primary = false,
+                                        modifier = pageFocus,
+                                        onClick = {
+                                            epPage = totalPages - 1
+                                        }
+                                    )
                                 }
                             }
 
@@ -1245,8 +1265,9 @@ fun TvDetailScreen(
                                             modifier = Modifier.width(EMBY_CARD_WIDTH)
                                                 .then(publishStand(cellTarget, "ep${ep.id}")),
                                             focusRequester = cellTarget,
-                                            // 单行货架：每格上键都回控制条（没有就展开按钮，再没有才播放）
-                                            focusUp = if (hasControlAnchor) controlsFocusRequester
+                                            // 单行货架：每格上键都回翻页行 / 控制条（没有就展开按钮，再没有才播放）
+                                            focusUp = if (hasPageRow) pageFocusRequester
+                                                else if (hasControlAnchor) controlsFocusRequester
                                                 else if (descTruncated) descFocusRequester
                                                 else playFocusRequester,
                                             // 每格下键都落主演头像行；没有主演就留在原地
@@ -1294,9 +1315,10 @@ fun TvDetailScreen(
                                             modifier = Modifier.weight(1f).then(publishStand(cellTarget, "ep${ep.id}")),
                                             // 首行第一格挂焦点器，「选择剧集」与换季/翻页后直接落这里
                                             focusRequester = cellTarget,
-                                            // 首行再按上：回控制条（没有就回展开按钮，再没有才回播放）
+                                            // 首行再按上：回翻页行 / 控制条（没有就回展开按钮，再没有才回播放）
                                             focusUp = if (rowIdx == 0) {
-                                                if (hasControlAnchor) controlsFocusRequester
+                                                if (hasPageRow) pageFocusRequester
+                                                else if (hasControlAnchor) controlsFocusRequester
                                                 else if (descTruncated) descFocusRequester
                                                 else playFocusRequester
                                             } else null,
@@ -1342,9 +1364,6 @@ fun TvDetailScreen(
                                 focusUp = castUpTarget,
                                 focusDown = castDownTarget
                             )
-                        } else if (actorNames.isNotEmpty()) {
-                            Spacer(Modifier.height(10.dp))
-                            TvInfoLine("主演", actorNames.joinToString(" / "))
                         }
                     }
                 }

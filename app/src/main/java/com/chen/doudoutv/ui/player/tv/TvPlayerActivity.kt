@@ -1260,7 +1260,9 @@ class TvPlayerActivity : ComponentActivity() {
             toast?.let {
                 Box(
                     Modifier
-                        .align(Alignment.Center)
+                        // 与手机端同口径：提示浮在画面上部，不挡正中画面
+                        .align(Alignment.TopCenter)
+                        .padding(top = 72.dp)
                         .background(Color.Black.copy(alpha = 0.74f), Radius.Md)
                         .padding(horizontal = 22.dp, vertical = 12.dp)
                 ) {
