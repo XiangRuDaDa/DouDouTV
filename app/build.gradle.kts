@@ -56,6 +56,13 @@ android {
         }
     }
 
+    lint {
+        // 本应用走 GitHub Releases / 侧载分发，不上 Google Play；
+        // targetSdk 28 是 TVBox 爬虫壳的硬要求（调高会破坏播放代理路径），
+        // Play 的目标 API 政策检查不适用。只关这一条，其余致命检查保留。
+        disable += "ExpiredTargetSdkVersion"
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
