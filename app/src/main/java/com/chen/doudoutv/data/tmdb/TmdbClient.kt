@@ -76,12 +76,18 @@ class TmdbClient(
      *              画质/集数这类运营后缀已经去掉；这里不再洗第二次）
      * @param year  年份，0 表示未知
      * @param kind  MediaKind.MOVIE / SERIES
+     * @param category 源分类推出的动画/真人剧类别，用于同名片挑对的那条
      */
-    suspend fun scrape(title: String, year: Int, kind: String): ScrapeResult? =
+    suspend fun scrape(
+        title: String,
+        year: Int,
+        kind: String,
+        category: Int = ScrapeCategory.UNKNOWN
+    ): ScrapeResult? =
         withContext(Dispatchers.IO) {
             if (!hasCredential || title.isBlank()) return@withContext null
 
-            val id = searchId(title, year, kind) ?: return@withContext null
+            val id = searchId(title, year, kind, category) ?: return@withContext null
             val isMovie = kind != "SERIES"
             val detailPath = if (isMovie) "/movie/$id" else "/tv/$id"
             // include_image_language 必须显式声明：TMDB 的 images 子对象默认只返回
@@ -140,8 +146,8 @@ class TmdbClient(
             )
         }
 
-    /** 搜索并返回最匹配的 TMDB id */
-    private fun searchId(title: String, year: Int, kind: String): Int? {
+    /** 搜索并返回最匹配的 TMDB id；已知类别时在前几条里优先挑类别相符的 */
+    private fun searchId(title: String, year: Int, kind: String, category: Int): Int? {
         val isMovie = kind != "SERIES"
         val path = if (isMovie) "/search/movie" else "/search/tv"
         val params = buildMap {
@@ -150,6 +156,24 @@ class TmdbClient(
         }
         val results = get(path, params)?.optJSONArray("results") ?: return null
         if (results.length() == 0) return null
+        // 同名消歧：「凡人修仙传」动画比剧版热门、常排第一，源分类已知时
+        // 在前 5 条里挑第一条 Animation(16) 标记相符的；都不符再回落第一条。
+        if (category != ScrapeCategory.UNKNOWN) {
+            for (i in 0 until minOf(results.length(), 5)) {
+                val obj = results.optJSONObject(i) ?: continue
+                val ids = obj.optJSONArray("genre_ids") ?: continue
+                var hasAnimation = false
+                for (j in 0 until ids.length()) {
+                    if (ids.optInt(j) == 16) {
+                        hasAnimation = true
+                        break
+                    }
+                }
+                if (ScrapeCategory.ofTmdbIds(hasAnimation) == category) {
+                    return obj.optInt("id").takeIf { it > 0 }
+                }
+            }
+        }
         // 取第一条（TMDB 按相关度排序）
         return results.optJSONObject(0)?.optInt("id")?.takeIf { it > 0 }
     }

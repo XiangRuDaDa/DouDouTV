@@ -99,9 +99,10 @@ interface ScrapedMetaDao {
      * 同名回落：清洗后同名、但源站给的年份不一致（一条线路填 2026、另一条填 0）时用最近一次结果。
      * 排序按 scrapedAt 而不是按年份差，是为了让「刚刮过的那条」赢 —— 年份差得再远也可能是同名老片，
      * 与其赌一个更近的年份，不如复用最新一次确认过的结果。
+     * 返回全部同名行：同名动画 / 剧版是两条，调用方按类别挑，不能只拿最新一条。
      */
-    @Query("SELECT * FROM scraped_meta WHERE titleKey = :titleKey ORDER BY scrapedAt DESC LIMIT 1")
-    suspend fun byTitleKey(titleKey: String): ScrapedMetaEntity?
+    @Query("SELECT * FROM scraped_meta WHERE titleKey = :titleKey ORDER BY scrapedAt DESC")
+    suspend fun byTitleKeyAll(titleKey: String): List<ScrapedMetaEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: ScrapedMetaEntity)

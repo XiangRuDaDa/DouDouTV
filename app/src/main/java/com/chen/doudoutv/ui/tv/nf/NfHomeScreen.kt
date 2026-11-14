@@ -129,7 +129,7 @@ fun NfHomeScreen(
         if (missing.isEmpty()) return@LaunchedEffect
         missing.map { item ->
             async(Dispatchers.IO) {
-                val bd = vm.tmdbCached(item.title, item.year, item.kind)?.backdropUrl
+                val bd = vm.tmdbCached(item.title, item.year, item.kind, item.genres)?.backdropUrl
                 item.id to if (!bd.isNullOrBlank() && bd != item.backdropUrl) bd else ""
             }
         }.awaitAll().forEach { (id, url) -> heroBackdropOverrides[id] = url }
@@ -186,6 +186,10 @@ fun NfHomeScreen(
     val heroEmptyFocus = remember { FocusRequester() }
     val standTarget = remember { StandTarget() }
     val continueFirstFocus = remember { FocusRequester() }
+    // 行入口锚点：挂在「继续观看」当前视口最左那张卡上（见 NfContinueRow）。
+    // 首卡 requester 在行右滚后会随首卡回收而脱挂，↓ 再按它就落空；
+    // 视口最左卡一定在组合里，拿它当入口才保证「离开再回来」永远有落点。
+    val continueRowEntry = remember { FocusRequester() }
     // 空态那颗 CTA 单独一个 requester：和首卡共用会在「数据到达」那一刻
     // 留下一个指向已销毁节点的旧 attach，requestFocus 不报错却什么都不做
     val continueEmptyFocus = remember { FocusRequester() }
@@ -249,12 +253,12 @@ fun NfHomeScreen(
      * 落不上再把列表滚到「继续观看」标题行、等一帧补抢。
      */
     val goToContinueRow: suspend () -> Unit = {
-        if (!tvMoveFocus(continueAnchor)) {
+        if (!tvMoveFocus(continueRowEntry, continueAnchor)) {
             listState.scrollToItem(if (hero != null) 2 else 1)
             withFrameNanos { }
-            if (!tvMoveFocus(continueAnchor)) {
+            if (!tvMoveFocus(continueRowEntry, continueAnchor)) {
                 delay(140)
-                tvMoveFocus(continueAnchor)
+                tvMoveFocus(continueRowEntry, continueAnchor)
             }
         }
     }
@@ -370,6 +374,7 @@ fun NfHomeScreen(
                                 rowKey = "continue_$sourceName",
                                 stand = standTarget,
                                 firstFocus = if (isFirstGroup) continueFirstFocus else FocusRequester(),
+                                entryFocus = if (isFirstGroup) continueRowEntry else null,
                                 upFocus = if (isFirstGroup && hero != null) heroPlayFocus else null,
                                 onDetail = onDetail,
                                 onPlay = onPlay,
@@ -438,6 +443,8 @@ private fun nfHeroCandidates(library: List<MediaEntity>, siteHomeItems: List<Med
  *
  * @param rowKey 唯一标识这一行（含来源名），避免多组共用同一个 ReturnSpot key
  * @param firstFocus 页面级首卡 requester（只给第一组第一张卡复用）
+ * @param entryFocus 行入口锚点：挂在视口最左那张卡上（首卡除外，它已有 firstFocus）。
+ *        行右滚后首卡被回收、firstFocus 脱挂，Hero 的 ↓ 靠这颗锚点才落得进来
  * @param upFocus 第一组专用：↑ 交 Hero 播放键；后面的组传 null，让 LazyColumn 自动处理纵向焦点
  */
 @Composable
@@ -446,6 +453,7 @@ private fun NfContinueRow(
     rowKey: String,
     stand: StandTarget,
     firstFocus: FocusRequester,
+    entryFocus: FocusRequester?,
     upFocus: FocusRequester?,
     onDetail: (Long) -> Unit,
     onPlay: (MediaEntity) -> Unit,
@@ -454,6 +462,8 @@ private fun NfContinueRow(
     val rowState = ReturnSpot.listState("$NfHomeKey/$rowKey", precompose = PrecomposeWindow.Tv)
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val cardWidth = (screenWidth * 0.30f).coerceIn(240.dp, 380.dp)
+    // 只在跨卡边界时变，读它不会把整行拖进逐帧重组
+    val firstVisible = rowState.firstVisibleItemIndex
     LazyRow(
         state = rowState,
         modifier = Modifier.fillMaxWidth(),
@@ -464,8 +474,13 @@ private fun NfContinueRow(
         itemsIndexed(items, key = { _, it -> "nf_continue_${it.id}" }, contentType = { _, _ -> "continue" }) { index, item ->
             val ownFocus = remember(item.id) { FocusRequester() }
             // 首卡不再另外挂第二个 requester：同一焦点节点挂两个在 1.6.8 上不可靠
-            // （见 ReturnSpot.cardStand 的注释），首卡的记账直接用页面级那一个
-            val cardFocus = if (index == 0) firstFocus else ownFocus
+            // （见 ReturnSpot.cardStand 的注释），首卡的记账直接用页面级那一个。
+            // 入口锚点同理独占一个节点：视口最左卡用它替换 ownFocus，而不是再叠一颗
+            val cardFocus = when {
+                index == 0 -> firstFocus
+                entryFocus != null && index == firstVisible -> entryFocus
+                else -> ownFocus
+            }
             val upModifier = if (upFocus != null) Modifier.nfFocusRoute(up = upFocus) else Modifier
             NfContinueCard(
                 item = item,

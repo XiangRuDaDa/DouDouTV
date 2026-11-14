@@ -823,7 +823,7 @@ fun NfPosterCard(
         Text(
             item.title,
             color = TvText.Section,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

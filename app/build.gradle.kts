@@ -30,7 +30,7 @@ android {
     defaultConfig {
         applicationId = "com.chen.doudoutv"
         minSdk = 21
-        targetSdk = 34
+        targetSdk = 28
         versionCode = 1
         versionName = "1.0.0"
 

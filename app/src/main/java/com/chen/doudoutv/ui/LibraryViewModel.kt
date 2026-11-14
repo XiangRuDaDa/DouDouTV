@@ -13,6 +13,7 @@ import com.chen.doudoutv.core.Prefs
 import com.chen.doudoutv.data.scrape.ScrapeStrategy
 import com.chen.doudoutv.data.MediaRepository
 import com.chen.doudoutv.data.emby.EmbyClient
+import com.chen.doudoutv.data.emby.EmbyMediaCache
 import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.data.model.MediaKind
 import com.chen.doudoutv.data.model.SourceEntity
@@ -996,9 +997,10 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
         title: String,
         year: Int,
         kind: String,
-        mediaId: Long = 0L
+        mediaId: Long = 0L,
+        genres: String = ""
     ): com.chen.doudoutv.data.tmdb.TmdbClient.ScrapeResult? =
-        repo.tmdbScrape(title, year, kind, mediaId)
+        repo.tmdbScrape(title, year, kind, mediaId, genres)
 
     /**
      * 只查刮削表、绝不联网的那一份：详情页首帧拿它抢在分集/详情那条慢链之前，
@@ -1007,8 +1009,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun tmdbCached(
         title: String,
         year: Int,
-        kind: String
-    ): com.chen.doudoutv.data.tmdb.TmdbClient.ScrapeResult? = repo.scrapedMetaOf(title, year, kind)
+        kind: String,
+        genres: String = ""
+    ): com.chen.doudoutv.data.tmdb.TmdbClient.ScrapeResult? = repo.scrapedMetaOf(title, year, kind, genres)
 
     /** 清空刮削缓存，返回被清掉的缓存条目数 */
     suspend fun clearScrapeCache(): Int = repo.clearScrapeCache()
@@ -1126,6 +1129,9 @@ class LibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun episodesOf(seriesKey: String): List<MediaEntity> = repo.episodes(seriesKey)
+
+    /** 分集媒体流信息（内存缓存）：详情拉分集时写入，面板按 remoteId 读；没有返回 null */
+    fun embyMediaInfoOf(remoteId: String): EmbyClient.MediaInfo? = EmbyMediaCache.get(remoteId)
 
     /** 分集行所属的剧集壳：详情页把「继续观看」的分集记录换成整部剧来展示 */
     suspend fun shellOf(seriesKey: String): MediaEntity? = repo.shellOf(seriesKey)

@@ -23,7 +23,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -63,6 +65,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -237,8 +240,10 @@ fun TvDetailScreen(
     val playFocusRequester = remember { FocusRequester() }
     val controlsFocusRequester = remember { FocusRequester() }
     val firstEpFocusRequester = remember { FocusRequester() }
-    /** 翻页行（网盘下方、剧集右上）首颗按钮的焦点器：控制条 ↓ / 网格首行 ↑ 都经过它 */
+    /** 翻页行（剧集网格右下角）首颗按钮的焦点器：网格末行 ↓ / 主演 ↑ 都经过它 */
     val pageFocusRequester = remember { FocusRequester() }
+    /** 视频信息面板（整页最后一站）：主演 ↓ 落这里，面板 ↑ 回主演 */
+    val mediaInfoFocusRequester = remember { FocusRequester() }
     // 滚动状态提到抢焦之前建：入口抢焦要在焦点落定后把首屏构图压回顶部
     val scrollState = rememberScrollState()
 
@@ -307,7 +312,7 @@ fun TvDetailScreen(
     LaunchedEffect(mediaId, seedMedia?.title, seedMedia?.year, seedMedia?.kind) {
         val seed = seedMedia ?: return@LaunchedEffect
         if (seed.kind == MediaKind.EPISODE) return@LaunchedEffect
-        if (tmdb == null) tmdb = vm.tmdbCached(seed.title, seed.year, seed.kind)
+        if (tmdb == null) tmdb = vm.tmdbCached(seed.title, seed.year, seed.kind, seed.genres)
     }
 
     LaunchedEffect(mediaId) {
@@ -417,7 +422,7 @@ fun TvDetailScreen(
             // 和凭据决定要不要发请求。这里再拦一道开关，会把已经刮到、躺在表里的数据一起藏掉。
             // 只在刮到东西时覆盖：上面那个只读表的抢跑已经摆好了图，这里失败不能把它擦回老封面。
             runCatching {
-                vm.tmdbScrape(latest.title, latest.year, latest.kind, id)
+                vm.tmdbScrape(latest.title, latest.year, latest.kind, id, latest.genres)
             }.getOrNull()?.let { tmdb = it }
             // 刮削会把海报/Logo 回填进库，取回最新的再渲染
             vm.mediaOf(id)?.let { media = it }
@@ -427,6 +432,14 @@ fun TvDetailScreen(
         } finally {
             loading = false
         }
+    }
+
+    // 播放器「设片头」写的是壳行，而正常进出播放器这棵子树不销毁、上面那条加载链不会重跑，
+    // 胶囊会停在进页时的旧值。回前台时把当前展示的这一行重读一次。
+    LaunchedEffect(resumeTick) {
+        if (resumeTick == 0) return@LaunchedEffect
+        val id = media?.id ?: return@LaunchedEffect
+        vm.mediaOf(id)?.let { media = it }
     }
 
     /**
@@ -585,12 +598,20 @@ fun TvDetailScreen(
     LaunchedEffect(pageIndex, selectedSeason, isEmbySource) {
         if (isEmbySource) embyRowState.scrollToItem(0)
     }
+    /** 焦点停在货架哪一集：下方视频信息面板跟着它走；离开货架保留最后一集 */
+    var focusedEpId by remember(mediaId) { mutableStateOf(0L) }
+    // 面板跟焦：优先焦点所在集，其次接址那一集，最后本页首集
+    val infoEpisode = pagedEpisodes.firstOrNull { it.id == focusedEpId }
+        ?: pagedEpisodes.firstOrNull { it.id == recallEpisodeId }
+        ?: pagedEpisodes.firstOrNull()
+    val episodeMediaInfo = if (isEmbySource) infoEpisode?.let { vm.embyMediaInfoOf(it.remoteId) } else null
+    val hasMediaInfoPanel = episodeMediaInfo != null && infoEpisode != null
     val hasEpisodes = episodes.isNotEmpty()
     /** 「跳过片头」胶囊：剧集壳 + 全局开关开启才出现在控制条末尾 */
     val skipPillVisible = media?.let {
         Prefs.skipIntroEnabled && it.kind == MediaKind.SERIES && it.seriesKey.isNotBlank()
     } == true
-    /** 翻页行：多页时独立成一行，排在控制条下方、剧集网格右上方。
+    /** 翻页行：多页时独立成一行，排在剧集网格右下角、主演之上。
      *  位置固定，不随每页集数浮动，遥控落点有肌肉记忆。 */
     val hasPageRow = totalPages > 1
     /** 选集控制条只有在「多源」「多季」或「有跳过片头胶囊」时才存在：
@@ -705,19 +726,16 @@ fun TvDetailScreen(
         val contentAnchor = remember { BringIntoViewRequester() }
 
         /**
-         * 一次下键的完整转场：内容块顶部对齐 → 焦点交给 [target]。
+         * 一次下键的完整转场：焦点交给 [target]，滚动只走 requestFocus 自带的那一次
+         * bring-into-view（最小滚动到落点可见）。落定后简介与选集首行天然同屏。
          *
-         * 只依赖焦点的自动 brings-into-view，视口会「最小滚动」，落点虽然露出来了，
-         * 简介顶部却常常被切掉；先把内容锚点滚到顶部再聚焦，才能稳定做到
-         * 「一屏看到简介 + 选集首行」，这也是「一次下键看全」的关键。
+         * 以前这里先 contentAnchor.bringIntoView() 把内容顶对齐视口、再靠焦点补滚：
+         * 同一次按键滚两段动画（真机轨迹 0→694→1099），观感就是画面跳两次。
+         * 对齐那一步是多余的 —— 最小滚动落定后内容顶本来就在视口里。
          */
         fun enterEpisodeSection(target: FocusRequester) {
-            scope.launch {
-                runCatching { contentAnchor.bringIntoView() }
-                withFrameNanos { }
-                // 控制条这次没渲染出来（单源单季单页）时退回网格首格
-                tvMoveFocus(target, firstEpFocusRequester)
-            }
+            // 控制条这次没渲染出来（单源单季单页）时退回网格首格
+            tvMoveFocus(target, firstEpFocusRequester)
         }
 
         /**
@@ -756,7 +774,6 @@ fun TvDetailScreen(
         val belowPlay: FocusRequester = when {
             descTruncated -> descFocusRequester
             hasEpisodes && hasControlAnchor -> controlsFocusRequester
-            hasEpisodes && hasPageRow -> pageFocusRequester
             hasEpisodes -> firstEpFocusRequester
             hasCast -> castFocusRequesters.first()
             else -> FocusRequester.Cancel
@@ -767,7 +784,6 @@ fun TvDetailScreen(
          */
         val belowDesc: FocusRequester = when {
             hasEpisodes && hasControlAnchor -> controlsFocusRequester
-            hasEpisodes && hasPageRow -> pageFocusRequester
             hasEpisodes -> firstEpFocusRequester
             hasCast -> castFocusRequesters.first()
             else -> FocusRequester.Cancel
@@ -777,13 +793,14 @@ fun TvDetailScreen(
          * 网格还没组合出来时（首帧）退回控制条，不能指向没挂载的节点。
          */
         val castUpTarget: FocusRequester =
-            lastCellRequester.value?.takeIf { hasEpisodes }
-                ?: if (hasPageRow) pageFocusRequester
-                else if (hasControlAnchor) controlsFocusRequester
+            if (hasPageRow) pageFocusRequester
+            else lastCellRequester.value?.takeIf { hasEpisodes }
+                ?: if (hasControlAnchor) controlsFocusRequester
                 else if (descTruncated) descFocusRequester
                 else playFocusRequester
-        /** 头像行的下一站：主演是整页最后一层，下面没有内容了 */
-        val castDownTarget: FocusRequester = FocusRequester.Cancel
+        /** 头像行的下一站：有视频信息面板时它是整页最后一站，没有则主演收尾 */
+        val castDownTarget: FocusRequester =
+            if (hasMediaInfoPanel) mediaInfoFocusRequester else FocusRequester.Cancel
         /** 展开按钮的上一站：它紧贴简介，往上就是播放键 */
         val descUpTarget: FocusRequester = playFocusRequester
 
@@ -1037,9 +1054,8 @@ fun TvDetailScreen(
                             )
 
                             // ---------- 展开 / 收起简介：只读区里唯一的焦点站 ----------
-                            // 聚焦它时把内容块顶部对齐视口：电视上没有滚轮，只读的导演 / 主演一旦被
-                            // 顶到视口外就再也滚不到（Emby 电影没有分集，这里往下就是末站）。
-                            // 展开态不做这个对齐：那时按钮自己得留在视口里，才按得到「收起」。
+                            // 聚焦不做额外对齐：requestFocus 自带的最小滚动已够，再补一次对齐会和它
+                            // 打架形成回弹（选择剧集→展开更多跳两次）。展开 / 收起仍对齐到简介首行。
                             if (descTruncated) {
                                 Spacer(Modifier.height(12.dp))
                                 TvPillButton(
@@ -1048,11 +1064,6 @@ fun TvDetailScreen(
                                     size = TvButtonSize.Md,
                                     modifier = Modifier
                                         .focusRequester(descFocusRequester)
-                                        .onFocusChanged {
-                                            if (it.isFocused && !descExpanded) {
-                                                scope.launch { runCatching { contentAnchor.bringIntoView() } }
-                                            }
-                                        }
                                         .focusProperties {
                                             up = descUpTarget
                                             down = belowDesc
@@ -1110,9 +1121,7 @@ fun TvDetailScreen(
                                         // ↑ 按版面顺序往回走：展开按钮 > 播放键
                                         // （主演已下移到选集之后，不再是控制条的上一站）
                                         up = if (descTruncated) descFocusRequester else playFocusRequester
-                                        // ↓ 先落翻页行（多页时它在控制条与网格之间），没有就直接进网格
-                                        down = if (hasPageRow) pageFocusRequester
-                                            else if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
+                                        down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
                                     }.then(publishStand(controlsFocusRequester, "controls"))
                                     // 播放源 / 云盘切换：多条源时展示，默认第一条
                                     if (playSources.size > 1) {
@@ -1179,63 +1188,6 @@ fun TvDetailScreen(
                                 }
                             }
 
-                            // ---------- 翻页行：网盘下方、剧集网格右上方 ----------
-                            // 位置固定，不随每页集数浮动；上一页 / 页码 / 下一页 / 末集整组都在这一行。
-                            if (hasPageRow) {
-                                Row(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .padding(bottom = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
-                                ) {
-                                    val pageFocus = Modifier.focusProperties {
-                                        // ↑ 有控制条回控制条，没有按版面顺序回展开按钮 / 播放键
-                                        up = if (hasControlAnchor) controlsFocusRequester
-                                            else if (descTruncated) descFocusRequester
-                                            else playFocusRequester
-                                        down = if (hasEpisodes) firstEpFocusRequester else FocusRequester.Cancel
-                                    }.then(publishStand(pageFocusRequester, "page"))
-                                    // 锚点挂首颗：上下键进这一行都落在「上一页」
-                                    TvPillButton(
-                                        text = "上一页",
-                                        icon = androidx.compose.material.icons.Icons.Filled.ChevronLeft,
-                                        primary = false,
-                                        modifier = pageFocus.focusRequester(pageFocusRequester),
-                                        onClick = {
-                                            if (pageIndex > 0) {
-                                                epPage = pageIndex - 1
-                                            }
-                                        }
-                                    )
-                                    Text(
-                                        "${pageIndex + 1} / $totalPages",
-                                        color = Color.White.copy(alpha = 0.55f),
-                                        style = MaterialTheme.typography.bodyMedium
-                                    )
-                                    TvPillButton(
-                                        text = "下一页",
-                                        trailingIcon = androidx.compose.material.icons.Icons.Filled.ChevronRight,
-                                        primary = false,
-                                        modifier = pageFocus,
-                                        onClick = {
-                                            if (pageIndex < totalPages - 1) {
-                                                epPage = pageIndex + 1
-                                            }
-                                        }
-                                    )
-                                    // 末集直达：几百集的剧不用一路翻到底
-                                    TvPillButton(
-                                        text = "末集",
-                                        primary = false,
-                                        modifier = pageFocus,
-                                        onClick = {
-                                            epPage = totalPages - 1
-                                        }
-                                    )
-                                }
-                            }
-
                             if (isEmbySource) {
                                 // Emby：横向剧照货架，遥控左右浏览。单行 LazyRow 宽度有界、
                                 // 卡片固定宽 + 16:9 定高，不会触发网格那种双向无限约束崩溃。
@@ -1265,14 +1217,15 @@ fun TvDetailScreen(
                                             modifier = Modifier.width(EMBY_CARD_WIDTH)
                                                 .then(publishStand(cellTarget, "ep${ep.id}")),
                                             focusRequester = cellTarget,
-                                            // 单行货架：每格上键都回翻页行 / 控制条（没有就展开按钮，再没有才播放）
-                                            focusUp = if (hasPageRow) pageFocusRequester
-                                                else if (hasControlAnchor) controlsFocusRequester
+                                            // 单行货架：每格上键都回控制条（没有就展开按钮，再没有才播放）
+                                            focusUp = if (hasControlAnchor) controlsFocusRequester
                                                 else if (descTruncated) descFocusRequester
                                                 else playFocusRequester,
-                                            // 每格下键都落主演头像行；没有主演就留在原地
-                                            focusDown = if (hasCast) castFocusRequesters.first()
+                                            // 每格下键先落翻页行（多页时它在货架与主演之间），再往下是主演头像行
+                                            focusDown = if (hasPageRow) pageFocusRequester
+                                                else if (hasCast) castFocusRequesters.first()
                                                 else FocusRequester.Cancel,
+                                            onFocused = { if (it) focusedEpId = ep.id },
                                             onClick = {
                                                 TvNavHistory.playedEpisodeId = ep.id
                                                 onPlay(ep.id)
@@ -1315,16 +1268,17 @@ fun TvDetailScreen(
                                             modifier = Modifier.weight(1f).then(publishStand(cellTarget, "ep${ep.id}")),
                                             // 首行第一格挂焦点器，「选择剧集」与换季/翻页后直接落这里
                                             focusRequester = cellTarget,
-                                            // 首行再按上：回翻页行 / 控制条（没有就回展开按钮，再没有才回播放）
+                                            // 首行再按上：回控制条（没有就回展开按钮，再没有才回播放）
                                             focusUp = if (rowIdx == 0) {
-                                                if (hasPageRow) pageFocusRequester
-                                                else if (hasControlAnchor) controlsFocusRequester
+                                                if (hasControlAnchor) controlsFocusRequester
                                                 else if (descTruncated) descFocusRequester
                                                 else playFocusRequester
                                             } else null,
-                                            // 末行再按下：落到选集下面的主演头像行；没有主演就留在原地
+                                            // 末行再按下：先落翻页行（多页时它在网格与主演之间），再往下是主演
                                             focusDown = if (rowIdx == epRows.lastIndex) {
-                                                if (hasCast) castFocusRequesters.first() else FocusRequester.Cancel
+                                                if (hasPageRow) pageFocusRequester
+                                                else if (hasCast) castFocusRequesters.first()
+                                                else FocusRequester.Cancel
                                             } else null,
                                             onClick = {
                                                 TvNavHistory.playedEpisodeId = ep.id
@@ -1338,6 +1292,55 @@ fun TvDetailScreen(
                                 }
                             }
                             }
+
+                            // ---------- 翻页行：剧集网格右下角 ----------
+                            // 选集区的最后一层：网格末行 ↓ 进这里，↑ 回末行格，↓ 再往主演。
+                            // 窄按钮（Sm 档）、纯文字，页码夹在两颗中间。
+                            if (hasPageRow) {
+                                Row(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                                ) {
+                                    val pageFocus = Modifier.focusProperties {
+                                        // ↑ 回网格末行最后一格（首帧网格还没组合时回落首格）
+                                        up = lastCellRequester.value ?: firstEpFocusRequester
+                                        down = if (hasCast) castFocusRequesters.first()
+                                            else FocusRequester.Cancel
+                                    }.then(publishStand(pageFocusRequester, "page"))
+                                    // 锚点挂首颗：上下键进这一行都落在「上一页」
+                                    TvPillButton(
+                                        text = "上一页",
+                                        primary = false,
+                                        size = TvButtonSize.Sm,
+                                        modifier = pageFocus.focusRequester(pageFocusRequester),
+                                        onClick = {
+                                            if (pageIndex > 0) {
+                                                epPage = pageIndex - 1
+                                            }
+                                        }
+                                    )
+                                    Text(
+                                        "${pageIndex + 1} / $totalPages",
+                                        color = Color.White.copy(alpha = 0.55f),
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    TvPillButton(
+                                        text = "下一页",
+                                        primary = false,
+                                        size = TvButtonSize.Sm,
+                                        modifier = pageFocus,
+                                        onClick = {
+                                            if (pageIndex < totalPages - 1) {
+                                                epPage = pageIndex + 1
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+
                         } else if (!loading && item.kind == MediaKind.SERIES) {
                             // 剧集但分集为空：加载失败时给用户一个明确提示，而不是一块空白
                             TvEmptyState(
@@ -1349,7 +1352,8 @@ fun TvDetailScreen(
 
                         // ---------- 主演：排在选集之后 ----------
                         // 原来夹在简介与选集之间，主页选集前总要先路过一排头像；
-                        // 挪到选集下面后它是整页最后一层：选集末行按下即落到这里。
+                        // 挪到选集下面后选集末行按下即落到这里。Emby 有媒体流信息时
+                        // 再往下还有一站视频信息面板，没有则主演收尾。
                         if (hasCast) {
                             Spacer(Modifier.height(12.dp))
                             Text(
@@ -1363,6 +1367,19 @@ fun TvDetailScreen(
                                 requesters = castFocusRequesters,
                                 focusUp = castUpTarget,
                                 focusDown = castDownTarget
+                            )
+                        }
+
+                        // ---------- 视频信息：Emby 分集媒体流参数，整页最后一层 ----------
+                        // 电视没有自由滚动：焦点走不到的内容等于看不到，所以面板自己是一站
+                        // （主演 ↓ 落这里），而不是挂在主演下面的只读死区。
+                        if (episodeMediaInfo != null && infoEpisode != null) {
+                            Spacer(Modifier.height(16.dp))
+                            TvEpisodeMediaInfoPanel(
+                                info = episodeMediaInfo,
+                                episode = infoEpisode,
+                                focusRequester = mediaInfoFocusRequester,
+                                focusUp = if (hasCast) castFocusRequesters.first() else castUpTarget
                             )
                         }
                     }
@@ -1437,16 +1454,27 @@ private fun TvSkipIntroDialog(
                     style = MaterialTheme.typography.titleMedium,
                     color = TvText.Title
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    presets.forEachIndexed { i, (ms, label) ->
-                        TvPillButton(
-                            text = label,
-                            primary = currentMs == ms,
-                            modifier = Modifier.weight(1f).then(
-                                if (i == focusIndex) Modifier.focusRequester(firstFocus) else Modifier
-                            ),
-                            onClick = { onPick(ms) }
-                        )
+                // 7 颗档位挤一行时 each 只分到 ~60dp，Md 档左右内边距就吃 40dp，文字被裁。
+                // 改 4 列两行 + Sm 档：电视每颗 ~115dp、窄屏 ~69dp，「180s」也放得下。
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    var presetIndex = 0
+                    presets.chunked(4).forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            row.forEach { (ms, label) ->
+                                val i = presetIndex++
+                                TvPillButton(
+                                    text = label,
+                                    primary = currentMs == ms,
+                                    size = TvButtonSize.Sm,
+                                    modifier = Modifier.weight(1f).then(
+                                        if (i == focusIndex) Modifier.focusRequester(firstFocus) else Modifier
+                                    ),
+                                    onClick = { onPick(ms) }
+                                )
+                            }
+                            // 末行不足补等宽空位，两行列宽对齐
+                            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                        }
                     }
                 }
                 Row(
@@ -1745,10 +1773,13 @@ private fun TvEpisodeCard(
     focusUp: FocusRequester? = null,
     /** 末行再按下时的行为；FocusRequester.Cancel = 留在原地 */
     focusDown: FocusRequester? = null,
+    /** 焦点进入/离开回调（Emby 货架用它驱动视频信息面板跟焦） */
+    onFocused: ((Boolean) -> Unit)? = null,
     onClick: () -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    LaunchedEffect(focused) { onFocused?.invoke(focused) }
 
     val label = episode.episodeLabel()
     val watched = episode.positionMs > 5_000L
@@ -1876,5 +1907,238 @@ private fun FormatBadgesRow(
             TextBadge(label, bg, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.2.sp)
         }
     }
+}
+
+/**
+ * Emby 分集媒体流信息面板（横排两行，铺满整宽，整页最后一层）。
+ *
+ * 无底无边：直接铺在详情页环境渐层上，与简介/主演同口径 ——
+ * 黑卡版本在渐层上像一块贴上去的补丁，已摘。
+ * 第一行：视频一条线（分辨率大字 + 像素 + 编码/HDR/位深胶囊）接竖分隔线，
+ * 右侧文件四项（容器/体积/总码率/时长）铺满剩余宽度；第二行：音轨横铺。
+ * 数据来自进详情时分集请求顺带取回的 MediaSources/MediaStreams，无需播放。
+ *
+ * 焦点：面板自己是整页最后一站（主演 ↓ 落这里、↑ 回主演）。电视没有自由滚动，
+ * 挂在主演下面的只读死区永远滚不到。焦点描边左右各画到内容外 12dp（落进页边距），
+ * 文字仍与上方主演标题同一条页面网格。
+ */
+@Composable
+private fun TvEpisodeMediaInfoPanel(
+    info: EmbyClient.MediaInfo,
+    episode: MediaEntity,
+    focusRequester: FocusRequester,
+    focusUp: FocusRequester
+) {
+    val epTag = if (episode.episode > 0) "第 ${episode.episode} 集" else episode.episodeLabel()
+    val headSub = if (episode.title.isNotBlank() && episode.title != epTag) "$epTag · ${episode.title}" else epTag
+
+    val videoSub = listOfNotNull(
+        fmtFrameRate(info.frameRate).takeIf { it.isNotBlank() },
+        fmtMediaBitrate(info.videoBitrate).takeIf { it.isNotBlank() }
+    ).joinToString(" · ")
+    val hasVideoLine = info.resolution.isNotBlank() || info.width > 0 ||
+        info.videoCodec.isNotBlank() || info.hdr.isNotBlank() || info.bitDepth > 0
+
+    val interaction = remember { MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier
+                .requiredWidth(maxWidth + 24.dp)
+                .offset(x = (-12).dp)
+                .focusProperties {
+                    up = focusUp
+                    down = FocusRequester.Cancel
+                }
+                .focusRequester(focusRequester)
+                .focusable(interactionSource = interaction)
+                .tvFocusRing(focused)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+                // 头：分区标题 + 当前集 + 帧率码率 + 来源说明
+                // 帧率/码率放头排右侧：880dp 内容宽下第一行放不下「视频一条线 + 文件四项 + 子行」，
+                // 头排是唯一常年有余量的横排，放这里不挤任何一组。
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "视频信息",
+                        color = TvText.Muted,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        headSub,
+                        color = TvText.Meta,
+                        fontSize = 13.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (videoSub.isNotBlank()) {
+                        Spacer(Modifier.width(12.dp))
+                        Text(videoSub, color = TvText.Meta, fontSize = 12.sp, maxLines = 1)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text("来自 Emby 媒体流 · 无需播放", color = TvText.Muted, fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(10.dp))
+
+                // 第一行：视频一条线 + 文件四项
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    if (hasVideoLine) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("视频", color = TvText.Meta, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+                            if (info.resolution.isNotBlank()) {
+                                Text(info.resolution, color = TvText.Title, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
+                            }
+                            if (info.width > 0 && info.height > 0) {
+                                Text("${info.width} × ${info.height}", color = TvText.Body, fontSize = 13.sp)
+                            }
+                            if (info.videoCodec.isNotBlank() || info.hdr.isNotBlank() || info.bitDepth > 0) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    if (info.videoCodec.isNotBlank()) MediaInfoChip(info.videoCodec)
+                                    // Dolby Vision 全名 97dp，会把第一行挤溢出；胶囊用行业通用短标 DV
+                                    if (info.hdr.isNotBlank()) MediaInfoChip(if (info.hdr == "Dolby Vision") "DV" else info.hdr)
+                                    if (info.bitDepth > 0) MediaInfoChip("${info.bitDepth}bit")
+                                }
+                            }
+                        }
+                        Box(Modifier.width(1.dp).height(30.dp).background(Edge.Hairline))
+                    }
+                    Row(
+                        Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        if (info.container.isNotBlank()) MediaInfoKv("容器", info.container)
+                        if (info.sizeBytes > 0) MediaInfoKv("体积", fmtMediaSize(info.sizeBytes))
+                        if (info.totalBitrate > 0) MediaInfoKv("总码率", fmtMediaBitrate(info.totalBitrate))
+                        val dur = if (info.durationMs > 0) info.durationMs else episode.durationMs
+                        if (dur > 0) MediaInfoKv("时长", fmtMediaDuration(dur))
+                    }
+                }
+
+                // 第二行：音轨横铺（最多展示 3 条，总数在标签里）
+                if (info.audioTracks.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp))
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Edge.Hairline))
+                    Spacer(Modifier.height(12.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Text(
+                            "音频 · ${info.audioTracks.size} 条",
+                            color = TvText.Meta,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            letterSpacing = 1.sp
+                        )
+                        info.audioTracks.take(3).forEachIndexed { idx, track ->
+                            if (idx > 0) Box(Modifier.width(1.dp).height(24.dp).background(Edge.Hairline))
+                            Row(
+                                Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    track.language.ifBlank { "音轨 ${idx + 1}" },
+                                    color = TvText.Section,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                if (track.isDefault) {
+                                    Text("默认", color = TvText.Muted, fontSize = 11.sp)
+                                }
+                                val spec = listOfNotNull(
+                                    track.codec.takeIf { it.isNotBlank() },
+                                    track.channels.takeIf { it.isNotBlank() },
+                                    "Atmos".takeIf { track.atmos },
+                                    fmtSampleRate(track.sampleRate).takeIf { it.isNotBlank() },
+                                    fmtMediaBitrate(track.bitrate).takeIf { it.isNotBlank() }
+                                ).joinToString(" · ")
+                                if (spec.isNotBlank()) {
+                                    Text(
+                                        spec,
+                                        color = TvText.Meta,
+                                        fontSize = 12.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaInfoChip(text: String) {
+    Text(
+        text,
+        color = TvText.Section,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .clip(Radius.Sm)
+            .background(Color.White.copy(alpha = 0.08f))
+            .border(1.dp, Edge.Hairline, Radius.Sm)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+    )
+}
+
+@Composable
+private fun MediaInfoKv(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label, color = TvText.Meta, fontSize = 12.sp, maxLines = 1)
+        Text(value, color = TvText.Section, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+private fun fmtMediaSize(bytes: Long): String = when {
+    bytes >= 1_073_741_824L -> String.format(java.util.Locale.US, "%.2f GB", bytes / 1_073_741_824.0)
+    bytes >= 1_048_576L -> String.format(java.util.Locale.US, "%.0f MB", bytes / 1_048_576.0)
+    bytes > 0 -> String.format(java.util.Locale.US, "%.0f KB", bytes / 1024.0)
+    else -> ""
+}
+
+private fun fmtMediaBitrate(bps: Long): String = when {
+    bps >= 1_000_000L -> String.format(java.util.Locale.US, "%.1f Mbps", bps / 1_000_000.0)
+    bps > 0 -> "${bps / 1000} kbps"
+    else -> ""
+}
+
+private fun fmtMediaDuration(ms: Long): String {
+    if (ms <= 0) return ""
+    val totalSec = ms / 1000
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return if (h > 0) String.format(java.util.Locale.US, "%d:%02d:%02d", h, m, s)
+    else String.format(java.util.Locale.US, "%d:%02d", m, s)
+}
+
+private fun fmtFrameRate(fps: Double): String {
+    if (fps <= 0) return ""
+    val r = Math.round(fps * 1000) / 1000.0
+    val num = if (r == Math.floor(r)) r.toInt().toString()
+    else String.format(java.util.Locale.US, "%.3f", r).trimEnd('0').trimEnd('.')
+    return "$num fps"
+}
+
+private fun fmtSampleRate(hz: Int): String {
+    if (hz <= 0) return ""
+    val k = hz / 1000.0
+    val num = if (k == Math.floor(k)) k.toInt().toString()
+    else String.format(java.util.Locale.US, "%.1f", k)
+    return "$num kHz"
 }
 

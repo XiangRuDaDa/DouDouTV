@@ -821,8 +821,11 @@ class TvBoxClient(
     }
 
     /**
-     * 若 url 是本地代理转发地址（http://127.0.0.1:port/xxx?url=<CDN_URL>），
-     * 提取并返回真实 CDN 直链；否则原样返回。
+     * 本地代理转发地址（http://127.0.0.1:port/xxx?url=<CDN_URL>）一律原样播，不解包。
+     *
+     * 解包等于绕开壳里的 Go 多线程代理自己单连接直下：金山云那条夸克边缘按单连接限速
+     * （实测 105~128KB/s，同片同边缘 OK影视 16 连接约 3.2MB/s），只有并发能破。
+     * 缓存这一层若探测失败会自行 exclude 退回裸 OkHttp，见 StreamSpaceDataSource。
      */
     private fun unwrapLocalProxyUrl(url: String): String {
         if (!url.startsWith("http://127.0.0.1:") && !url.startsWith("http://localhost:")) {
@@ -832,8 +835,7 @@ class TvBoxClient(
             val uri = android.net.Uri.parse(url)
             val cdnUrl = uri.getQueryParameter("url")
             if (cdnUrl.isNullOrBlank()) {
-                // 本地代理形态但没带 url 参数：整条视频流都会经 127.0.0.1 中转，
-                // 单连接吞吐受代理本身限制 —— 网盘播放慢的第一嫌疑，必须留痕。
+                // 本地代理形态但没带 url 参数：拿不到真实直链，只能整条经 127.0.0.1 中转，留痕。
                 Log.w("SpiderProxy", "本地代理地址无 url 参数，播放器将直连 127.0.0.1：$url")
                 url
             } else if (android.net.Uri.parse(cdnUrl).path?.let {
@@ -848,10 +850,10 @@ class TvBoxClient(
             } else {
                 Log.w(
                     "SpiderProxy",
-                    "已从本地代理地址解出真实直链：${uri.host}:${uri.port}${uri.path} → " +
+                    "保留本地代理转发（多线程下载）：${uri.host}:${uri.port}${uri.path} → " +
                         android.net.Uri.parse(cdnUrl).host
                 )
-                cdnUrl
+                url
             }
         }.getOrDefault(url)
     }

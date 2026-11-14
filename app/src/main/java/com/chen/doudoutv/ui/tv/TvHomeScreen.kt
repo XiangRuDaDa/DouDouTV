@@ -1,5 +1,8 @@
 package com.chen.doudoutv.ui.tv
 
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Shader
 import android.os.SystemClock
 import android.view.KeyEvent
 import androidx.compose.animation.AnimatedContent
@@ -66,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.FocusState
 import androidx.compose.ui.focus.focusRequester
@@ -73,7 +77,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -82,6 +88,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -101,9 +108,11 @@ import com.chen.doudoutv.ui.ReturnSpot
 import com.chen.doudoutv.ui.StandTarget
 import com.chen.doudoutv.ui.PrecomposeWindow
 import com.chen.doudoutv.ui.cardStand
+import com.chen.doudoutv.ui.components.GradientBake
 import com.chen.doudoutv.ui.components.PosterArt
 import com.chen.doudoutv.ui.components.PosterFallback
 import com.chen.doudoutv.ui.components.ShimmerCard
+import com.chen.doudoutv.ui.components.argbWithAlpha
 import com.chen.doudoutv.ui.components.continueTitle
 import com.chen.doudoutv.ui.components.episodeLabel
 import com.chen.doudoutv.ui.listState
@@ -743,29 +752,42 @@ internal const val HERO_DWELL_SECONDS = 9f
 @Composable
 internal fun TvHeroSeamFade(ambient: Color, modifier: Modifier = Modifier) {
     val blended = rememberAmbientBlend(ambient)
+    val bake = remember { GradientBake() }
     Box(
         modifier
             .fillMaxWidth()
             // 只有一条很薄的落色带就够了：Hero 底部自己有纵向渐隐叠上去，
             // 再给 10dp 条带显得 Hero 和下面的「继续观看」之间空一大片
             .height(4.dp)
-            .drawBehind {
+            .drawWithCache {
                 val seam = heroLandingColor(blended())
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colorStops = arrayOf(
-                            0f to seam,
-                            0.10f to seam.copy(alpha = 0.80f),
-                            0.28f to seam.copy(alpha = 0.52f),
-                            0.50f to seam.copy(alpha = 0.28f),
-                            0.72f to seam.copy(alpha = 0.10f),
-                            1f to seam.copy(alpha = 0f)
-                        ),
-                        startY = 0f,
-                        endY = size.height + SEAM_FADE_DEPTH.toPx()
-                    ),
-                    size = Size(size.width, size.height + SEAM_FADE_DEPTH.toPx())
-                )
+                val argb = seam.toArgb()
+                val w = size.width
+                val total = size.height + SEAM_FADE_DEPTH.toPx()
+                val img = bake.image(w, total, seam) { cv ->
+                    cv.drawRect(
+                        0f, 0f, w, total,
+                        Paint().apply {
+                            shader = LinearGradient(
+                                0f, 0f, 0f, total,
+                                intArrayOf(
+                                    argb,
+                                    argbWithAlpha(argb, 0.80f),
+                                    argbWithAlpha(argb, 0.52f),
+                                    argbWithAlpha(argb, 0.28f),
+                                    argbWithAlpha(argb, 0.10f),
+                                    argbWithAlpha(argb, 0f)
+                                ),
+                                floatArrayOf(0f, 0.10f, 0.28f, 0.50f, 0.72f, 1f),
+                                Shader.TileMode.CLAMP
+                            )
+                        }
+                    )
+                }
+                val dst = IntSize(w.toInt(), total.toInt())
+                onDrawBehind {
+                    drawImage(img, dstSize = dst, filterQuality = FilterQuality.Low)
+                }
             }
     )
 }
@@ -907,19 +929,12 @@ internal fun TvHero(
             )
         }
 
-        // 渐变遮罩 —— remember 缓存避免每次重绘都重建 Brush
-        val horizVignette = remember {
-            Brush.horizontalGradient(
-                0f to Color.Black.copy(alpha = 0.88f),
-                0.45f to Color.Black.copy(alpha = 0.40f),
-                1f to Color.Transparent
-            )
-        }
-        // 纵向渐隐的终点色跟着底图走，所以不能像横向那样在组合期把 Brush 算死：
+        // 渐变遮罩：横向压暗 + 纵向着陆色渐隐，两层烘成一张图一次画完（见 [HeroOverlayBake]）。
+        // 纵向渐隐的终点色跟着底图走，所以不能在组合期把颜色算死：
         // 换页时底图淡入 600ms，着陆色要同一路混过去，否则那条带子会在中途硬跳一次色。
         // 暗化的起点从 0.28 后移到 0.45：原来画面刚过中线就开始压黑，整块下半截糊成一片，
         // 看着不像渐隐而像被截断。中段（0.45~0.82）只铺到四成透明度，画面还认得出；
-        // 左半边另有 horizVignette 的 0.88 黑压着，两片叠加后标题/按钮的对比度不受影响。
+        // 左半边另有横向 0.88 黑压着，两片叠加后标题/按钮的对比度不受影响。
         // 底边最后 3% 必须走满不透明：这里差一点都藏不住。上一版把底边留在 0.92，
         // 让底图自己的下边缘透出 8%（红绸那种亮部就是十几二十个单位的台阶），
         // 横贯整宽的一条亮线，肉眼读出来就是「海报下方那条边」——过渡做得再长也白搭。
@@ -928,22 +943,55 @@ internal fun TvHero(
         // 色相来自底图下缘、亮度只比页面底色高一档，TvHeroSeamFade 顶边取同一个值来接，接缝照样隐形。
         // 取不到色（黑白灰底图或加载失败）时它退回纯 Bg，画出来和改造前一模一样。
         val blended = rememberAmbientBlend(ambient)
-        Box(Modifier.fillMaxSize().background(horizVignette))
+        val overlayBake = remember { GradientBake() }
         Box(
             Modifier
                 .fillMaxSize()
-                .drawBehind {
+                // drawWithCache 订阅缓存块里读到的 state：着陆色混色的 600ms 里逐帧重烘，
+                // 稳态下一帧也不重烘，只把上一张图再铺一次。
+                .drawWithCache {
+                    val w = size.width
+                    val h = size.height
                     val landing = heroLandingColor(blended())
-                    drawRect(
-                        Brush.verticalGradient(
-                            0.45f to Color.Transparent,
-                            0.66f to landing.copy(alpha = 0.14f),
-                            0.82f to landing.copy(alpha = 0.42f),
-                            0.92f to landing.copy(alpha = 0.82f),
-                            0.97f to landing.copy(alpha = 0.98f),
-                            1f to landing
+                    val argb = landing.toArgb()
+                    val overlay = overlayBake.image(w, h, landing) { cv ->
+                        cv.drawRect(
+                            0f, 0f, w, h,
+                            Paint().apply {
+                                shader = LinearGradient(
+                                    0f, 0f, w, 0f,
+                                    intArrayOf(0xE0000000.toInt(), 0x66000000, 0x00000000),
+                                    floatArrayOf(0f, 0.45f, 1f),
+                                    Shader.TileMode.CLAMP
+                                )
+                            }
                         )
-                    )
+                        cv.drawRect(
+                            0f, 0f, w, h,
+                            Paint().apply {
+                                shader = LinearGradient(
+                                    0f, 0f, 0f, h,
+                                    intArrayOf(
+                                        0x00000000,
+                                        argbWithAlpha(argb, 0.14f),
+                                        argbWithAlpha(argb, 0.42f),
+                                        argbWithAlpha(argb, 0.82f),
+                                        argbWithAlpha(argb, 0.98f),
+                                        argb
+                                    ),
+                                    floatArrayOf(0.45f, 0.66f, 0.82f, 0.92f, 0.97f, 1f),
+                                    Shader.TileMode.CLAMP
+                                )
+                            }
+                        )
+                        // 底边必须走满不透明，差一点就会让底图下边缘透出来、横贯整宽一条亮线。
+                        // 烘焙图最后一行放大后正好是 4px，比原来的收尾还宽一点，接缝只会更严实。
+                        cv.drawRect(0f, h - 4f, w, h, Paint().apply { color = argb })
+                    }
+                    val dst = IntSize(w.toInt(), h.toInt())
+                    onDrawBehind {
+                        drawImage(overlay, dstSize = dst, filterQuality = FilterQuality.Low)
+                    }
                 }
         )
 

@@ -89,6 +89,7 @@ import com.chen.doudoutv.ui.theme.Motion
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
@@ -236,7 +237,7 @@ fun DetailScreen(
             // 躺在表里的数据一起藏了，关着开关进详情页会退回源站那张豆瓣图。
             // mediaId 传下去：拿到结果后回填 media 行并打上 scrapedAt
             tmdb = runCatching {
-                vm.tmdbScrape(m.title, m.year, m.kind, id)
+                vm.tmdbScrape(m.title, m.year, m.kind, id, m.genres)
             }.getOrNull()
 
             if (m.kind == MediaKind.SERIES) {
@@ -285,6 +286,14 @@ fun DetailScreen(
             }
         }
         loading = false
+    }
+
+    // 与 TV 端同口径：播放器「设片头」写的是壳行，而回前台这页不会重跑加载链，
+    // 胶囊会停在进页时的旧值。回前台时把当前展示的这一行重读一次。
+    LifecycleResumeEffect(media?.id) {
+        val id = media?.id
+        if (id != null) scope.launch { vm.mediaOf(id)?.let { media = it } }
+        onPauseOrDispose { }
     }
 
     // 取色：用 Coil ImageLoader 直接解码海报 bitmap（比 AsyncImage.onSuccess 里取 drawable 更可靠）。

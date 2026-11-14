@@ -250,9 +250,9 @@ fun TvSettingsScreen(
                     ) {
                         Text(
                             "设置",
-                            style = MaterialTheme.typography.headlineMedium,
+                            style = MaterialTheme.typography.headlineSmall,
                             color = TvText.Title,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.SemiBold
                         )
                         Spacer(Modifier.height(12.dp))
                         Row(
@@ -279,8 +279,7 @@ fun TvSettingsScreen(
                 Modifier
                     .width(300.dp)
                     .fillMaxHeight()
-                    .background(Brush.verticalGradient(listOf(Color(0xFF141414), Color(0xFF101010))))
-                    .padding(start = 16.dp, end = 16.dp, top = 26.dp, bottom = 20.dp)
+                    .padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 20.dp)
                     // 返回键交回顶栏齿轮键只挂在左栏这一列：它和右栏是兄弟节点，
                     // 焦点在右栏时这条预览键链根本不经过左栏，右栏自己的返回（退出到左栏）先吃掉。
                     // 挂到外层 Row 会因为 onPreviewKeyEvent 自顶向下预览，抢在右栏之前把返回吃掉。
@@ -288,7 +287,7 @@ fun TvSettingsScreen(
             ) {
                 Column(
                     Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(7.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     titles.forEachIndexed { i, title ->
                         TvSettingsRailItem(
@@ -351,20 +350,20 @@ fun TvSettingsScreen(
                                 Modifier.focusRequester(paneFirstFocus).focusable()
                             else Modifier
                         )
-                        .padding(horizontal = if (wide) 40.dp else 20.dp, vertical = if (wide) 28.dp else 16.dp)
+                        .padding(horizontal = if (wide) 36.dp else 20.dp, vertical = if (wide) 24.dp else 16.dp)
                 ) {
                     Text(
                         titles[selected],
-                        style = MaterialTheme.typography.displaySmall,
+                        style = MaterialTheme.typography.headlineSmall,
                         color = TvText.Title,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.SemiBold
                     )
-                    Spacer(Modifier.height(8.dp))
-                    Text(descs[selected], style = MaterialTheme.typography.bodyMedium, color = TvText.Meta)
-                    Spacer(Modifier.height(20.dp))
+                    Spacer(Modifier.height(6.dp))
+                    Text(descs[selected], style = MaterialTheme.typography.bodySmall, color = TvText.Meta)
+                    Spacer(Modifier.height(18.dp))
                     Column(
                         Modifier.widthIn(max = 720.dp),
-                        verticalArrangement = Arrangement.spacedBy(11.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         when (selected) {
                             0 -> {
@@ -542,7 +541,7 @@ fun TvSettingsScreen(
                             else -> {
                                 Text(
                                     APP_VERSION_LABEL,
-                                    style = MaterialTheme.typography.titleMedium,
+                                    style = MaterialTheme.typography.titleSmall,
                                     color = TvText.Title,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -715,13 +714,13 @@ private fun <T> TvChoiceDialog(
                     .clip(Radius.Lg)
                     .background(AppColors.SurfaceHi)
                     .border(1.dp, Edge.HairlineStrong, Radius.Lg)
-                    .padding(22.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         title,
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.titleMedium,
                         color = TvText.Title,
                         modifier = Modifier.weight(1f)
                     )
@@ -735,7 +734,7 @@ private fun <T> TvChoiceDialog(
                 options.chunked(perRow).forEach { row ->
                     Row(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         row.forEach { option ->
                             val i = index++
@@ -774,7 +773,7 @@ private fun TvChoiceOption(
     val focused by interaction.collectIsFocusedAsState()
     Column(
         modifier
-            .height(if (dot != null) 96.dp else 60.dp)
+            .height(if (dot != null) 84.dp else 52.dp)
             .clip(Radius.Md)
             .background(
                 when {
@@ -792,27 +791,27 @@ private fun TvChoiceOption(
                 }
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(horizontal = 6.dp, vertical = 6.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
         if (dot != null) {
             Box(
                 Modifier
-                    .size(38.dp)
+                    .size(32.dp)
                     .clip(CircleShape)
                     .background(dot)
                     .then(if (selected) Modifier.border(2.dp, Color.White, CircleShape) else Modifier),
                 contentAlignment = Alignment.Center
             ) {
                 if (selected) {
-                    Icon(Icons.Outlined.Check, null, tint = Color.White, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Outlined.Check, null, tint = Color.White, modifier = Modifier.size(16.dp))
                 }
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(
                 text,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
                 color = if (focused || selected) TvText.Title else TvText.Body,
                 fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Medium,
                 maxLines = 1,
@@ -822,7 +821,7 @@ private fun TvChoiceOption(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text,
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                     color = if (focused || selected) TvText.Title else TvText.Body,
                     fontWeight = if (focused || selected) FontWeight.SemiBold else FontWeight.Medium,
                     maxLines = 1
@@ -885,19 +884,19 @@ private fun TvSettingsRailItem(
                     onEnter(); true
                 } else false
             }
-            .padding(horizontal = 14.dp, vertical = 13.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             icon, null,
             tint = if (active) AppColors.BrandSoft else TvText.Meta,
-            modifier = Modifier.size(22.dp)
+            modifier = Modifier.size(20.dp)
         )
-        Spacer(Modifier.width(13.dp))
+        Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(
                 title,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleSmall,
                 color = if (active) TvText.Title else TvText.Body,
                 fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium
             )
@@ -909,7 +908,7 @@ private fun TvSettingsRailItem(
             )
         }
         if (focused) {
-            Icon(Icons.Outlined.ChevronRight, null, tint = TvText.Title, modifier = Modifier.size(18.dp))
+            Icon(Icons.Outlined.ChevronRight, null, tint = TvText.Title, modifier = Modifier.size(16.dp))
         }
     }
 }
@@ -932,11 +931,11 @@ private fun TvSettingsTab(title: String, active: Boolean, onClick: () -> Unit) {
                 else Modifier.border(1.dp, Edge.Hairline, Radius.Pill)
             )
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 10.dp)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
     ) {
         Text(
             title,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleSmall,
             color = if (active) TvText.Title else TvText.Body,
             fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
             maxLines = 1
@@ -953,16 +952,16 @@ private fun TvAboutBlock(title: String, body: String) {
             .clip(Radius.Md)
             .background(AppColors.Surface)
             .border(1.dp, Edge.Hairline, Radius.Md)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp)
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Text(
             title,
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.titleSmall,
             color = AppColors.BrandSoft,
             fontWeight = FontWeight.SemiBold
         )
-        Text(body, style = MaterialTheme.typography.bodyMedium, color = TvText.Body)
+        Text(body, style = MaterialTheme.typography.bodySmall, color = TvText.Body)
     }
 }
 
@@ -973,16 +972,16 @@ private fun TvStatRow(label: String, value: String) {
         Modifier
             .fillMaxWidth()
             .background(AppColors.SurfaceHi, Radius.Md)
-            .padding(horizontal = 18.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             label,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             color = TvText.Body,
             modifier = Modifier.weight(1f)
         )
-        Text(value, style = MaterialTheme.typography.bodyLarge, color = TvText.Title)
+        Text(value, style = MaterialTheme.typography.bodyMedium, color = TvText.Title)
     }
 }
 
@@ -1018,11 +1017,11 @@ private fun TvSettingRow(
                 enabled = onClick != null,
                 onClick = { onClick?.invoke() }
             )
-            .padding(horizontal = 18.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = TvText.Title)
+            Text(title, style = MaterialTheme.typography.titleSmall, color = TvText.Title)
             if (hint != null) {
                 Text(
                     hint,
@@ -1034,7 +1033,7 @@ private fun TvSettingRow(
         if (value != null) {
             Text(
                 value,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelMedium,
                 color = if (accent) AppColors.Brand else TvText.Body
             )
         }
@@ -1057,7 +1056,7 @@ private fun TvSettingAction(
         Column(Modifier.weight(1f)) {
             Text(
                 title,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleSmall,
                 color = TvText.Title
             )
             if (hint != null) {
@@ -1087,8 +1086,8 @@ private fun TvSettingField(
     placeholder: String,
     onValueChange: (String) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label, style = MaterialTheme.typography.titleMedium, color = TvText.Title)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(label, style = MaterialTheme.typography.titleSmall, color = TvText.Title)
         OutlinedTextField(
             value = value,
             onValueChange = onValueChange,
@@ -1097,7 +1096,7 @@ private fun TvSettingField(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(60.dp),
-            textStyle = MaterialTheme.typography.bodyLarge.copy(color = TvText.Title),
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = TvText.Title),
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Text,
                 imeAction = ImeAction.Done

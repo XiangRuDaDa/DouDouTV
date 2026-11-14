@@ -89,9 +89,11 @@ import com.chen.doudoutv.ui.theme.Radius
 import com.chen.doudoutv.ui.tv.tvFocusRing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 
@@ -632,6 +634,8 @@ class TvPlayerActivity : ComponentActivity() {
             p.setPlaybackSpeed(speed)
             p.playWhenReady = true
         }
+        // Emby 会话从这里挂上（内部等装载完成才报起播）；非 Emby 源起播返回 false 直接退出
+        startEmbySession()
     }
 
     /**
@@ -718,8 +722,8 @@ class TvPlayerActivity : ComponentActivity() {
      */
     private fun switchEpisode(ep: MediaEntity) {
         saveProgress(force = true)
-        // 上一集就此收尾：回传一次服务端，之后不再管它
-        reportToEmby()
+        // 上一集就此收尾：停播报告发给服务端，之后不再管它
+        stopEmbySession()
         player?.pause()
         current = ep
         // 新一集的死链重试闸门重新打开
@@ -761,12 +765,43 @@ class TvPlayerActivity : ComponentActivity() {
     }
 
     /**
-     * 离开这条播放时把进度回传服务端（Emby 源）。
-     *
-     * 只在「离开」这一刻发一次：切集、退出播放器。播放期间不回传 ——
-     * 服务端只需要知道「最后看到哪」，中途心跳对续播没有任何用处。
+     * Emby 播放会话：起播报一次，播放中每 60 秒报一次进度，离开时停播收尾。
+     * 服务端的观看时长统计只认这套会话上报；非 Emby 条目起播返回 false，循环直接退出。
      */
-    private fun reportToEmby() {
+    private var embyJob: Job? = null
+    private var embySessionId = 0L
+
+    private fun startEmbySession() {
+        val item = current ?: return
+        // 死链重试等场景会带着同一集再进一次 play()：会话还活着就不重建
+        if (embyJob?.isActive == true && embySessionId == item.id) return
+        embyJob?.cancel()
+        embySessionId = item.id
+        embyJob = workScope.launch {
+            // 装载完成才报起播：装载期间播放器还挂着上一集，报出去会串集
+            while (loading) {
+                delay(500L)
+                if (current?.id != item.id) return@launch
+            }
+            val p = player ?: return@launch
+            if (!repo.reportPlaybackStartToEmby(item.id, p.currentPosition.coerceAtLeast(0L))) return@launch
+            while (isActive) {
+                delay(60_000L)
+                if (current?.id != item.id) break
+                if (loading) continue
+                val pp = player ?: break
+                repo.reportPlaybackProgressToEmby(item.id, pp.currentPosition.coerceAtLeast(0L), !pp.isPlaying)
+            }
+        }
+    }
+
+    /**
+     * 离开这条播放（切集 / 退出 / 退后台）：停掉心跳并发停播报告。
+     * 续播点与「已看」都由停播报告携带，不再单独写 UserData。
+     */
+    private fun stopEmbySession() {
+        embyJob?.cancel()
+        embyJob = null
         val item = current ?: return
         val p = player ?: return
         // 装载期间播放器还挂着上一集（或位置还没起来），这时报出去的是错的
@@ -774,8 +809,9 @@ class TvPlayerActivity : ComponentActivity() {
         val pos = p.currentPosition.coerceAtLeast(0L)
         if (pos <= 0L) return
         val dur = p.duration.takeIf { it > 0L } ?: 0L
+        // 独立 scope：onPause 之后紧跟 onDestroy 会取消 workScope，挂上面这笔停播就发不出去了
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            runCatching { repo.reportPlaybackToEmby(item.id, pos, dur) }
+            runCatching { repo.reportPlaybackStoppedToEmby(item.id, pos, dur) }
         }
     }
 
@@ -1025,11 +1061,17 @@ class TvPlayerActivity : ComponentActivity() {
         return true
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 从后台回来续上会话：onPause 已把旧会话停掉；首次进入时 current 还没就位则静默跳过
+        startEmbySession()
+    }
+
     override fun onPause() {
         super.onPause()
         saveProgress(force = true)
-        // 离开播放器这一刻回传一次服务端；onDestroy 之前一定先走 onPause，不重复报
-        reportToEmby()
+        // 离开播放器这一刻停播收尾；onDestroy 之前一定先走 onPause，不重复报
+        stopEmbySession()
     }
 
     override fun onDestroy() {

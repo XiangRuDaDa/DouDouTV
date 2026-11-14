@@ -62,6 +62,41 @@ class EmbyClient(
 
     data class Person(val name: String, val role: String, val imageUrl: String)
 
+    /** 一条音轨的展示参数（语言已译成中文名，未知语言回退服务端 Title） */
+    data class AudioTrack(
+        val language: String = "",
+        val codec: String = "",
+        /** 声道布局：2.0 / 5.1 / 7.1 */
+        val channels: String = "",
+        val sampleRate: Int = 0,
+        val bitrate: Long = 0L,
+        val atmos: Boolean = false,
+        val isDefault: Boolean = false
+    )
+
+    /**
+     * 单个条目的媒体流信息（分辨率 / 编码 / HDR / 码率 / 体积 / 音轨）。
+     * 只有请求带 MediaSources,MediaStreams 字段时才解析得出，否则为 null。
+     */
+    data class MediaInfo(
+        val container: String = "",
+        val sizeBytes: Long = 0L,
+        /** 总码率（bps） */
+        val totalBitrate: Long = 0L,
+        val durationMs: Long = 0L,
+        /** 4K / 1080p / 720p … */
+        val resolution: String = "",
+        val width: Int = 0,
+        val height: Int = 0,
+        val videoCodec: String = "",
+        val hdr: String = "",
+        val bitDepth: Int = 0,
+        val frameRate: Double = 0.0,
+        /** 视频流码率（bps） */
+        val videoBitrate: Long = 0L,
+        val audioTracks: List<AudioTrack> = emptyList()
+    )
+
     /**
      * 条目上的用户状态：续播点 / 已看 / 收藏 / 最后播放时间。
      *
@@ -97,7 +132,9 @@ class EmbyClient(
         /** 分集所属的剧名（服务端给的 SeriesName）：本地没有剧集壳时拿它当标题 */
         val seriesName: String = "",
         /** 该条目的用户状态 */
-        val userData: ItemUserData = ItemUserData()
+        val userData: ItemUserData = ItemUserData(),
+        /** 媒体流信息：仅当请求带 MediaSources,MediaStreams 字段时有值 */
+        val mediaInfo: MediaInfo? = null
     )
 
     /** 媒体库（CollectionFolder）：动态分类按库分区用。collectionType 如 movies / tvshows / playlists */
@@ -382,7 +419,7 @@ class EmbyClient(
             getJson(
                 "/Shows/$seriesId/Episodes",
                 mapOf(
-                    "Fields" to "Overview,RunTimeTicks,ProductionYear",
+                    "Fields" to "Overview,RunTimeTicks,ProductionYear,MediaSources,MediaStreams",
                     "EnableImageTypes" to "Primary",
                     "SortBy" to "ParentIndexNumber,IndexNumber"
                 )
@@ -565,6 +602,38 @@ class EmbyClient(
         sendJson("/Users/$uid/Items/$itemId/UserData", payload.toString())
     }
 
+    // ---------------- 播放会话上报：观看时长的来源 ----------------
+    //
+    // 服务端的「观看时长」统计只认播放会话（/Sessions/Playing*）：起播建会话、
+    // 播放中的 Progress 按位置差累计时长、停播收尾并写续播点。
+    // 只写 UserData 续播点不进这套统计 —— 那是「上次看到哪」，不是「看了多久」。
+
+    /** 起播上报：服务端从这里建立播放会话 */
+    suspend fun reportPlaybackStart(itemId: String, positionTicks: Long) = withContext(Dispatchers.IO) {
+        sendJson("/Sessions/Playing", sessionPayload(itemId, positionTicks, paused = false))
+    }
+
+    /** 播放中进度上报：服务端按它累计观看时长；暂停时置 IsPaused，暂停段不计时长 */
+    suspend fun reportPlaybackProgress(itemId: String, positionTicks: Long, paused: Boolean) =
+        withContext(Dispatchers.IO) {
+            sendJson("/Sessions/Playing/Progress", sessionPayload(itemId, positionTicks, paused))
+        }
+
+    /** 停播上报：写续播点；位置报到结尾时服务端按「看完」标记已看 */
+    suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long) = withContext(Dispatchers.IO) {
+        sendJson("/Sessions/Playing/Stopped", sessionPayload(itemId, positionTicks, paused = true))
+    }
+
+    private fun sessionPayload(itemId: String, positionTicks: Long, paused: Boolean): String =
+        JSONObject().apply {
+            put("ItemId", itemId)
+            put("PositionTicks", positionTicks)
+            put("CanSeek", true)
+            put("IsPaused", paused)
+            put("IsMuted", false)
+            put("PlayMethod", "DirectPlay")
+        }.toString()
+
     /** 标记已看（POST /Users/{uid}/PlayedItems/{id}） */
     suspend fun markPlayed(itemId: String, positionTicks: Long = 0L, datePlayed: String? = null) =
         withContext(Dispatchers.IO) {
@@ -698,8 +767,139 @@ class EmbyClient(
             parentIndexNumber = o.optInt("ParentIndexNumber"),
             seriesId = o.optString("SeriesId"),
             seriesName = o.optString("SeriesName"),
-            userData = userData
+            userData = userData,
+            mediaInfo = parseMediaInfo(o)
         )
+    }
+
+    /**
+     * 媒体流信息解析：与 [fetchItemDetail] 同一套分辨率 / 编码 / HDR 判定规则，
+     * 另取码率、位深、帧率与全部音轨。列表同步不带这些字段，返回 null、零开销。
+     */
+    private fun parseMediaInfo(o: JSONObject): MediaInfo? {
+        val source = o.optJSONArray("MediaSources")?.optJSONObject(0)
+        // 老版本 Emby 顶层 MediaStreams，新版本 MediaSources[].MediaStreams[]
+        val streams = source?.optJSONArray("MediaStreams") ?: o.optJSONArray("MediaStreams")
+        if (source == null && streams == null) return null
+
+        var width = 0
+        var height = 0
+        var resolution = ""
+        var codec = ""
+        var hdr = ""
+        var bitDepth = 0
+        var frameRate = 0.0
+        var videoBitrate = 0L
+        val audio = mutableListOf<AudioTrack>()
+
+        if (streams != null) {
+            for (i in 0 until streams.length()) {
+                val s = streams.optJSONObject(i) ?: continue
+                when (s.optString("Type")) {
+                    "Video" -> {
+                        if (width > 0) continue // 只取主视频流
+                        width = s.optInt("Width", 0)
+                        height = s.optInt("Height", 0)
+                        resolution = when {
+                            height >= 2160 -> "4K"
+                            height >= 1080 -> "1080p"
+                            height >= 720 -> "720p"
+                            height > 0 -> "${height}p"
+                            else -> ""
+                        }
+                        codec = when (s.optString("Codec").uppercase()) {
+                            "H264", "AVC" -> "H.264"
+                            "HEVC", "H265" -> "HEVC"
+                            "AV1" -> "AV1"
+                            "VP9" -> "VP9"
+                            "VP8" -> "VP8"
+                            "H263" -> "H.263"
+                            else -> s.optString("Codec")
+                        }
+                        val title = s.optString("Title")
+                        val hdrMode = s.optString("HdrMode")
+                        val colorTransfer = s.optString("ColorTransfer")
+                        val videoRange = s.optString("VideoRange")
+                        hdr = when {
+                            title.contains("Dolby Vision", ignoreCase = true) -> "Dolby Vision"
+                            hdrMode.contains("DolbyVision", ignoreCase = true) -> "Dolby Vision"
+                            title.contains("HDR10+", ignoreCase = true) -> "HDR10+"
+                            title.contains("HDR10", ignoreCase = true) -> "HDR10"
+                            hdrMode.contains("HDR10", ignoreCase = true) -> "HDR10"
+                            colorTransfer.contains("SMPTE2084", ignoreCase = true) -> "HDR10"
+                            colorTransfer.contains("ARIB", ignoreCase = true) -> "HLG"
+                            videoRange.equals("HDR", ignoreCase = true) -> "HDR"
+                            videoRange.equals("DOVI", ignoreCase = true) -> "Dolby Vision"
+                            else -> ""
+                        }
+                        bitDepth = s.optInt("BitDepth", 0)
+                        frameRate = s.optDouble("RealFrameRate", 0.0).takeIf { it > 0 }
+                            ?: s.optDouble("AverageFrameRate", 0.0)
+                        videoBitrate = s.optLong("BitRate", 0L)
+                    }
+                    "Audio" -> {
+                        val channels = s.optInt("Channels", 0)
+                        val layout = s.optString("ChannelLayout")
+                        val ch = when {
+                            layout.matches(Regex("\\d+\\.\\d+")) -> layout
+                            layout.equals("stereo", ignoreCase = true) -> "2.0"
+                            layout.equals("mono", ignoreCase = true) -> "1.0"
+                            channels == 6 -> "5.1"
+                            channels == 8 -> "7.1"
+                            channels == 2 -> "2.0"
+                            channels == 1 -> "1.0"
+                            channels > 0 -> "${channels}ch"
+                            else -> ""
+                        }
+                        val title = s.optString("Title")
+                        audio += AudioTrack(
+                            language = audioLanguageName(s.optString("Language")).ifBlank { title },
+                            codec = s.optString("Codec").uppercase(),
+                            channels = ch,
+                            sampleRate = s.optInt("SampleRate", 0),
+                            bitrate = s.optLong("BitRate", 0L),
+                            atmos = title.contains("Atmos", ignoreCase = true),
+                            isDefault = s.optBoolean("IsDefault", false)
+                        )
+                    }
+                }
+            }
+        }
+
+        return MediaInfo(
+            container = source?.optString("Container").orEmpty().uppercase(),
+            sizeBytes = source?.optLong("Size", 0L)?.takeIf { it > 0 } ?: o.optLong("Size", 0L),
+            totalBitrate = source?.optLong("Bitrate", 0L) ?: 0L,
+            durationMs = (source?.optLong("RunTimeTicks", 0L)?.takeIf { it > 0 }
+                ?: o.optLong("RunTimeTicks", 0L)) / 10_000L,
+            resolution = resolution,
+            width = width,
+            height = height,
+            videoCodec = codec,
+            hdr = hdr,
+            bitDepth = bitDepth,
+            frameRate = frameRate,
+            videoBitrate = videoBitrate,
+            audioTracks = audio
+        )
+    }
+
+    /** ISO 639 语言码 → 中文名；未知码返回空串，由调用方回退 Title */
+    private fun audioLanguageName(code: String): String = when (code.lowercase()) {
+        "chi", "zho", "cmn" -> "国语"
+        "yue" -> "粤语"
+        "eng" -> "英语"
+        "jpn" -> "日语"
+        "kor" -> "韩语"
+        "fre", "fra" -> "法语"
+        "ger", "deu" -> "德语"
+        "spa" -> "西班牙语"
+        "rus" -> "俄语"
+        "ita" -> "意大利语"
+        "por" -> "葡萄牙语"
+        "tha" -> "泰语"
+        "vie" -> "越南语"
+        else -> ""
     }
 
     /**

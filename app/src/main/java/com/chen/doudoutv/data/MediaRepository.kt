@@ -10,6 +10,7 @@ import com.chen.doudoutv.data.db.ScrapedMetaEntity
 import com.chen.doudoutv.data.db.toPinyinInitials
 import com.chen.doudoutv.data.douban.DoubanClient
 import com.chen.doudoutv.data.emby.EmbyClient
+import com.chen.doudoutv.data.emby.EmbyMediaCache
 import com.chen.doudoutv.data.format.FormatProbe
 import com.chen.doudoutv.data.model.MediaEntity
 import com.chen.doudoutv.data.model.MediaKind
@@ -19,6 +20,7 @@ import com.chen.doudoutv.data.scrape.ScrapeEngine
 import com.chen.doudoutv.data.scrape.ScrapeStrategy
 import com.chen.doudoutv.data.tvbox.TvBoxClient
 import com.chen.doudoutv.data.tvbox.TvBoxClient.TvBoxSite
+import com.chen.doudoutv.data.tmdb.ScrapeCategory
 import com.chen.doudoutv.data.tmdb.ScrapeTitle
 import com.chen.doudoutv.data.tmdb.TmdbCache
 import com.chen.doudoutv.data.tmdb.TmdbClient
@@ -653,9 +655,18 @@ class MediaRepository(private val context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    /** 刮削表里的那一行：先按「清洗名 + 年份 + 类型」精确找，再退到不限年份的同名条目 */
-    private suspend fun storedMeta(exactKey: String, titleKey: String): ScrapedMetaEntity? =
-        runCatching { metaDao.byKey(exactKey) ?: metaDao.byTitleKey(titleKey) }.getOrNull()
+    /**
+     * 刮削表里的那一行：先带类别后缀的键、再老键、最后不限年份同名回落。
+     * 每一步都按动画/剧类别过滤：同名动画与剧版在 year=0 时键完全相同，
+     * 不过滤就会让剧版复用动画版先刮的那行。
+     */
+    private suspend fun storedMeta(exactKey: String, titleKey: String, want: Int): ScrapedMetaEntity? =
+        runCatching {
+            val hit = listOf(metaDao.byKey("$exactKey#c$want"), metaDao.byKey(exactKey))
+                .firstOrNull { it != null && ScrapeCategory.compatible(want, ScrapeCategory.ofStored(it.genres)) }
+            hit ?: metaDao.byTitleKeyAll(titleKey)
+                .firstOrNull { ScrapeCategory.compatible(want, ScrapeCategory.ofStored(it.genres)) }
+        }.getOrNull()
 
     /**
      * 只读 scraped_meta 表：不看联网刮削开关、不发请求、也不回填 media 行。
@@ -664,18 +675,20 @@ class MediaRepository(private val context: Context) {
      * 于是已经刮过的片子每次进页面都会先上一帧源站老图。这一层给首帧一个抢跑的入口：
      * 表里有就省掉整段慢链的时间，没有就返回 null，仍然由 [tmdbScrape] 那条完整链负责。
      */
-    suspend fun scrapedMetaOf(title: String, year: Int, kind: String): TmdbClient.ScrapeResult? =
+    suspend fun scrapedMetaOf(title: String, year: Int, kind: String, genres: String = ""): TmdbClient.ScrapeResult? =
         withContext(Dispatchers.IO) {
             val query = ScrapeTitle.forSearch(title)
+            val want = ScrapeCategory.ofSource(genres)
             val meta = storedMeta(
                 TmdbCache.keyOf(query, year, kind),
-                TmdbCache.titleKeyOf(query, kind)
+                TmdbCache.titleKeyOf(query, kind),
+                want
             )
             // 取证：和下面 tmdbScrape 那行成对看 —— 这行是抢跑，「刮削」那行是链末端，
             // 两行的时间差就是老海报在屏上多停的那段。没命中也要打，否则分不清「跑了没图」和「根本没跑」。
             Log.i(
                 "ScrapeDiag",
-                "表读 \"$title\" → \"$query\" year=$year kind=$kind " +
+                "表读 \"$title\" → \"$query\" year=$year kind=$kind 分类=$want " +
                     (if (meta == null) "未命中"
                 else "命中 背景=${if (meta.backdropUrl.isBlank()) "空" else "有"} " +
                     "海报=${if (meta.posterUrl.isBlank()) "空" else "有"}")
@@ -702,7 +715,8 @@ class MediaRepository(private val context: Context) {
         title: String,
         year: Int,
         kind: String,
-        mediaId: Long = 0L
+        mediaId: Long = 0L,
+        genres: String = ""
     ): TmdbClient.ScrapeResult? = withContext(Dispatchers.IO) {
         // 清洗放在这里，而不是 TmdbClient 里面：缓存键、表键和检索词必须用同一个串，
         // 否则「（臻彩）」和「[4K]」两种后缀会算成两条，换条线路重进就白刮一次。
@@ -710,17 +724,21 @@ class MediaRepository(private val context: Context) {
         val query = ScrapeTitle.forSearch(title)
         val exactKey = TmdbCache.keyOf(query, year, kind)
         val titleKey = TmdbCache.titleKeyOf(query, kind)
+        // 分类消歧：同名动画与真人剧（凡人修仙传）年份又常为 0，只靠片名+年份必然撞键。
+        // 写入键带上分类后缀，动画与真人各占一行，谁也不能覆盖谁；读取侧按兼容性过滤。
+        val want = ScrapeCategory.ofSource(genres)
+        val fetchKey = "$exactKey#c$want"
 
         // 第一步永远先查表。命中就不联网，也让「跨重启、跨来源、跨线路」三部同名片子只刮一次，
         // 顺带让演职员、标语这些 media 行装不下的字段有了落点。
-        val stored = storedMeta(exactKey, titleKey)
+        val stored = storedMeta(exactKey, titleKey, want)
         val result = stored?.toScrapeResult() ?: run {
             // 表里没有才轮到开关和凭据。用 resolve() 现算而不是读 ScrapeStrategy.engine 那份快照：
             // 用户在设置页刚填完密钥、没重启退回来也该立刻能刮。
             if (ScrapeStrategy.resolve() != ScrapeEngine.TMDB) return@withContext null
             runCatching {
-                TmdbCache.getOrFetch(exactKey) {
-                    TmdbClient(Prefs.tmdbApiKey, Prefs.tmdbReadToken).scrape(query, year, kind)
+                TmdbCache.getOrFetch(fetchKey) {
+                    TmdbClient(Prefs.tmdbApiKey, Prefs.tmdbReadToken).scrape(query, year, kind, want)
                 }
             }.getOrNull() ?: return@withContext null
         }
@@ -730,7 +748,7 @@ class MediaRepository(private val context: Context) {
         // 数据是表里拿的还是刚联网刮的、刮到的这份到底有没有海报
         Log.i(
             "ScrapeDiag",
-            "刮削 \"$title\" → \"$query\" year=$year kind=$kind " +
+            "刮削 \"$title\" → \"$query\" year=$year kind=$kind 分类=$want " +
                 "来源=${if (stored != null) "表" else "联网"} " +
                 "海报=${if (result.posterUrl.isBlank()) "空" else "有"} " +
                 "简介=${if (result.overview.isBlank()) "空" else "有"} " +
@@ -743,7 +761,7 @@ class MediaRepository(private val context: Context) {
             runCatching {
                 metaDao.upsert(
                     ScrapedMetaEntity(
-                        scrapeKey = exactKey,
+                        scrapeKey = fetchKey,
                         titleKey = titleKey,
                         queryTitle = query,
                         kind = kind,
@@ -1240,6 +1258,10 @@ class MediaRepository(private val context: Context) {
 
             val client = EmbyClient(source.location, source.token, source.userId)
             val episodes = client.fetchEpisodes(itemId)
+            // 媒体流信息（分辨率/码率/音轨）不落库：写进内存缓存供详情页面板按 remoteId 读
+            EmbyMediaCache.putAll(episodes.mapNotNull { ep ->
+                ep.mediaInfo?.let { "emby:${source.id}:${ep.id}" to it }
+            }.toMap())
             // 分集一次批量写：一部 100 集的剧之前要 300 次 DAO 往返，详情页就在这几秒里等
             // mergeUserState = true：手机端说了算 —— 本地已有的进度/收藏不被服务端覆盖，
             // 本地没有的（网页端看过的）才把服务端的填进来
@@ -1617,28 +1639,45 @@ class MediaRepository(private val context: Context) {
     // ---------------- Emby 回传：观看进度 / 已看 / 收藏 ----------------
 
     /**
-     * 离开这条播放时回传一次服务端。
-     *
-     * 一次请求搞定：没看完就把位置写回「续播点」，看完九成就直接标「已看」。
-     * 播放期间不回传 —— 服务端只关心「你最后看到哪」，中途的心跳纯属浪费请求。
-     * 回传失败不打断播放：这是锦上添花，不能因为它把正在看的片子搞挂。
+     * 起播上报（Emby 源）。非 Emby 条目返回 false，播放器据此决定要不要开进度心跳。
+     * 服务端从这条请求建立播放会话，观看时长统计由此开始累计。
      */
-    suspend fun reportPlaybackToEmby(mediaId: Long, positionMs: Long, durationMs: Long) {
+    suspend fun reportPlaybackStartToEmby(mediaId: Long, positionMs: Long): Boolean {
+        val row = mediaDao.get(mediaId) ?: return false
+        val itemId = embyItemIdOf(row) ?: return false
+        val client = embyClientOf(row) ?: return false
+        return runCatching {
+            client.reportPlaybackStart(itemId, positionMs * 10_000L)
+            true
+        }.onFailure {
+            Log.w("EmbyReport", "起播上报失败：${it.message}")
+        }.getOrDefault(false)
+    }
+
+    /** 播放中进度上报：服务端按位置差累计观看时长，暂停段不计 */
+    suspend fun reportPlaybackProgressToEmby(mediaId: Long, positionMs: Long, paused: Boolean) {
         val row = mediaDao.get(mediaId) ?: return
         val itemId = embyItemIdOf(row) ?: return
         val client = embyClientOf(row) ?: return
+        runCatching { client.reportPlaybackProgress(itemId, positionMs * 10_000L, paused) }
+            .onFailure { Log.w("EmbyReport", "进度上报失败：${it.message}") }
+    }
 
-        val ticks = positionMs * 10_000L
+    /**
+     * 停播上报：替代旧的「离开时写一次 UserData / PlayedItems」。
+     * 续播点由停播报告携带，服务端自己写入，不再单独发 UserData。
+     * 看完九成按全长报位置：服务端按「看到结尾」标已看 ——
+     * 保留旧 markPlayed 的九成口径，又省掉一次 PlayedItems 请求。
+     * 上报失败不打断播放：这是锦上添花，不能因为它把正在看的片子搞挂。
+     */
+    suspend fun reportPlaybackStoppedToEmby(mediaId: Long, positionMs: Long, durationMs: Long) {
+        val row = mediaDao.get(mediaId) ?: return
+        val itemId = embyItemIdOf(row) ?: return
+        val client = embyClientOf(row) ?: return
         val watched = durationMs > 0L && positionMs >= durationMs * 9 / 10
-        runCatching {
-            if (watched) {
-                client.markPlayed(itemId, ticks)
-            } else {
-                client.updatePlaybackPosition(itemId, ticks)
-            }
-        }.onFailure {
-            Log.w("EmbyReport", "进度回传失败：${it.message}")
-        }
+        val ticks = (if (watched) durationMs else positionMs) * 10_000L
+        runCatching { client.reportPlaybackStopped(itemId, ticks) }
+            .onFailure { Log.w("EmbyReport", "停播上报失败：${it.message}") }
     }
 
     /** 收藏同步回服务端；非 Emby 条目直接跳过 */
